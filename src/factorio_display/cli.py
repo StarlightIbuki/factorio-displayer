@@ -77,6 +77,20 @@ def main() -> None:
         action="store_true",
         help="Share one combinator across non-adjacent identical frames (SHA-256 hash)",
     )
+    enc.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="Total display width in tiles (overrides config). When larger than the unit width, "
+        "the display is split into multiple display units each with their own parallel memory.",
+    )
+    enc.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help="Total display height in tiles (overrides config). When larger than the unit height, "
+        "the display is split into multiple display units each with their own parallel memory.",
+    )
 
     # ---- frame (single image) ----------------------------------------------
     frm = subparsers.add_parser(
@@ -95,6 +109,18 @@ def main() -> None:
         default=0,
         help="Source frame rate for the single frame (1–60, 0 = default 60)",
     )
+    frm.add_argument(
+        "--width",
+        type=int,
+        default=None,
+        help="Total display width in tiles (overrides config).",
+    )
+    frm.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help="Total display height in tiles (overrides config).",
+    )
 
     args = parser.parse_args()
 
@@ -108,11 +134,13 @@ def main() -> None:
         bp = encode_auto(
             args.input_path, args.name, args.skip, args.fps,
             args.adaptive, args.threshold, args.deduplicate,
+            args.width, args.height,
         )
         sys.stdout.write(bp)
 
     elif args.command == "frame":
-        bp = encode_frame(args.image, args.name, args.fps)
+        bp = encode_frame(args.image, args.name, args.fps,
+                          total_width=args.width, total_height=args.height)
         sys.stdout.write(bp)
 
 
