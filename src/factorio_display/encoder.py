@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import argparse
 import math
-from pathlib import Path
+import os
 import sys
+import pickle
+import hashlib
+import concurrent.futures
+from pathlib import Path
 from typing import Iterator
 
 import cv2
@@ -21,6 +25,24 @@ from draftsman.entity import DeciderCombinator, new_entity
 
 from .config_loader import load_config
 from .signal_mapping import SignalMapping
+
+class _DummyTqdm:
+    """Graceful fallback if tqdm is not installed."""
+    def __init__(self, iterable=None, *args, **kwargs):
+        self.iterable = iterable or []
+    def __iter__(self):
+        yield from self.iterable
+    def update(self, n=1):
+        pass
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = _DummyTqdm
 
 
 # ---------------------------------------------------------------------------
@@ -43,42 +65,14 @@ def encode_frames(
     mapping: SignalMapping | None = None,
     total_width: int | None = None,
     total_height: int | None = None,
+    expected_frames: int | None = None,
 ) -> str:
     """Encode an iterable of RGB ``(H, W, 3)`` uint8 frames into a blueprint.
 
     Each frame becomes one decider-combinator whose outputs hold the pixel
     colour data directly.  Combinators are chained for sequential playback
     via a clock signal.
-
-    Parameters
-    ----------
-    rgb_frames : Iterator[np.ndarray]
-        Iterator yielding RGB images as ``(H, W, 3)`` uint8 numpy arrays.
-    output_name : str
-        Label for the generated blueprint.
-    fps : int
-        **Source** frame rate (1–60).  1 s = 60 Factorio ticks, so a 30 fps
-        source gets ``round(60/30) = 2`` ticks per frame.  When ``0``
-        (default) it falls back to 60 — the outer encoder functions
-        auto-detect the real value from media metadata.
-    adaptive : bool
-        Drop near-duplicate *consecutive* frames whose pixel difference falls
-        below *threshold*; their tick budget merges into the preceding frame.
-    threshold : float
-        Normalised mean-absolute-difference cutoff (0.0–1.0) for adaptive
-        dropping.  Only used when *adaptive* is *True*.
-    deduplicate : bool
-        When *True*, frames with identical content (even non-adjacent) share
-        a single combinator whose conditions cover all their tick ranges via
-        OR logic.  Frame identity is determined by a SHA-256 hash of the
-        resized pixel buffer.
-    config : dict | None
-        Parsed TOML config.  Loaded from ``config.toml`` when *None*.
-    mapping : SignalMapping | None
-        Pre-built signal mapping.  Reconstructed from the manifest when *None*.
     """
-    import hashlib
-
     if fps == 0:
         fps = 60
     fps = max(1, min(fps, 60))
@@ -100,57 +94,99 @@ def encode_frames(
     clock = config["reserved"]["clock_signal"]
 
     # ==================================================================
-    # Single-unit path (backward-compatible fast path)
+    # Phase 0 & 1: Parallel Resizing, Adaptive Dropping, and Caching
     # ==================================================================
-    if num_units == 1:
-        accum = 0.0
-        w, h = unit_w, unit_h
+    
+    # Generate a unique cache name based on the output intent and parameters
+    safe_name = hashlib.md5(f"{output_name}_{total_w}_{total_h}".encode('utf-8')).hexdigest()[:8]
+    cache_file = Path(f".encode_cache_{safe_name}.pkl")
+    loaded_from_cache = False
 
-        current_tick = 1
-        prev_resized: np.ndarray | None = None
-        carry_ticks = 0
-        frame_entries: list[tuple[np.ndarray, int, int]] = []
+    kept_frames: list[np.ndarray] = []
+    tick_ranges: list[tuple[int, int]] = []
+    current_tick = 1
 
-        for rgb in rgb_frames:
-            resized = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA)
+    if cache_file.exists():
+        sys.stderr.write(f"Found cache {cache_file}, loading intermediate results...\n")
+        try:
+            with open(cache_file, "rb") as f:
+                cache_data = pickle.load(f)
+                kept_frames = cache_data["frames"]
+                tick_ranges = cache_data["ticks"]
+                current_tick = cache_data.get("current_tick", 1)
+            loaded_from_cache = True
+        except Exception as e:
+            sys.stderr.write(f"Failed to load cache: {e}\n")
+
+    if not loaded_from_cache:
+        sys.stderr.write("Decoding, resizing, and processing frames...\n")
+        
+        def _resize_task(rgb):
+            resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
             if resized.dtype != np.uint8:
                 resized = resized.astype(np.uint8)
+            return resized
 
-            accum += ticks_float
-            needed = max(1, int(accum + 1e-9))
-            accum -= needed
+        accum = 0.0
+        carry_ticks = 0
+        prev_resized: np.ndarray | None = None
 
-            if adaptive and prev_resized is not None:
-                if _frame_diff(prev_resized, resized) < threshold:
-                    carry_ticks += needed
-                    prev_resized = resized
-                    continue
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = executor.map(_resize_task, rgb_frames)
+            
+            for resized in tqdm(futures, total=expected_frames, desc="Resizing & Dropping", unit="frame"):
+                accum += ticks_float
+                needed = max(1, int(accum + 1e-9))
+                accum -= needed
 
-            prev_resized = resized.copy()
-            frame_ticks = needed + carry_ticks
-            carry_ticks = 0
+                if adaptive and prev_resized is not None:
+                    if _frame_diff(prev_resized, resized) < threshold:
+                        carry_ticks += needed
+                        prev_resized = resized
+                        continue
 
-            tick_end = current_tick + frame_ticks - 1
-            frame_entries.append((resized, current_tick, tick_end))
-            current_tick += frame_ticks
+                if adaptive:
+                    prev_resized = resized.copy()
+                frame_ticks = needed + carry_ticks
+                carry_ticks = 0
 
-        total_input = len(frame_entries)
-        if total_input == 0:
-            sys.stderr.write("No frames to encode.\n")
-            return ""
+                tick_ranges.append((current_tick, current_tick + frame_ticks - 1))
+                kept_frames.append(resized)
+                current_tick += frame_ticks
+
+        try:
+            with open(cache_file, "wb") as f:
+                pickle.dump({
+                    "frames": kept_frames,
+                    "ticks": tick_ranges,
+                    "current_tick": current_tick
+                }, f)
+        except Exception as e:
+            sys.stderr.write(f"Failed to write cache: {e}\n")
+
+    total_input = len(kept_frames)
+    if total_input == 0:
+        sys.stderr.write("No frames to encode.\n")
+        return ""
+
+    # ==================================================================
+    # Single-unit path
+    # ==================================================================
+    if num_units == 1:
+        frame_entries = [(f, s, e) for f, (s, e) in zip(kept_frames, tick_ranges)]
 
         if deduplicate:
             seen: dict[str, tuple[np.ndarray, list[tuple[int, int]]]] = {}
             order: list[str] = []
-            for resized, start, end in frame_entries:
-                h = hashlib.sha256(resized.tobytes()).hexdigest()
-                if h not in seen:
-                    seen[h] = (resized, [])
-                    order.append(h)
-                seen[h][1].append((start, end))
-            unique_frames: list[tuple[np.ndarray, list[tuple[int, int]]]] = [
-                seen[h] for h in order
-            ]
+            with tqdm(total=len(frame_entries), desc="Deduplicating", unit="frame") as pbar:
+                for resized, start, end in frame_entries:
+                    h = hashlib.sha256(resized.tobytes()).hexdigest()
+                    if h not in seen:
+                        seen[h] = (resized, [])
+                        order.append(h)
+                    seen[h][1].append((start, end))
+                    pbar.update(1)
+            unique_frames = [seen[h] for h in order]
         else:
             unique_frames = [(resized, [(start, end)]) for resized, start, end in frame_entries]
 
@@ -162,62 +198,66 @@ def encode_frames(
         rows = (total + cols - 1) // cols
 
         dc_grid: dict[tuple[int, int], str] = {}
-        for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
-            idx = gate_num - 1
-            col = idx % cols
-            row = idx // cols
-            dc_id = f"gate_{gate_num}"
+        with tqdm(total=total, desc="Building blueprint", unit="frame") as pbar:
+            for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
+                idx = gate_num - 1
+                col = idx % cols
+                row = idx // cols
+                dc_id = f"gate_{gate_num}"
 
-            conditions: list = []
-            for start, end in ranges:
-                if start == end:
-                    conditions.append(
-                        DeciderCombinator.Condition(
-                            first_signal={"name": clock},
-                            comparator="=",
-                            constant=start,
+                conditions: list = []
+                for start, end in ranges:
+                    if start == end:
+                        conditions.append(
+                            DeciderCombinator.Condition(
+                                first_signal={"name": clock},
+                                comparator="=",
+                                constant=start,
+                            )
                         )
-                    )
-                else:
-                    conditions.append(
-                        DeciderCombinator.Condition(
-                            first_signal={"name": clock},
-                            comparator=">=",
-                            constant=start,
+                    else:
+                        conditions.append(
+                            DeciderCombinator.Condition(
+                                first_signal={"name": clock},
+                                comparator=">=",
+                                constant=start,
+                            )
                         )
-                    )
-                    conditions.append(
-                        DeciderCombinator.Condition(
-                            first_signal={"name": clock},
-                            comparator="<=",
-                            constant=end,
-                            compare_type="and",
+                        conditions.append(
+                            DeciderCombinator.Condition(
+                                first_signal={"name": clock},
+                                comparator="<=",
+                                constant=end,
+                                compare_type="and",
+                            )
                         )
-                    )
 
-            outputs: list = []
-            for (x, y), sig in mapping.iter_pixels():
-                r, g, b = resized[y, x]
-                color_int = (int(r) << 16) | (int(g) << 8) | int(b)
-                if color_int > 0:
-                    outputs.append(
-                        DeciderCombinator.Output(
-                            signal={"name": sig["name"], "quality": sig["quality"]},
-                            copy_count_from_input=False,
-                            constant=color_int,
+                outputs: list = []
+                for (x, y), sig in mapping.iter_pixels():
+                    r, g, b = resized[y, x]
+                    color_int = (int(r) << 16) | (int(g) << 8) | int(b)
+                    if color_int > 0:
+                        outputs.append(
+                            DeciderCombinator.Output(
+                                signal={"name": sig["name"], "quality": sig["quality"]},
+                                copy_count_from_input=False,
+                                constant=color_int,
+                            )
                         )
-                    )
 
-            dc = new_entity(
-                "decider-combinator",
-                id=dc_id,
-                tile_position=(col, row * 2),
-                direction=Direction.SOUTH,
-            )
-            dc.conditions = conditions
-            dc.outputs = outputs
-            blueprint.entities.append(dc)
-            dc_grid[(row, col)] = dc_id
+                dc = new_entity(
+                    "decider-combinator",
+                    id=dc_id,
+                    tile_position=(col, row * 2),
+                    direction=Direction.SOUTH,
+                )
+                dc.conditions = conditions
+                dc.outputs = outputs
+                blueprint.entities.append(dc)
+                dc_grid[(row, col)] = dc_id
+                
+                # Granular progression
+                pbar.update(1)
 
         prev_id: str | None = None
         for r in range(rows):
@@ -258,57 +298,12 @@ def encode_frames(
     # ==================================================================
     # Multi-unit path
     # ==================================================================
-    # Phase 0 — buffer all input frames at total resolution
-    all_frames: list[np.ndarray] = []
-    for rgb in rgb_frames:
-        resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
-        if resized.dtype != np.uint8:
-            resized = resized.astype(np.uint8)
-        all_frames.append(resized)
-
-    if not all_frames:
-        sys.stderr.write("No frames to encode.\n")
-        return ""
-
-    # Phase 1 — compute tick ranges via full-frame adaptive dropping
-    # (tick ranges must be consistent across all units)
-    accum = 0.0
-    carry_ticks = 0
-    prev_resized: np.ndarray | None = None
-    frame_ticks_list: list[int] = []
-    kept_frames: list[np.ndarray] = []
-
-    for resized in all_frames:
-        accum += ticks_float
-        needed = max(1, int(accum + 1e-9))
-        accum -= needed
-
-        if adaptive and prev_resized is not None:
-            if _frame_diff(prev_resized, resized) < threshold:
-                carry_ticks += needed
-                prev_resized = resized
-                continue
-
-        if adaptive:
-            prev_resized = resized.copy()
-        frame_ticks = needed + carry_ticks
-        carry_ticks = 0
-        frame_ticks_list.append(frame_ticks)
-        kept_frames.append(resized)
-
-    current_tick = 1
-    tick_ranges: list[tuple[int, int]] = []
-    for ft in frame_ticks_list:
-        tick_ranges.append((current_tick, current_tick + ft - 1))
-        current_tick += ft
-
-    total_input = len(kept_frames)
 
     # Phase 2 — split into per-unit regions
     unit_entries: list[list[tuple[np.ndarray, int, int]]] = [
         [] for _ in range(num_units)
     ]
-    for frame, (start, end) in zip(kept_frames, tick_ranges):
+    for frame, (start, end) in tqdm(zip(kept_frames, tick_ranges), total=len(kept_frames), desc="Splitting regions", unit="frame"):
         for ur in range(unit_rows):
             for uc in range(unit_cols):
                 ui = ur * unit_cols + uc
@@ -325,21 +320,27 @@ def encode_frames(
 
     # Phase 3 — deduplicate per unit
     unit_unique: list[list[tuple[np.ndarray, list[tuple[int, int]]]]] = []
-    for entries in unit_entries:
-        if deduplicate:
-            seen: dict[str, tuple[np.ndarray, list[tuple[int, int]]]] = {}
-            order: list[str] = []
-            for resized, start, end in entries:
-                h = hashlib.sha256(resized.tobytes()).hexdigest()
-                if h not in seen:
-                    seen[h] = (resized, [])
-                    order.append(h)
-                seen[h][1].append((start, end))
-            unit_unique.append([seen[h] for h in order])
-        else:
-            unit_unique.append(
-                [(resized, [(start, end)]) for resized, start, end in entries]
-            )
+    total_entries = sum(len(e) for e in unit_entries)
+    
+    with tqdm(total=total_entries, desc="Deduplicating", unit="frame") as pbar:
+        for entries in unit_entries:
+            if deduplicate:
+                seen: dict[str, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+                order: list[str] = []
+                for resized, start, end in entries:
+                    h = hashlib.sha256(resized.tobytes()).hexdigest()
+                    if h not in seen:
+                        seen[h] = (resized, [])
+                        order.append(h)
+                    seen[h][1].append((start, end))
+                    pbar.update(1)
+                unit_unique.append([seen[h] for h in order])
+            else:
+                current_unique = []
+                for resized, start, end in entries:
+                    current_unique.append((resized, [(start, end)]))
+                    pbar.update(1)
+                unit_unique.append(current_unique)
 
     # Phase 4 — build blueprint: per-unit grids, 2-tile margins, relay poles
     blueprint = Blueprint()
@@ -348,8 +349,6 @@ def encode_frames(
         f"({total_w}×{total_h}, {unit_cols}×{unit_rows} units)"
     )
 
-    # Compute per-unit grid dimensions, pad to fill the rectangle completely
-    # so the snake wiring never encounters gaps > 1 tile.
     unit_grids: list[tuple[int, int, int]] = []  # (padded_total, cols, rows)
     for ui, unique_frames in enumerate(unit_unique):
         t = len(unique_frames)
@@ -392,100 +391,98 @@ def encode_frames(
             cum_col += c + MARGIN
         cum_row += row_max_rows[ur] * 2 + MARGIN
 
-    # Track each unit's boundary combinators for direct green-wire hops.
     unit_top_left: dict[int, str] = {}
     unit_top_right: dict[int, str] = {}
     unit_bottom_right: dict[int, str] = {}
 
-    for ui, (unique_frames, (total, cols, rows)) in enumerate(
-        zip(unit_unique, unit_grids)
-    ):
-        ox, oy = unit_origins[ui]  # tile origin
-        dc_grid: dict[tuple[int, int], str] = {}
+    total_unique_frames = sum(len(uf) for uf in unit_unique)
+    with tqdm(total=total_unique_frames, desc="Building blueprints", unit="frame") as pbar:
+        for ui, (unique_frames, (total, cols, rows)) in enumerate(zip(unit_unique, unit_grids)):
+            ox, oy = unit_origins[ui]  # tile origin
+            dc_grid: dict[tuple[int, int], str] = {}
 
-        for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
-            idx = gate_num - 1
-            col = ox + (idx % cols)
-            row = oy + (idx // cols) * 2
-            dc_id = f"unit{ui}_gate_{gate_num}"
+            for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
+                idx = gate_num - 1
+                col = ox + (idx % cols)
+                row = oy + (idx // cols) * 2
+                dc_id = f"unit{ui}_gate_{gate_num}"
 
-            conditions: list = []
-            for start, end in ranges:
-                if start == end:
-                    conditions.append(
-                        DeciderCombinator.Condition(
-                            first_signal={"name": clock},
-                            comparator="=",
-                            constant=start,
+                conditions: list = []
+                for start, end in ranges:
+                    if start == end:
+                        conditions.append(
+                            DeciderCombinator.Condition(
+                                first_signal={"name": clock},
+                                comparator="=",
+                                constant=start,
+                            )
                         )
-                    )
-                else:
-                    conditions.append(
-                        DeciderCombinator.Condition(
-                            first_signal={"name": clock},
-                            comparator=">=",
-                            constant=start,
+                    else:
+                        conditions.append(
+                            DeciderCombinator.Condition(
+                                first_signal={"name": clock},
+                                comparator=">=",
+                                constant=start,
+                            )
                         )
-                    )
-                    conditions.append(
-                        DeciderCombinator.Condition(
-                            first_signal={"name": clock},
-                            comparator="<=",
-                            constant=end,
-                            compare_type="and",
+                        conditions.append(
+                            DeciderCombinator.Condition(
+                                first_signal={"name": clock},
+                                comparator="<=",
+                                constant=end,
+                                compare_type="and",
+                            )
                         )
-                    )
 
-            outputs: list = []
-            for (x, y), sig in mapping.iter_pixels():
-                r, g, b = resized[y, x]
-                color_int = (int(r) << 16) | (int(g) << 8) | int(b)
-                if color_int > 0:
-                    outputs.append(
-                        DeciderCombinator.Output(
-                            signal={"name": sig["name"], "quality": sig["quality"]},
-                            copy_count_from_input=False,
-                            constant=color_int,
+                outputs: list = []
+                for (x, y), sig in mapping.iter_pixels():
+                    r, g, b = resized[y, x]
+                    color_int = (int(r) << 16) | (int(g) << 8) | int(b)
+                    if color_int > 0:
+                        outputs.append(
+                            DeciderCombinator.Output(
+                                signal={"name": sig["name"], "quality": sig["quality"]},
+                                copy_count_from_input=False,
+                                constant=color_int,
+                            )
                         )
-                    )
 
-            dc = new_entity(
-                "decider-combinator",
-                id=dc_id,
-                tile_position=(col, row),
-                direction=Direction.SOUTH,
-            )
-            dc.conditions = conditions
-            dc.outputs = outputs
-            blueprint.entities.append(dc)
-            dc_grid[(idx // cols, idx % cols)] = dc_id
+                dc = new_entity(
+                    "decider-combinator",
+                    id=dc_id,
+                    tile_position=(col, row),
+                    direction=Direction.SOUTH,
+                )
+                dc.conditions = conditions
+                dc.outputs = outputs
+                blueprint.entities.append(dc)
+                dc_grid[(idx // cols, idx % cols)] = dc_id
+                
+                # Granular progression
+                pbar.update(1)
 
-        # ---- wire within this unit (green + red, same snake) ----------
-        prev_id: str | None = None
-        for r in range(rows):
-            col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-            for c in col_iter:
-                dc_id = dc_grid.get((r, c))
-                if dc_id is None:
-                    continue
-                if prev_id is not None:
-                    blueprint.add_circuit_connection(
-                        "green", prev_id, dc_id, side_1="input", side_2="input"
-                    )
-                    blueprint.add_circuit_connection(
-                        "red", prev_id, dc_id, side_1="output", side_2="output"
-                    )
-                prev_id = dc_id
+            # ---- wire within this unit (green + red, same snake) ----------
+            prev_id: str | None = None
+            for r in range(rows):
+                col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+                for c in col_iter:
+                    dc_id = dc_grid.get((r, c))
+                    if dc_id is None:
+                        continue
+                    if prev_id is not None:
+                        blueprint.add_circuit_connection(
+                            "green", prev_id, dc_id, side_1="input", side_2="input"
+                        )
+                        blueprint.add_circuit_connection(
+                            "red", prev_id, dc_id, side_1="output", side_2="output"
+                        )
+                    prev_id = dc_id
 
-        # Store boundary combinators for direct inter-unit green wiring.
-        # top-left: entry point. top-right: first row last col. bottom-right: last row last col.
-        unit_top_left[ui] = dc_grid[(0, 0)]
-        unit_top_right[ui] = dc_grid[(0, cols - 1)]
-        unit_bottom_right[ui] = dc_grid[(rows - 1, cols - 1)]
+            unit_top_left[ui] = dc_grid[(0, 0)]
+            unit_top_right[ui] = dc_grid[(0, cols - 1)]
+            unit_bottom_right[ui] = dc_grid[(rows - 1, cols - 1)]
 
     # ---- direct inter-unit green wiring (no poles) ------------------------
-    # Horizontal: connect left unit's top-right → right unit's top-left.
-    # Distance = MARGIN + 1 ≤ 3 tiles.
     for ur in range(unit_rows):
         for uc in range(unit_cols - 1):
             ui_left = ur * unit_cols + uc
@@ -495,9 +492,6 @@ def encode_frames(
                 side_1="input", side_2="input",
             )
 
-    # Vertical: connect upper unit's bottom-right → lower unit's top-right.
-    # Both at the same column within their respective grids → dx = 0.
-    # dy = margin_gap + 2*(max_rows - rows_upper + 0) … worst-case dy ≤ MARGIN*2 + 2 ≤ 6.
     for ur in range(unit_rows - 1):
         for uc in range(unit_cols):
             ui_top = ur * unit_cols + uc
@@ -508,13 +502,10 @@ def encode_frames(
                 side_1="input", side_2="input",
             )
 
-    # ==================================================================
-    # Summary
-    # ==================================================================
     total_ticks = current_tick - 1
     total_combinators = sum(len(uf) for uf in unit_unique)
     sys.stderr.write(
-        f"Encoded {total_input} frames over {total_ticks} ticks "
+        f"\nEncoded {total_input} frames over {total_ticks} ticks "
         f"→ {total_combinators} combinators across {num_units} display units "
         f"({unit_cols}×{unit_rows} grid, unit size {unit_w}×{unit_h}).\n"
     )
@@ -536,21 +527,19 @@ def encode_video(
     total_width: int | None = None,
     total_height: int | None = None,
 ) -> str:
-    """Encode a video file (``.mp4``, ``.avi``, ``.mov``, …).
-
-    *fps* is the source frame rate.  When ``0`` (default) it is
-    auto-detected from the video metadata.
-    """
+    """Encode a video file (``.mp4``, ``.avi``, ``.mov``, …)."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_path}")
 
-    # ---- auto-detect source FPS -------------------------------------------
     if fps == 0:
         detected = cap.get(cv2.CAP_PROP_FPS)
         fps = int(round(detected)) if detected and detected > 0 else 30
         fps = max(1, min(fps, 60))
         sys.stderr.write(f"Detected source FPS: {fps}\n")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    expected_frames = max(1, total_frames // fps_skip) if total_frames > 0 else None
 
     def _iter() -> Iterator[np.ndarray]:
         while True:
@@ -562,7 +551,8 @@ def encode_video(
 
     try:
         return encode_frames(_iter(), output_name, fps, adaptive, threshold, deduplicate,
-                              total_width=total_width, total_height=total_height)
+                              total_width=total_width, total_height=total_height,
+                              expected_frames=expected_frames)
     finally:
         cap.release()
 
@@ -578,20 +568,14 @@ def encode_gif(
     total_width: int | None = None,
     total_height: int | None = None,
 ) -> str:
-    """Encode an animated GIF.
-
-    *fps* is the source frame rate.  When ``0`` (default) it is derived
-    from the GIF's per-frame duration metadata.
-    """
+    """Encode an animated GIF."""
     from PIL import Image
 
     gif = Image.open(str(gif_path))
 
-    # ---- auto-detect source FPS from GIF frame duration --------------------
     if fps == 0:
-        duration = gif.info.get("duration", 0)  # ms per frame (global default)
+        duration = gif.info.get("duration", 0)
         if not duration:
-            # Try per-frame duration
             try:
                 gif.seek(0)
                 duration = gif.info.get("duration", 100)
@@ -599,6 +583,11 @@ def encode_gif(
                 duration = 100
         fps = max(1, min(60, round(1000 / duration))) if duration else 10
         sys.stderr.write(f"Detected source FPS: {fps} (from GIF)\n")
+
+    try:
+        expected_frames = max(1, getattr(gif, "n_frames", 1) // fps_skip)
+    except Exception:
+        expected_frames = None
 
     def _iter() -> Iterator[np.ndarray]:
         idx = 0
@@ -613,7 +602,8 @@ def encode_gif(
                 return
 
     return encode_frames(_iter(), output_name, fps, adaptive, threshold, deduplicate,
-                          total_width=total_width, total_height=total_height)
+                          total_width=total_width, total_height=total_height,
+                          expected_frames=expected_frames)
 
 
 def encode_png_series(
@@ -627,13 +617,11 @@ def encode_png_series(
     total_width: int | None = None,
     total_height: int | None = None,
 ) -> str:
-    """Encode a sequence of image files (PNG, JPEG, …).
-
-    *fps* is the source frame rate.  When ``0`` (default) it falls back
-    to 60 (PNG series carry no inherent timing metadata).
-    """
+    """Encode a sequence of image files (PNG, JPEG, …)."""
     if fps == 0:
         fps = 60
+
+    expected_frames = math.ceil(len(paths) / fps_skip)
 
     def _iter() -> Iterator[np.ndarray]:
         for i, p in enumerate(paths):
@@ -645,7 +633,8 @@ def encode_png_series(
             yield cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     return encode_frames(_iter(), output_name, fps, adaptive, threshold, deduplicate,
-                          total_width=total_width, total_height=total_height)
+                          total_width=total_width, total_height=total_height,
+                          expected_frames=expected_frames)
 
 
 def encode_frame(
@@ -683,16 +672,7 @@ def encode_auto(
     total_width: int | None = None,
     total_height: int | None = None,
 ) -> str:
-    """Auto-detect input type and call the appropriate encoder.
-
-    Detection rules
-    ---------------
-    * ``.mp4`` / ``.avi`` / ``.mov`` / ``.mkv`` / ``.webm`` → :func:`encode_video`
-    * ``.gif`` → :func:`encode_gif`
-    * Single image (``.png``, ``.jpg``, …) → :func:`encode_frame`
-    * Directory → glob ``*.png`` inside, call :func:`encode_png_series`
-    * Glob pattern (contains ``*`` or ``?``) → expand, call :func:`encode_png_series`
-    """
+    """Auto-detect input type and call the appropriate encoder."""
     path = Path(input_path)
     video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
     image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
@@ -705,7 +685,6 @@ def encode_auto(
         return encode_png_series(pngs, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                                   total_width=total_width, total_height=total_height)
 
-    # Glob patterns must be checked *before* extension matching
     if "*" in input_path or "?" in input_path:
         matches = sorted(Path().glob(input_path))
         if not matches:
@@ -721,13 +700,11 @@ def encode_auto(
                              total_width=total_width, total_height=total_height)
 
     if ext == ".gif":
-        # Check if animated or static
         from PIL import Image
         try:
             gif = Image.open(str(path))
             gif.seek(1)
         except EOFError:
-            # Static GIF → treat as single frame
             return encode_frame(input_path, output_name, fps, adaptive, threshold, deduplicate,
                                  total_width=total_width, total_height=total_height)
         return encode_gif(input_path, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
@@ -744,47 +721,74 @@ def encode_auto(
 
 
 # ---------------------------------------------------------------------------
-# Legacy CLI (kept for ``python -m factorio_display.encoder``)
+# Audio Decoder Blueprint Builder
 # ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(description="Convert media to Factorio Animation Memory")
-    parser.add_argument("input_path", help="Path to input file or directory")
-    parser.add_argument("--name", default="Animation Data", help="Name of the blueprint")
-    parser.add_argument("--skip", type=int, default=2, help="Read every Nth frame")
-    parser.add_argument(
-        "--fps", type=int, default=0,
-        help="Source frame rate (1–60).  0 = auto-detect from media metadata.",
-    )
-    parser.add_argument(
-        "--adaptive", action="store_true",
-        help="Drop near-duplicate frames to compress static sections",
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=0.03,
-        help="Similarity cutoff for adaptive mode (0.0–1.0, default: 0.03)",
-    )
-    parser.add_argument(
-        "--deduplicate", action="store_true",
-        help="Share one combinator across non-adjacent identical frames",
-    )
-    parser.add_argument(
-        "--width", type=int, default=None,
-        help="Total display width in tiles (overrides config).",
-    )
-    parser.add_argument(
-        "--height", type=int, default=None,
-        help="Total display height in tiles (overrides config).",
-    )
+def build_audio_decoder(
+    signals: list[str], 
+    clock_signal: str = "signal-clock", 
+    instrument_name: str = "programmable-speaker-instrument-piano"
+) -> str:
+    """
+    Builds a tick-based demultiplexer for audio playback in Factorio 2.0.
+    
+    1. Constant Combinator maps pool signals to integers representing tick indices.
+    2. Decider Combinator filters based on the current tick (Each == signal-clock).
+    3. Arithmetic Combinator normalizes the isolated tick signal to 1 (Each / Each).
+    4. Arithmetic Combinator filters the memory input to map to the instrument (Each * Each -> instrument).
+    """
+    blueprint = Blueprint()
+    blueprint.label = "Audio Decoder Unit"
+    
+    # 1. Constant Combinator (Maps Signals to Integers / Ticks)
+    cc = new_entity("constant-combinator", id="audio_cc", tile_position=(0, 0))
+    section = cc.add_section()
+    for i, sig in enumerate(signals):
+        # 1000 is the max constant combinator signals limit safely
+        if i >= 1000: break
+        section.set_signal(i, {"name": sig}, i + 1)
+    blueprint.entities.append(cc)
 
-    args = parser.parse_args()
-    bp_string = encode_auto(
-        args.input_path, args.name, args.skip, args.fps,
-        args.adaptive, args.threshold, args.deduplicate,
-        total_width=args.width, total_height=args.height,
-    )
-    print(bp_string)
+    # 2. Decider Combinator (Compares Tick Input with #1)
+    dc = new_entity("decider-combinator", id="audio_dc", tile_position=(1, 0))
+    dc.conditions = [
+        DeciderCombinator.Condition(
+            first_signal={"name": "signal-each"},
+            comparator="=",
+            second_signal={"name": clock_signal}
+        )
+    ]
+    dc.outputs = [
+        DeciderCombinator.Output(
+            signal={"name": "signal-each"},
+            copy_count_from_input=True
+        )
+    ]
+    blueprint.entities.append(dc)
 
+    # 3. Arithmetic Combinator (Normalize to 1)
+    ac1 = new_entity("arithmetic-combinator", id="audio_ac1", tile_position=(2, 0))
+    ac1.conditions = {
+        "first_signal": {"name": "signal-each"},
+        "operation": "/",
+        "second_signal": {"name": "signal-each"},
+        "output_signal": {"name": "signal-each"}
+    }
+    blueprint.entities.append(ac1)
 
-if __name__ == "__main__":
-    main()
+    # 4. Arithmetic Combinator (Filter Memory Signal)
+    ac2 = new_entity("arithmetic-combinator", id="audio_ac2", tile_position=(3, 0))
+    ac2.conditions = {
+        "first_signal": {"name": "signal-each"},
+        "operation": "*",
+        "second_signal": {"name": "signal-each"},
+        "output_signal": {"name": instrument_name}
+    }
+    blueprint.entities.append(ac2)
+
+    # Wiring logic
+    blueprint.add_circuit_connection("green", "audio_cc", "audio_dc", side_1="output", side_2="input")
+    blueprint.add_circuit_connection("green", "audio_dc", "audio_ac1", side_1="output", side_2="input")
+    blueprint.add_circuit_connection("green", "audio_ac1", "audio_ac2", side_1="output", side_2="input")
+
+    return blueprint.to_string()
