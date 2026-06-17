@@ -1,0 +1,13 @@
+[display]
+width = 28
+height = 28
+hole_top_left = [13, 13]
+hole_bottom_right = [14, 14]
+
+[signals]
+# The 5 Space Age qualities
+qualities = ["normal", "uncommon", "rare", "epic", "legendary"]
+
+[reserved]
+# Use this for your global animation frame synchronization
+clock_signal = "signal-clock"
