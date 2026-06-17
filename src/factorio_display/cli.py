@@ -26,9 +26,9 @@ def main():
         help="Encode media (video/gif/images/audio) into Factorio memory blueprints."
     )
     encode_parser.add_argument("input_path", help="Path to input media file or directory")
-    encode_parser.add_argument("--name", default="Media Data", help="Base name of the blueprint")
+    encode_parser.add_argument("--name", default="Animation Data", help="Base name of the blueprint")
     encode_parser.add_argument("--skip", type=int, default=1, help="Read every Nth frame")
-    encode_parser.add_argument("--fps", type=int, default=0, help="Source frame rate (1–60). 0 = auto-detect.")
+    encode_parser.add_argument("--fps", type=float, default=0.0, help="Source frame rate (1–60). 0 = auto-detect.")
     encode_parser.add_argument("--adaptive", action="store_true", help="Drop near-duplicate frames.")
     encode_parser.add_argument("--threshold", type=float, default=0.03, help="Similarity cutoff for adaptive mode.")
     encode_parser.add_argument("--deduplicate", action="store_true", help="Share one combinator across identical frames.")
@@ -78,7 +78,7 @@ def main():
         sys.stderr.write(f"Encoding video data from {args.input_path}...\n")
         video_bp = encode_auto(
             args.input_path, 
-            output_name=f"{args.name} (Video)", 
+            output_name=args.name, 
             fps_skip=args.skip, 
             fps=args.fps,
             adaptive=args.adaptive, 
@@ -88,25 +88,11 @@ def main():
             total_height=args.height,
         )
         
-        sys.stderr.write("=== VIDEO BLUEPRINT ===\n")
-        print(video_bp)
-        sys.stderr.write("=======================\n")
+        # Output ONLY the blueprint string so `| Set-Clipboard` works perfectly.
+        sys.stdout.write(video_bp + "\n")
 
         if not args.no_audio:
-            sys.stderr.write("\nChecking for audio track...\n")
-            
-            # TODO: Hook up your actual audio extraction logic here (e.g., using pydub, librosa, or ffmpeg).
-            # Example implementation flow:
-            # has_audio = check_for_audio_stream(args.input_path)
-            # if has_audio:
-            #     audio_bp = encode_audio_auto(args.input_path, f"{args.name} (Audio)")
-            #     print("=== AUDIO BLUEPRINT ===")
-            #     print(audio_bp)
-            #     print("=======================\n")
-            # else:
-            #     sys.stderr.write("No audio track detected in source media.\n")
-            
-            sys.stderr.write("TODO: Audio encoding pipeline\n")
+            pass # Hook audio pipeline here in the future
             
     elif args.command == "export-display":
         sys.stderr.write(f"Building display blueprint: {args.name}...\n")
@@ -115,7 +101,7 @@ def main():
             width=args.width, 
             height=args.height
         )
-        print(display_bp)
+        sys.stdout.write(display_bp + "\n")
         
     elif args.command == "export-audio":
         sys.stderr.write(f"Building audio decoder blueprint (Instrument: {args.instrument})...\n")
@@ -123,7 +109,7 @@ def main():
             signals=args.signals,
             instrument_name=args.instrument
         )
-        print(audio_bp)
+        sys.stdout.write(audio_bp + "\n")
 
 if __name__ == "__main__":
     main()

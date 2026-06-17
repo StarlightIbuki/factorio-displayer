@@ -1,10 +1,8 @@
-"""Video/media encoder — converts video, GIF, PNG series, and still images into
+"""Media encoder — converts video, GIF, PNG series, and still images into
 Factorio animation-memory blueprint strings.
 
 All encoders share a common :func:`encode_frames` pipeline that builds the
 decider-combinator chains (with embedded frame data) from an iterable of RGB frames.
-
-For audio decoding, see :mod:`factorio_display.build_audio_decoder`.
 """
 
 from __future__ import annotations
@@ -59,7 +57,7 @@ def _frame_diff(a: np.ndarray, b: np.ndarray) -> float:
 def encode_frames(
     rgb_frames: Iterator[np.ndarray],
     output_name: str,
-    fps: int = 0,
+    fps: float = 0.0,
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
@@ -68,17 +66,13 @@ def encode_frames(
     total_width: int | None = None,
     total_height: int | None = None,
     expected_frames: int | None = None,
+    source_id: str = "",
 ) -> str:
-    """Encode an iterable of RGB ``(H, W, 3)`` uint8 frames into a blueprint.
-
-    Each frame becomes one decider-combinator whose outputs hold the pixel
-    colour data directly.  Combinators are chained for sequential playback
-    via a clock signal.
-    """
-    if fps == 0:
-        fps = 60
-    fps = max(1, min(fps, 60))
-    ticks_float = 60.0 / fps      # non-integer ticks-per-frame target
+    """Encode an iterable of RGB ``(H, W, 3)`` uint8 frames into a blueprint."""
+    if fps <= 0:
+        fps = 60.0
+    fps = max(1.0, min(fps, 60.0))
+    ticks_float = 60.0 / fps
 
     if config is None:
         config = load_config()
@@ -99,8 +93,9 @@ def encode_frames(
     # Phase 0 & 1: Parallel Resizing, Adaptive Dropping, and Caching
     # ==================================================================
     
-    # Generate a unique cache name based on the output intent and parameters
-    safe_name = hashlib.md5(f"{output_name}_{total_w}_{total_h}".encode('utf-8')).hexdigest()[:8]
+    # Generate a unique cache name based on inputs to prevent cross-run collisions
+    hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}"
+    safe_name = hashlib.md5(hash_str.encode('utf-8')).hexdigest()[:8]
     cache_file = Path(f".encode_cache_{safe_name}.pkl")
     loaded_from_cache = False
 
@@ -142,19 +137,27 @@ def encode_frames(
                 accum -= needed
 
                 if adaptive and prev_resized is not None:
+                    # Compare against the LAST KEPT frame, not the last dropped frame!
                     if _frame_diff(prev_resized, resized) < threshold:
                         carry_ticks += needed
-                        prev_resized = resized
                         continue
 
+                # We are keeping this frame. Update the anchor.
                 if adaptive:
                     prev_resized = resized.copy()
+                
                 frame_ticks = needed + carry_ticks
                 carry_ticks = 0
 
                 tick_ranges.append((current_tick, current_tick + frame_ticks - 1))
                 kept_frames.append(resized)
                 current_tick += frame_ticks
+                
+        # Flush any remaining ticks if the video ends on a dropped/static frame
+        if carry_ticks > 0 and tick_ranges:
+            start, end = tick_ranges[-1]
+            tick_ranges[-1] = (start, end + carry_ticks)
+            current_tick += carry_ticks
 
         try:
             with open(cache_file, "wb") as f:
@@ -258,8 +261,7 @@ def encode_frames(
                 dc.outputs = outputs
                 blueprint.entities.append(dc)
                 dc_grid[(row, col)] = dc_id
-                
-                # Granular progression
+
                 pbar.update(1)
 
         prev_id: str | None = None
@@ -282,19 +284,19 @@ def encode_frames(
         total_combinators = len(unique_frames)
         if deduplicate and total_combinators < total_input:
             sys.stderr.write(
-                f"Encoded {total_combinators} combinators for {total_input} frames "
+                f"\nEncoded {total_combinators} combinators for {total_input} frames "
                 f"({total_input - total_combinators} deduplicated) "
                 f"over {total_ticks} ticks.\n"
             )
         elif adaptive and total_input > 0:
             sys.stderr.write(
-                f"Encoded {total_input} frames over {total_ticks} ticks "
+                f"\nEncoded {total_input} frames over {total_ticks} ticks "
                 f"(adaptive, threshold={threshold:.3f}).\n"
             )
         else:
             sys.stderr.write(
-                f"Encoded {total_input} frames over {total_ticks} ticks "
-                f"(~{total_ticks / max(1, total_input):.1f} tick(s)/frame, source {fps} fps).\n"
+                f"\nEncoded {total_input} frames over {total_ticks} ticks "
+                f"(~{total_ticks / max(1, total_input):.1f} tick(s)/frame, source {fps:.1f} fps).\n"
             )
         return blueprint.to_string()
 
@@ -306,20 +308,22 @@ def encode_frames(
     unit_entries: list[list[tuple[np.ndarray, int, int]]] = [
         [] for _ in range(num_units)
     ]
-    for frame, (start, end) in tqdm(zip(kept_frames, tick_ranges), total=len(kept_frames), desc="Splitting regions", unit="frame"):
-        for ur in range(unit_rows):
-            for uc in range(unit_cols):
-                ui = ur * unit_cols + uc
-                y0 = ur * unit_h
-                y1 = min((ur + 1) * unit_h, total_h)
-                x0 = uc * unit_w
-                x1 = min((uc + 1) * unit_w, total_w)
-                region = frame[y0:y1, x0:x1]
-                if region.shape[0] < unit_h or region.shape[1] < unit_w:
-                    padded = np.zeros((unit_h, unit_w, 3), dtype=np.uint8)
-                    padded[: region.shape[0], : region.shape[1]] = region
-                    region = padded
-                unit_entries[ui].append((region, start, end))
+    with tqdm(total=len(kept_frames), desc="Splitting regions", unit="frame") as pbar:
+        for frame, (start, end) in zip(kept_frames, tick_ranges):
+            for ur in range(unit_rows):
+                for uc in range(unit_cols):
+                    ui = ur * unit_cols + uc
+                    y0 = ur * unit_h
+                    y1 = min((ur + 1) * unit_h, total_h)
+                    x0 = uc * unit_w
+                    x1 = min((uc + 1) * unit_w, total_w)
+                    region = frame[y0:y1, x0:x1]
+                    if region.shape[0] < unit_h or region.shape[1] < unit_w:
+                        padded = np.zeros((unit_h, unit_w, 3), dtype=np.uint8)
+                        padded[: region.shape[0], : region.shape[1]] = region
+                        region = padded
+                    unit_entries[ui].append((region, start, end))
+            pbar.update(1)
 
     # Phase 3 — deduplicate per unit
     unit_unique: list[list[tuple[np.ndarray, list[tuple[int, int]]]]] = []
@@ -345,14 +349,15 @@ def encode_frames(
                     pbar.update(1)
                 unit_unique.append(current_unique)
 
-    # Phase 4 — build blueprint: per-unit grids, 2-tile margins, relay poles
+    # Phase 4 — build blueprint: per-unit grids, padding, direct wiring
     blueprint = Blueprint()
     blueprint.label = (
         f"Video Memory: {output_name} "
         f"({total_w}×{total_h}, {unit_cols}×{unit_rows} units)"
     )
-    blueprint.icons = ["parameter-0"]
 
+    # Compute per-unit grid dimensions, pad to fill the rectangle completely
+    # so the snake wiring never encounters gaps > 1 tile.
     unit_grids: list[tuple[int, int, int]] = []  # (padded_total, cols, rows)
     for ui, unique_frames in enumerate(unit_unique):
         t = len(unique_frames)
@@ -395,6 +400,7 @@ def encode_frames(
             cum_col += c + MARGIN
         cum_row += row_max_rows[ur] * 2 + MARGIN
 
+    # Track boundary combinators for direct green-wire hops.
     unit_top_left: dict[int, str] = {}
     unit_top_right: dict[int, str] = {}
     unit_bottom_right: dict[int, str] = {}
@@ -439,17 +445,19 @@ def encode_frames(
                         )
 
                 outputs: list = []
-                for (x, y), sig in mapping.iter_pixels():
-                    r, g, b = resized[y, x]
-                    color_int = (int(r) << 16) | (int(g) << 8) | int(b)
-                    if color_int > 0:
-                        outputs.append(
-                            DeciderCombinator.Output(
-                                signal={"name": sig["name"], "quality": sig["quality"]},
-                                copy_count_from_input=False,
-                                constant=color_int,
+                # Don't iterate over mapping if this is a dummy frame (which has range [(999999, 999999)])
+                if ranges != [(999999, 999999)]:
+                    for (x, y), sig in mapping.iter_pixels():
+                        r, g, b = resized[y, x]
+                        color_int = (int(r) << 16) | (int(g) << 8) | int(b)
+                        if color_int > 0:
+                            outputs.append(
+                                DeciderCombinator.Output(
+                                    signal={"name": sig["name"], "quality": sig["quality"]},
+                                    copy_count_from_input=False,
+                                    constant=color_int,
+                                )
                             )
-                        )
 
                 dc = new_entity(
                     "decider-combinator",
@@ -462,7 +470,6 @@ def encode_frames(
                 blueprint.entities.append(dc)
                 dc_grid[(idx // cols, idx % cols)] = dc_id
                 
-                # Granular progression
                 pbar.update(1)
 
             # ---- wire within this unit (green + red, same snake) ----------
@@ -524,7 +531,7 @@ def encode_video(
     video_path: str | Path,
     output_name: str = "Animation Data",
     fps_skip: int = 1,
-    fps: int = 0,
+    fps: float = 0.0,
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
@@ -536,27 +543,35 @@ def encode_video(
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_path}")
 
-    if fps == 0:
+    if fps <= 0:
         detected = cap.get(cv2.CAP_PROP_FPS)
-        fps = int(round(detected)) if detected and detected > 0 else 30
-        fps = max(1, min(fps, 60))
+        fps = float(detected) if detected and detected > 0 else 30.0
+        fps = max(1.0, min(fps, 60.0))
         sys.stderr.write(f"Detected source FPS: {fps}\n")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     expected_frames = max(1, total_frames // fps_skip) if total_frames > 0 else None
+    
+    # Scale the FPS so skipped frames still preserve identical playback duration 
+    effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
 
     def _iter() -> Iterator[np.ndarray]:
         while True:
+            ret, frame = False, None
             for _ in range(fps_skip):
-                ret, frame = cap.read()
+                ret, f = cap.read()
+                if not ret:
+                    break
+                frame = f
+            if frame is not None:
+                yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             if not ret:
-                return
-            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                break
 
     try:
-        return encode_frames(_iter(), output_name, fps, adaptive, threshold, deduplicate,
+        return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
                               total_width=total_width, total_height=total_height,
-                              expected_frames=expected_frames)
+                              expected_frames=expected_frames, source_id=f"{video_path}_{fps_skip}")
     finally:
         cap.release()
 
@@ -565,7 +580,7 @@ def encode_gif(
     gif_path: str | Path,
     output_name: str = "Animation Data",
     fps_skip: int = 1,
-    fps: int = 0,
+    fps: float = 0.0,
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
@@ -577,7 +592,7 @@ def encode_gif(
 
     gif = Image.open(str(gif_path))
 
-    if fps == 0:
+    if fps <= 0:
         duration = gif.info.get("duration", 0)
         if not duration:
             try:
@@ -585,13 +600,15 @@ def encode_gif(
                 duration = gif.info.get("duration", 100)
             except Exception:
                 duration = 100
-        fps = max(1, min(60, round(1000 / duration))) if duration else 10
-        sys.stderr.write(f"Detected source FPS: {fps} (from GIF)\n")
+        fps = max(1.0, min(60.0, 1000.0 / duration)) if duration else 10.0
+        sys.stderr.write(f"Detected source FPS: {fps:.1f} (from GIF)\n")
 
     try:
         expected_frames = max(1, getattr(gif, "n_frames", 1) // fps_skip)
     except Exception:
         expected_frames = None
+
+    effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
 
     def _iter() -> Iterator[np.ndarray]:
         idx = 0
@@ -605,16 +622,16 @@ def encode_gif(
             except EOFError:
                 return
 
-    return encode_frames(_iter(), output_name, fps, adaptive, threshold, deduplicate,
+    return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
                           total_width=total_width, total_height=total_height,
-                          expected_frames=expected_frames)
+                          expected_frames=expected_frames, source_id=f"{gif_path}_{fps_skip}")
 
 
 def encode_png_series(
     paths: list[str | Path],
     output_name: str = "Animation Data",
     fps_skip: int = 1,
-    fps: int = 0,
+    fps: float = 0.0,
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
@@ -622,10 +639,11 @@ def encode_png_series(
     total_height: int | None = None,
 ) -> str:
     """Encode a sequence of image files (PNG, JPEG, …)."""
-    if fps == 0:
-        fps = 60
+    if fps <= 0:
+        fps = 60.0
 
     expected_frames = math.ceil(len(paths) / fps_skip)
+    effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
 
     def _iter() -> Iterator[np.ndarray]:
         for i, p in enumerate(paths):
@@ -636,15 +654,16 @@ def encode_png_series(
                 raise FileNotFoundError(f"Cannot read image: {p}")
             yield cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    return encode_frames(_iter(), output_name, fps, adaptive, threshold, deduplicate,
+    source_id = f"pngs_{len(paths)}_{fps_skip}_{hashlib.md5(str(paths[0]).encode()).hexdigest()[:8]}"
+    return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
                           total_width=total_width, total_height=total_height,
-                          expected_frames=expected_frames)
+                          expected_frames=expected_frames, source_id=source_id)
 
 
 def encode_frame(
     image_path: str | Path,
     output_name: str = "Frame Data",
-    fps: int = 0,
+    fps: float = 0.0,
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
@@ -652,8 +671,8 @@ def encode_frame(
     total_height: int | None = None,
 ) -> str:
     """Encode a single still image as a one-frame blueprint."""
-    if fps == 0:
-        fps = 60
+    if fps <= 0:
+        fps = 60.0
     return encode_png_series(
         [image_path], output_name, fps_skip=1, fps=fps,
         adaptive=adaptive, threshold=threshold, deduplicate=deduplicate,
@@ -669,7 +688,7 @@ def encode_auto(
     input_path: str,
     output_name: str = "Animation Data",
     fps_skip: int = 1,
-    fps: int = 0,
+    fps: float = 0.0,
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
@@ -722,6 +741,4 @@ def encode_auto(
         f"Cannot determine input type for: {input_path}. "
         f"Use an explicit subcommand or a recognised file extension."
     )
-
-
 
