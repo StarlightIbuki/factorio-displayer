@@ -21,6 +21,7 @@ def build_display():
 
     blueprint = Blueprint()
     blueprint.label = f"{w}x{h} Display Unit (2.0 RGB)"
+    blueprint.icons = ["display-panel"]
 
     lamp_grid: list[list[str | None]] = [[None for _ in range(w)] for _ in range(h)]
 

@@ -1,4 +1,5 @@
-"""Factorio Display — blueprint builder and video encoder for in-game RGB displays."""
+"""Factorio Display — video encoder and audio decoder blueprint builders
+for in-game Factorio RGB displays and programmable-speaker audio playback."""
 
 from ._generated import DISPLAY_BLUEPRINT, POOL_HASH, VERSION
 

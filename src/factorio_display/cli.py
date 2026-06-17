@@ -1,148 +1,129 @@
-"""Unified CLI for factorio-display.
+"""Command Line Interface for factorio-display.
 
-``display``  — output the pre-computed display-unit blueprint
-``encode``   — auto-detect input (video / GIF / PNG series / image) → blueprint
-``frame``    — encode a single still image as a one-frame blueprint
+Provides subcommands to encode media, export the physical display grid,
+and export the audio decoder circuitry.
 """
-
-from __future__ import annotations
 
 import argparse
 import sys
 
-from ._generated import DISPLAY_BLUEPRINT, POOL_HASH, VERSION
-from .encoder import encode_auto, encode_frame
+from .build_audio_decoder import build_audio_decoder
+from .encoder import encode_auto
+# Assuming you have a builder.py containing the logic to build the physical screen
+from .build_displayer_blueprint import build_display 
 
-
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(
-        prog="factorio-display",
-        description="Factorio display blueprint builder and video encoder",
+        description="factorio-display: Build video displays and encode media into Factorio blueprints."
     )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"factorio-display {VERSION}",
-    )
+    subparsers = parser.add_subparsers(dest="command", required=True, title="commands")
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # ==================================================================
+    # Subcommand: encode
+    # ==================================================================
+    encode_parser = subparsers.add_parser(
+        "encode", 
+        help="Encode media (video/gif/images/audio) into Factorio memory blueprints."
+    )
+    encode_parser.add_argument("input_path", help="Path to input media file or directory")
+    encode_parser.add_argument("--name", default="Media Data", help="Base name of the blueprint")
+    encode_parser.add_argument("--skip", type=int, default=1, help="Read every Nth frame")
+    encode_parser.add_argument("--fps", type=int, default=0, help="Source frame rate (1–60). 0 = auto-detect.")
+    encode_parser.add_argument("--adaptive", action="store_true", help="Drop near-duplicate frames.")
+    encode_parser.add_argument("--threshold", type=float, default=0.03, help="Similarity cutoff for adaptive mode.")
+    encode_parser.add_argument("--deduplicate", action="store_true", help="Share one combinator across identical frames.")
+    encode_parser.add_argument("--width", type=int, default=None, help="Override display width (tiles).")
+    encode_parser.add_argument("--height", type=int, default=None, help="Override display height (tiles).")
+    
+    # Audio-specific
+    encode_parser.add_argument("--no-audio", action="store_true", help="Disable automatic audio track encoding.")
 
-    # ---- display -----------------------------------------------------------
-    disp = subparsers.add_parser(
-        "display",
-        help="Output the pre-computed display-unit blueprint",
+    # ==================================================================
+    # Subcommand: export-display
+    # ==================================================================
+    display_parser = subparsers.add_parser(
+        "export-display", 
+        help="Generate the physical video display grid blueprint."
     )
-    disp.add_argument(
-        "--hash",
-        action="store_true",
-        help="Print only the signal-pool hash (useful for version checks)",
-    )
+    display_parser.add_argument("--name", default="Video Display", help="Blueprint name")
+    display_parser.add_argument("--width", type=int, default=None, help="Display width in tiles.")
+    display_parser.add_argument("--height", type=int, default=None, help="Display height in tiles.")
 
-    # ---- encode (auto-detect) ----------------------------------------------
-    enc = subparsers.add_parser(
-        "encode",
-        help="Auto-detect input type (video, GIF, PNG series, image) and encode",
+    # ==================================================================
+    # Subcommand: export-audio
+    # ==================================================================
+    audio_parser = subparsers.add_parser(
+        "export-audio", 
+        help="Generate the audio decoder blueprint."
     )
-    enc.add_argument("input_path", help="Path to input file, directory, or glob pattern")
-    enc.add_argument(
-        "--name",
-        default="Animation Data",
-        help="Label for the generated blueprint",
+    audio_parser.add_argument("--name", default="Audio Decoder", help="Blueprint name")
+    audio_parser.add_argument(
+        "--instrument", 
+        default="programmable-speaker-instrument-piano", 
+        help="Internal Factorio instrument name for the speaker"
     )
-    enc.add_argument(
-        "--skip",
-        type=int,
-        default=2,
-        help="Sample every Nth frame to reduce combinator count (default: 2)",
-    )
-    enc.add_argument(
-        "--fps",
-        type=int,
-        default=0,
-        help="Source frame rate (1–60). 0 = auto-detect from video/GIF metadata. 1s = 60 Factorio ticks.",
-    )
-    enc.add_argument(
-        "--adaptive",
-        action="store_true",
-        help="Drop near-duplicate frames (based on pixel difference) to compress static sections",
-    )
-    enc.add_argument(
-        "--threshold",
-        type=float,
-        default=0.03,
-        help="Similarity cutoff for --adaptive (0.0–1.0, lower = stricter, default: 0.03)",
-    )
-    enc.add_argument(
-        "--deduplicate",
-        action="store_true",
-        help="Share one combinator across non-adjacent identical frames (SHA-256 hash)",
-    )
-    enc.add_argument(
-        "--width",
-        type=int,
-        default=None,
-        help="Total display width in tiles (overrides config). When larger than the unit width, "
-        "the display is split into multiple display units each with their own parallel memory.",
-    )
-    enc.add_argument(
-        "--height",
-        type=int,
-        default=None,
-        help="Total display height in tiles (overrides config). When larger than the unit height, "
-        "the display is split into multiple display units each with their own parallel memory.",
-    )
-
-    # ---- frame (single image) ----------------------------------------------
-    frm = subparsers.add_parser(
-        "frame",
-        help="Encode a single image as a one-frame blueprint",
-    )
-    frm.add_argument("image", help="Path to the image file (.png, .jpg, .gif, …)")
-    frm.add_argument(
-        "--name",
-        default="Frame Data",
-        help="Label for the generated blueprint",
-    )
-    frm.add_argument(
-        "--fps",
-        type=int,
-        default=0,
-        help="Source frame rate for the single frame (1–60, 0 = default 60)",
-    )
-    frm.add_argument(
-        "--width",
-        type=int,
-        default=None,
-        help="Total display width in tiles (overrides config).",
-    )
-    frm.add_argument(
-        "--height",
-        type=int,
-        default=None,
-        help="Total display height in tiles (overrides config).",
+    audio_parser.add_argument(
+        "--signals", 
+        nargs="+", 
+        default=["signal-A", "signal-B", "signal-C", "signal-D", "signal-E", "signal-F", "signal-G"], 
+        help="List of signals for the audio decoder pool"
     )
 
     args = parser.parse_args()
 
-    if args.command == "display":
-        if args.hash:
-            print(POOL_HASH)
-        else:
-            sys.stdout.write(DISPLAY_BLUEPRINT)
-
-    elif args.command == "encode":
-        bp = encode_auto(
-            args.input_path, args.name, args.skip, args.fps,
-            args.adaptive, args.threshold, args.deduplicate,
-            args.width, args.height,
+    # ==================================================================
+    # Command Routing
+    # ==================================================================
+    if args.command == "encode":
+        sys.stderr.write(f"Encoding video data from {args.input_path}...\n")
+        video_bp = encode_auto(
+            args.input_path, 
+            output_name=f"{args.name} (Video)", 
+            fps_skip=args.skip, 
+            fps=args.fps,
+            adaptive=args.adaptive, 
+            threshold=args.threshold, 
+            deduplicate=args.deduplicate,
+            total_width=args.width, 
+            total_height=args.height,
         )
-        sys.stdout.write(bp)
+        
+        sys.stderr.write("=== VIDEO BLUEPRINT ===\n")
+        print(video_bp)
+        sys.stderr.write("=======================\n")
 
-    elif args.command == "frame":
-        bp = encode_frame(args.image, args.name, args.fps,
-                          total_width=args.width, total_height=args.height)
-        sys.stdout.write(bp)
-
+        if not args.no_audio:
+            sys.stderr.write("\nChecking for audio track...\n")
+            
+            # TODO: Hook up your actual audio extraction logic here (e.g., using pydub, librosa, or ffmpeg).
+            # Example implementation flow:
+            # has_audio = check_for_audio_stream(args.input_path)
+            # if has_audio:
+            #     audio_bp = encode_audio_auto(args.input_path, f"{args.name} (Audio)")
+            #     print("=== AUDIO BLUEPRINT ===")
+            #     print(audio_bp)
+            #     print("=======================\n")
+            # else:
+            #     sys.stderr.write("No audio track detected in source media.\n")
+            
+            sys.stderr.write("TODO: Audio encoding pipeline\n")
+            
+    elif args.command == "export-display":
+        sys.stderr.write(f"Building display blueprint: {args.name}...\n")
+        display_bp = build_display(
+            name=args.name, 
+            width=args.width, 
+            height=args.height
+        )
+        print(display_bp)
+        
+    elif args.command == "export-audio":
+        sys.stderr.write(f"Building audio decoder blueprint (Instrument: {args.instrument})...\n")
+        audio_bp = build_audio_decoder(
+            signals=args.signals,
+            instrument_name=args.instrument
+        )
+        print(audio_bp)
 
 if __name__ == "__main__":
     main()

@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 [project]
 name = "factorio-display"
 version = "0.1.0"
-description = "Factorio display blueprint builder and video encoder"
+description = "Factorio display video encoder and audio decoder blueprint builder"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "suika" }]
