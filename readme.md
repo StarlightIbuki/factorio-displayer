@@ -2,6 +2,10 @@
 
 A command-line tool designed to encode media (videos, gifs, images, and audio tracks) into Factorio memory blueprints, allowing you to build massive animated screens and programmable speakers directly in-game. Designed with Factorio 2.0 and Draftsman.
 
+## Demo
+
+[The game save](https://github.com/StarlightIbuki/factorio-displayer/releases/download/alpha/Bad.Apple.demo.zip)
+
 ## Usage
 
 Factorio Displayer runs via a CLI command that generates raw blueprint strings, which you can pipe straight into your clipboard (e.g., `| Set-Clipboard` on Windows or `| pbcopy` on macOS). 
