@@ -264,18 +264,19 @@ class TestMidiToTickDataTempo:
         assert len(result) >= 28, f"Expected ~30 ticks, got {len(result)}"
 
     def test_double_tempo(self):
-        """Tempo changes wall-clock time but not game ticks per beat.
+        """At 240 BPM, a quarter note is 0.25s → half the game ticks of 120 BPM.
 
-        A quarter note is always a quarter note; game ticks are beat-aligned.
-        At 240 BPM, 480 MIDI ticks = 1 beat = 30 game ticks (same as 120 BPM).
+        Game ticks are time-based (seconds × 2 × ticks_per_beat), so faster
+        tempo = fewer game ticks for the same number of MIDI ticks.
+        This ensures real-time Factorio playback regardless of tempo.
         """
         mid_120 = _make_midi([(60, 100, 0, 480)], tempo=500_000)  # 120 BPM
         mid_240 = _make_midi([(60, 100, 0, 480)], tempo=250_000)  # 240 BPM
         result_120 = midi_to_tick_data(mid_120, ticks_per_beat=30)
         result_240 = midi_to_tick_data(mid_240, ticks_per_beat=30)
-        # Both are 1 beat → same number of game ticks
-        assert len(result_120) == len(result_240), (
-            f"Same beat count should produce same game ticks: "
+        # 120 BPM: 0.5s → 30 ticks; 240 BPM: 0.25s → 15 ticks
+        assert len(result_240) == len(result_120) // 2, (
+            f"240 BPM (0.25s) should be half the ticks of 120 BPM (0.5s): "
             f"120BPM={len(result_120)}, 240BPM={len(result_240)}"
         )
 

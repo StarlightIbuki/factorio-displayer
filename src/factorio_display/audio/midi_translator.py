@@ -151,16 +151,27 @@ def process_timing(mid, min_note_gap_sec=0.06, chord_tolerance_sec=0.01, boost_m
 
 # --- 5. MIDI → TICK_DATA ENGINE (float-based) ---
 
+REFERENCE_TEMPO = 500_000  # 120 BPM — baseline for ticks_per_beat calibration
+
+
 def _midi_tick_to_game_tick(
     midi_tick: int,
     ticks_per_beat_midi: int,
     tempo: int,
     game_ticks_per_beat: int,
 ) -> float:
-    """Convert an absolute MIDI tick to a game tick (float)."""
+    """Convert an absolute MIDI tick to a game tick (float).
+
+    ``game_ticks_per_beat`` is calibrated at 120 BPM (0.5 s/beat).
+    At ``game_ticks_per_beat=30``, one game tick = 1/60 s = 1 Factorio tick,
+    giving real-time playback regardless of the MIDI's actual tempo.
+    """
     seconds = mido.tick2second(midi_tick, ticks_per_beat_midi, tempo)
-    seconds_per_beat = tempo / 1_000_000.0
-    return seconds / seconds_per_beat * game_ticks_per_beat
+    # At reference 120 BPM: 1 beat = 0.5 s = game_ticks_per_beat game ticks
+    # So 1 game tick = 0.5 / game_ticks_per_beat seconds
+    # game_ticks = seconds / (0.5 / game_ticks_per_beat)
+    #            = seconds * 2 * game_ticks_per_beat
+    return seconds * 2.0 * game_ticks_per_beat
 
 
 def _fold_note(note: int) -> tuple[int, str]:
@@ -266,7 +277,9 @@ def midi_to_tick_data(
     mid : mido.MidiFile
         The parsed MIDI file.
     ticks_per_beat : int
-        Game ticks per quarter note (default 30, ~0.5s at 60 UPS).
+        Game ticks per quarter note, calibrated at 120 BPM reference.
+        At 30 (default), one game tick = 1/60 s = 1 Factorio tick,
+        giving real-time playback at any tempo.
     boost_melody : float
         Multiplier applied to the melody track's velocity (default 1.0 = off).
     velocity_scale : float
@@ -284,6 +297,29 @@ def midi_to_tick_data(
     """
     if not mid.tracks:
         return []
+
+    # ── Build global tempo map (tempo events are global across tracks) ──
+    # tempo_map: sorted list of (absolute_midi_tick, tempo_us_per_beat)
+    tempo_events: list[tuple[int, int]] = []
+    for track in mid.tracks:
+        abs_tick = 0
+        for msg in track:
+            abs_tick += int(msg.time)
+            if msg.type == "set_tempo":
+                tempo_events.append((abs_tick, msg.tempo))
+    tempo_events.sort(key=lambda e: e[0])
+    if not tempo_events:
+        tempo_events = [(0, mido.bpm2tempo(120))]
+
+    def _get_tempo_at(midi_tick: int) -> int:
+        """Return the tempo (µs/beat) in effect at *midi_tick*."""
+        current = tempo_events[0][1]
+        for t, tempo in tempo_events:
+            if t <= midi_tick:
+                current = tempo
+            else:
+                break
+        return current
 
     # ── Pre-scan: melody detection ──────────────────────────────────
     melody_track_idx = -1
@@ -309,20 +345,19 @@ def midi_to_tick_data(
         is_melody = (track_idx == melody_track_idx)
 
         absolute_midi_tick = 0
-        current_tempo = mido.bpm2tempo(120)  # default 120 BPM
         active_notes: dict[int, tuple[float, float]] = {}  # note → (start_game_tick, loudness)
 
         for msg in track:
             absolute_midi_tick += int(msg.time)
 
             if msg.type == "set_tempo":
-                current_tempo = msg.tempo
-                continue
+                continue  # handled by global tempo map
 
             if msg.type == "note_on" and msg.velocity > 0:
+                tempo = _get_tempo_at(absolute_midi_tick)
                 start_game_tick = _midi_tick_to_game_tick(
                     absolute_midi_tick, mid.ticks_per_beat,
-                    current_tempo, ticks_per_beat,
+                    tempo, ticks_per_beat,
                 )
 
                 # Compute float loudness from velocity
@@ -349,9 +384,10 @@ def midi_to_tick_data(
                 if entry is None:
                     continue
                 start_game_tick, loudness = entry
+                tempo = _get_tempo_at(absolute_midi_tick)
                 end_game_tick = _midi_tick_to_game_tick(
                     absolute_midi_tick, mid.ticks_per_beat,
-                    current_tempo, ticks_per_beat,
+                    tempo, ticks_per_beat,
                 )
 
                 # Fold the note for pitch_idx
