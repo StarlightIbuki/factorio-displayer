@@ -7,9 +7,7 @@ decider-combinator chains (with embedded frame data) from an iterable of RGB fra
 
 from __future__ import annotations
 
-import argparse
 import math
-import os
 import sys
 import pickle
 import hashlib
@@ -23,31 +21,24 @@ from draftsman.blueprintable import Blueprint
 from draftsman.constants import Direction
 from draftsman.entity import DeciderCombinator, new_entity
 
-from .config_loader import load_config
-from .signal_mapping import SignalMapping
-
-class _DummyTqdm:
-    """Graceful fallback if tqdm is not installed."""
-    def __init__(self, iterable=None, *args, **kwargs):
-        self.iterable = iterable or []
-    def __iter__(self):
-        yield from self.iterable
-    def update(self, n=1):
-        pass
-    def __enter__(self):
-        return self
-    def __exit__(self, *args):
-        pass
+from ..integer2signal.config_loader import load_config
+from ..integer2signal.mapping import SignalMapping
 
 try:
     from tqdm import tqdm
 except ImportError:
-    tqdm = _DummyTqdm
-
-
-# ---------------------------------------------------------------------------
-# Common pipeline
-# ---------------------------------------------------------------------------
+    class tqdm:
+        """Graceful fallback if tqdm is not installed."""
+        def __init__(self, iterable=None, *args, **kwargs):
+            self.iterable = iterable or []
+        def __iter__(self):
+            yield from self.iterable
+        def update(self, n=1):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
 
 def _frame_diff(a: np.ndarray, b: np.ndarray) -> float:
     """Return 0.0–1.0 normalised mean absolute difference between two RGB frames."""

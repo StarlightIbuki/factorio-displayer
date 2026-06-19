@@ -3,16 +3,15 @@
 from draftsman.blueprintable import Blueprint
 from draftsman.entity import new_entity
 
-from .config_loader import load_config
-from .signal_pool import get_filtered_pool
-from .signal_mapping import SignalMapping
+from ..integer2signal.config_loader import load_config
+from ..integer2signal.pool import get_filtered_pool
+from ..integer2signal.mapping import SignalMapping
 
 
-def build_display():
+def build_display(name: str) -> str:
     config = load_config()
     w, h = config["display"]["width"], config["display"]["height"]
     hole_tl = tuple(config["display"]["hole_top_left"])
-    hole_br = tuple(config["display"]["hole_bottom_right"])
 
     # Generate signal pool, build mapping, and export manifest
     pool = get_filtered_pool(config["reserved"]["clock_signal"])
@@ -20,8 +19,7 @@ def build_display():
     mapping.export_manifest()
 
     blueprint = Blueprint()
-    blueprint.label = f"{w}x{h} Display Unit (2.0 RGB)"
-    blueprint.icons = ["display-panel"]
+    blueprint.label = name
 
     lamp_grid: list[list[str | None]] = [[None for _ in range(w)] for _ in range(h)]
 
@@ -61,12 +59,3 @@ def build_display():
             blueprint.add_circuit_connection("red", lamp_grid[y][w - 1], lamp_grid[y + 1][w - 1])
 
     return blueprint.to_string()
-
-
-def main():
-    """Entry point for the ``factorio-display-build`` console script."""
-    print(build_display())
-
-
-if __name__ == "__main__":
-    main()

@@ -22,10 +22,10 @@ class CustomBuildHook(BuildHookInterface):
         if str(src_dir) not in sys.path:
             sys.path.insert(0, str(src_dir))
 
-        from factorio_display._generate import generate_resources, write_generated_module
+        from factorio_display.build._generate import generate_resources, write_generated_module
 
         config_path = root / "config.toml"
         resources = generate_resources(str(config_path))
 
-        generated_path = src_dir / "factorio_display" / "_generated.py"
+        generated_path = src_dir / "factorio_display" / "build" / "_generated.py"
         write_generated_module(generated_path, resources, version)

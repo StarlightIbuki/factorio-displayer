@@ -6,11 +6,12 @@ and export the audio decoder circuitry.
 
 import argparse
 import sys
+import contextlib
 
-from .build_audio_decoder import build_audio_decoder
-from .encoder import encode_auto
+from .audio.build_audio_player import build_audio_decoder
+from .video.encoder import encode_auto
 # Assuming you have a builder.py containing the logic to build the physical screen
-from .build_displayer_blueprint import build_display 
+from .video.player_blueprint import build_display 
 
 def main():
     parser = argparse.ArgumentParser(
@@ -38,9 +39,6 @@ def main():
     # Audio-specific
     encode_parser.add_argument("--no-audio", action="store_true", help="Disable automatic audio track encoding.")
 
-    # ==================================================================
-    # Subcommand: export-display
-    # ==================================================================
     display_parser = subparsers.add_parser(
         "export-display", 
         help="Generate the physical video display grid blueprint."
@@ -49,9 +47,6 @@ def main():
     display_parser.add_argument("--width", type=int, default=None, help="Display width in tiles.")
     display_parser.add_argument("--height", type=int, default=None, help="Display height in tiles.")
 
-    # ==================================================================
-    # Subcommand: export-audio
-    # ==================================================================
     audio_parser = subparsers.add_parser(
         "export-audio", 
         help="Generate the audio decoder blueprint."
@@ -71,9 +66,12 @@ def main():
 
     args = parser.parse_args()
 
-    # ==================================================================
-    # Command Routing
-    # ==================================================================
+    from .integer2signal.config_loader import load_config
+    from .integer2signal.pool import get_filtered_pool
+
+    config = load_config()
+    pool = get_filtered_pool(config["reserved"]["clock_signal"])
+
     if args.command == "encode":
         sys.stderr.write(f"Encoding video data from {args.input_path}...\n")
         video_bp = encode_auto(
@@ -88,11 +86,19 @@ def main():
             total_height=args.height,
         )
         
-        # Output ONLY the blueprint string so `| Set-Clipboard` works perfectly.
+        # Output ONLY the blueprint string
         sys.stdout.write(video_bp + "\n")
 
+        # Hooked Audio Pipeline
         if not args.no_audio:
-            pass # Hook audio pipeline here in the future
+            sys.stderr.write("\n")
+            from .audio.encoder import encode_audio_auto
+            audio_bp = encode_audio_auto(
+                args.input_path, 
+                config=config
+            )
+            if audio_bp:
+                sys.stdout.write(audio_bp + "\n")
             
     elif args.command == "export-display":
         sys.stderr.write(f"Building display blueprint: {args.name}...\n")
@@ -105,9 +111,14 @@ def main():
         
     elif args.command == "export-audio":
         sys.stderr.write(f"Building audio decoder blueprint (Instrument: {args.instrument})...\n")
+        
+        # If the user didn't explicitly provide signals, default to the whole pool
+        used_signals = args.signals if "signal-A" not in args.signals else pool
+
         audio_bp = build_audio_decoder(
-            signals=args.signals,
-            instrument_name=args.instrument
+            signals=used_signals,
+            clock_signal=config["reserved"]["clock_signal"],
+            target_signal=args.instrument
         )
         sys.stdout.write(audio_bp + "\n")
 

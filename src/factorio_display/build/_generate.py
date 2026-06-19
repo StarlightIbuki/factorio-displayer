@@ -14,9 +14,9 @@ def generate_resources(config_path: str = "config.toml") -> dict[str, Any]:
 
     Returns a dict with keys ``pool_hash``, ``display_blueprint``, and ``pool``.
     """
-    from .config_loader import load_config
-    from .signal_pool import get_filtered_pool
-    from .signal_mapping import SignalMapping
+    from ..integer2signal.config_loader import load_config
+    from ..integer2signal.pool import get_filtered_pool
+    from ..integer2signal.mapping import SignalMapping
 
     config = load_config(config_path)
     pool: list[str] = get_filtered_pool(config["reserved"]["clock_signal"])

@@ -13,11 +13,3 @@ qualities = ["normal", "uncommon", "rare", "epic", "legendary"]
 clock_signal = "signal-clock"
 # Reserve a signal for loudness if you aren't using a full signal matrix for it
 loudness_signal = "signal-info" 
-
-[audio]
-# The target instrument for the programmable speaker
-instrument = "programmable-speaker-instrument-piano"
-# The number of pitch variations to map (e.g., 36 for 3 full octaves)
-max_pitches = 36
-# The number of loudness variations (if using a secondary matrix)
-max_loudness_levels = 10
