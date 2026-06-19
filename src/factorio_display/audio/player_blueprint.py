@@ -3,9 +3,10 @@ programmable-speaker matrix blueprint for 48-note polyphonic playback.
 
 Decoder pipeline (top → bottom, y descending)
 ----------------------------------------------
-  y=20   Modulo AC: sub_tick = clock % 60  (AC, 1×2)
-  y=20   Lookup CCs (cols 0..11): all sub-ticks   (CC, 1×1)
-  y=18   Match DCs: each(green) == sub_tick(red) → signal=1  (DC, 1×2)
+  y=22   Modulo AC: sub_tick = clock % 60  (AC, 1×2)
+  y=22   Lookup CCs (cols 0..11): all sub-ticks   (CC, 1×1)
+  y=20   Match DCs: each(green) == sub_tick(red) → signal=1  (DC, 1×2)
+  y=18   Match0 DCs: sub_tick==0 ∧ each==60 → signal=1  (DC, 1×2) — t=0 fallback
   y=16   Page port + Selector ACs: each(red)*each(green) → bell  (AC, 1×2)
   y=14   Unpacker: l1 = bell >> 21  (AC, 1×2)
   y=12   Unpacker: s2 = bell >> 14  (AC, 1×2)
@@ -63,9 +64,10 @@ TICKS_PER_PAGE = 60                      # decoder uses clock % 60
 PORT_X = 12         # page input port X
 PORT_Y = 16         # page input port Y — same row as selectors
 MOD_X = 12          # modulo AC X (single AC, clock % 60 → sub_tick)
-MOD_Y = 20          # modulo AC Y
-LUT_Y = 20          # lookup CCs Y
-MATCH_Y = 18        # match DCs Y
+MOD_Y = 22          # modulo AC Y
+LUT_Y = 22          # lookup CCs Y
+MATCH_Y = 20        # match DCs Y (each == sub_tick)
+MATCH0_Y = 18       # match0 DCs Y (sub_tick==0 ∧ each==60 — t=0 fallback)
 SEL_Y = 16          # selector ACs Y + page port
 UNP_L1_Y = 14       # l1 = bell >> 21
 UNP_S2_Y = 12       # s2 = bell >> 14
@@ -111,7 +113,9 @@ def build_audio_decoder(
     port.set_signal(0, "signal-info", 1)
     blueprint.entities.append(port)
 
-    # ── Modulo: sub_tick = clock % 60  (single AC) ──────────────────
+    # ── Modulo: sub_tick = clock % 60  (single AC, 0..59) ──────────
+    # t=0 (value 0) is handled by a separate match0 DC per channel
+    # because Factorio drops 0-value signals from the circuit network.
     sub_tick_sig = "signal-M"
 
     ac_mod = new_entity("arithmetic-combinator", id="mod",
@@ -152,7 +156,8 @@ def build_audio_decoder(
         base_id = f"ch{ch}"
         col = ch
 
-        # -- Single lookup CC with all sub-tick entries (0-based) --
+        # -- Single lookup CC with all sub-tick entries (0-based, 0..59) --
+        # t=0 uses value 60 (never 0) so the match0 DC can detect it.
         cc = new_entity("constant-combinator", id=f"{base_id}_lut",
                         tile_position=(col, LUT_Y))
         slot = 0
@@ -160,11 +165,12 @@ def build_audio_decoder(
             cell_offset = t * 12 + ch
             sig_idx = cell_offset // num_qual
             qual_idx = cell_offset % num_qual
-            cc.set_signal(slot, signal_pool[sig_idx], t, qualities[qual_idx])
+            value = 60 if t == 0 else t
+            cc.set_signal(slot, signal_pool[sig_idx], value, qualities[qual_idx])
             slot += 1
         blueprint.entities.append(cc)
 
-        # -- Match DC: each == sub_tick → signal=1 --
+        # -- Match DC: each == sub_tick → signal=1  (handles sub_tick 1..59)
         #    CC outputs arrive on GREEN, sub_tick arrives on RED
         dc = new_entity("decider-combinator", id=f"{base_id}_match",
                         tile_position=(col, MATCH_Y))
@@ -179,8 +185,26 @@ def build_audio_decoder(
         ]
         blueprint.entities.append(dc)
 
-        # CC output → match DC (green)
+        # -- Match0 DC: sub_tick==0 ∧ each==60 → signal=1  (t=0 fallback)
+        dc0 = new_entity("decider-combinator", id=f"{base_id}_match0",
+                         tile_position=(col, MATCH0_Y))
+        dc0.conditions = [
+            dc0.Condition(
+                first_signal=sub_tick_sig, comparator="=", constant=0,
+            ),
+            dc0.Condition(
+                first_signal="signal-each", comparator="=", constant=60,
+                compare_type="and",
+            ),
+        ]
+        dc0.outputs = [
+            dc0.Output(signal="signal-each", copy_count_from_input=False, constant=1)
+        ]
+        blueprint.entities.append(dc0)
+
+        # CC output → both match DCs (green)
         blueprint.add_circuit_connection("green", f"{base_id}_lut", f"{base_id}_match")
+        blueprint.add_circuit_connection("green", f"{base_id}_lut", f"{base_id}_match0")
 
         # -- Selector AC: each(red) * each(green) → bell --
         bell_sig = "signal-B"
@@ -194,9 +218,13 @@ def build_audio_decoder(
         )
         blueprint.entities.append(ac_sel)
 
-        # Wire match DC → selector AC (GREEN — translator output)
+        # Wire both match DCs → selector AC (GREEN — translator output)
         blueprint.add_circuit_connection(
             "green", f"{base_id}_match", f"{base_id}_sel",
+            side_1="output", side_2="input",
+        )
+        blueprint.add_circuit_connection(
+            "green", f"{base_id}_match0", f"{base_id}_sel",
             side_1="output", side_2="input",
         )
 
@@ -289,6 +317,16 @@ def build_audio_decoder(
     for ch in range(11, 0, -1):
         blueprint.add_circuit_connection(
             "red", f"ch{ch}_match", f"ch{ch-1}_match",
+            side_1="input", side_2="input",
+        )
+    # Same sub-tick distribution for match0 DCs
+    blueprint.add_circuit_connection(
+        "red", "mod", "ch11_match0",
+        side_1="output", side_2="input",
+    )
+    for ch in range(11, 0, -1):
+        blueprint.add_circuit_connection(
+            "red", f"ch{ch}_match0", f"ch{ch-1}_match0",
             side_1="input", side_2="input",
         )
 

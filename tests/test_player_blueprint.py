@@ -43,7 +43,7 @@ class TestBuildAudioDecoder:
         assert bp.label == "My Piano"
 
     def test_entity_counts(self):
-        """48 speakers + 85 ACs + 12 DCs + 13 CCs = 158 entities."""
+        """48 speakers + 85 ACs + 24 DCs + 13 CCs = 170 entities."""
         bp_str = build_audio_decoder()
         bp = _parse_bp(bp_str)
         speakers = _get_entities_by_type(bp, "programmable-speaker")
@@ -52,12 +52,12 @@ class TestBuildAudioDecoder:
         ccs = _get_entities_by_type(bp, "constant-combinator")
         assert len(speakers) == 48
         assert len(ariths) == 85     # 7perCh×12 + 1mod
-        assert len(dcs) == 12        # 1perCh match
+        assert len(dcs) == 24        # 2perCh (match + match0)
         assert len(ccs) == 13        # 1perCh lookup + 1 port
-        assert len(bp.entities) == 158
+        assert len(bp.entities) == 170
 
     def test_unpacker_positions_compact(self):
-        """Unpackers should be directly below speakers at y>=4, cols 0..12."""
+        """Unpackers should be directly below match DCs at y>=4, cols 0..12."""
         bp_str = build_audio_decoder()
         bp = _parse_bp(bp_str)
         acs = _get_entities_by_type(bp, "arithmetic-combinator")
@@ -171,6 +171,35 @@ class TestBuildAudioDecoder:
         bp = _parse_bp(bp_str)
         # Draftsman stores wires as a list of wire connection tuples
         assert len(bp.wires) > 0, "Expected at least one wire connection"
+
+    def test_lut_cc_values_are_nonzero(self):
+        """All lookup CC entries must have non-zero values.
+
+        Factorio drops signals with value 0 from the circuit network,
+        which would make sub_tick=0 CC entries invisible to match DCs.
+        The t=0 entry uses value 60 (non-zero) and is matched by the
+        match0 DC (sub_tick==0 AND each==60).
+        """
+        bp_str = build_audio_decoder()
+        bp = _parse_bp(bp_str)
+        ccs = _get_entities_by_type(bp, "constant-combinator")
+        # LUT CCs are at y=22, cols 0..11; page_port is at (12, 16).
+        from factorio_display.audio.player_blueprint import LUT_Y, TICKS_PER_PAGE
+        luts = [
+            cc for cc in ccs
+            if cc.tile_position[1] == LUT_Y
+        ]
+        assert len(luts) == 12, f"Expected 12 LUT CCs, found {len(luts)}"
+        for cc in luts:
+            for slot in range(1, TICKS_PER_PAGE + 1):
+                sig = cc.get_signal(slot)
+                assert sig is not None, (
+                    f"LUT CC at {cc.tile_position} missing signal at slot {slot}"
+                )
+                assert sig.count != 0, (
+                    f"LUT CC at {cc.tile_position} slot {slot} ({sig.name}) "
+                    f"has count=0 — 0-value signals are dropped by Factorio"
+                )
 
     def test_blueprint_roundtrip(self):
         """Blueprint string → parse → re-export should be stable."""
