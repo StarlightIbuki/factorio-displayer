@@ -1,7 +1,8 @@
 """Shared test fixtures for factorio-display audio tests."""
 
-import pytest
 from __future__ import annotations
+
+import pytest
 
 from factorio_display.integer2signal.pool import get_filtered_pool
 
