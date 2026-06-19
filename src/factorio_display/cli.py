@@ -69,7 +69,18 @@ def main():
     encode_parser.add_argument("--deduplicate", action="store_true", help="Share one combinator across identical frames.")
     encode_parser.add_argument("--width", type=int, default=None, help="Override display width (tiles).")
     encode_parser.add_argument("--height", type=int, default=None, help="Override display height (tiles).")
-    
+
+    # Time-chunking options
+    chunk_g = encode_parser.add_argument_group("Time-chunked generation")
+    chunk_g.add_argument("--time-chunks", type=int, default=1,
+                         help="Split video into N time slices for parallel encoding (default: 1 = off).")
+    chunk_g.add_argument("--chunk-workers", type=int, default=None,
+                         help="Max parallel worker processes (default: CPU count).")
+    chunk_g.add_argument("--output-chunks", type=str, default=None,
+                         help="Write individual chunk blueprints to DIR for inspection.")
+    chunk_g.add_argument("--deduplicate-cross", action="store_true",
+                         help="Deduplicate identical frames across time chunks during merge (slower).")
+
     # Audio-specific
     encode_parser.add_argument("--no-audio", action="store_true", help="Disable automatic audio track encoding.")
 
@@ -132,6 +143,10 @@ def main():
             deduplicate=args.deduplicate,
             total_width=args.width, 
             total_height=args.height,
+            time_chunks=args.time_chunks,
+            chunk_workers=args.chunk_workers,
+            output_chunks_dir=args.output_chunks,
+            deduplicate_cross=args.deduplicate_cross,
         )
         
         # Output ONLY the blueprint string

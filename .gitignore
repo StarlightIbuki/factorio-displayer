@@ -3,3 +3,4 @@ __pycache__/
 *.egg-info
 *.pkl
 _generated.py
+.encode_chunks*
