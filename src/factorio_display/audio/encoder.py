@@ -67,6 +67,37 @@ def unpack_four(packed: int) -> tuple[int, int, int, int]:
     return l1, l2, l3, l4
 
 
+# ── loudness normalization ─────────────────────────────────────────
+
+def normalize_tick_data(
+    tick_data: list[list[float]],
+    target_max: float = 100.0,
+) -> list[list[float]]:
+    """Scale all loudness values so the global peak does not exceed *target_max*.
+
+    Returns the original data unchanged if the global maximum is already
+    ≤ *target_max* or if every value is 0.
+    """
+    if not tick_data:
+        return tick_data
+
+    global_max = max(
+        (v for tick in tick_data for v in tick),
+        default=0.0,
+    )
+
+    if global_max <= 0.0 or global_max <= target_max:
+        return tick_data
+
+    scale = target_max / global_max
+    sys.stderr.write(
+        f"Audio normalize: global peak {global_max:.1f} → "
+        f"{target_max:.0f} (scale={scale:.4f})\n"
+    )
+
+    return [[v * scale for v in tick] for tick in tick_data]
+
+
 # ── tick data helpers ──────────────────────────────────────────────────
 
 def loudness_to_packed(
@@ -346,6 +377,10 @@ def encode_audio_auto(
     )
 
     float_data = midi_to_tick_data(mid, **midi_kwargs)  # type: ignore[arg-type]
+
+    # ── normalize (peak scaling, on by default) ─────────────────────
+    normalize_target = float(kwargs.get("normalize_target", 100.0))
+    float_data = normalize_tick_data(float_data, target_max=normalize_target)
 
     # ── debug JSON dump ──────────────────────────────────────────────
     debug_json_path = kwargs.get("debug_json_path")
