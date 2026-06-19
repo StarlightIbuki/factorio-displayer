@@ -44,7 +44,7 @@ def _semitone_to_letter(semitone: int) -> str:
     if semitone in natural_semitones:
         idx = natural_semitones.index(semitone)
         return natural_letters[idx]
-    elif semitone in sharp_semitones:
+    if semitone in sharp_semitones:
         # Find the natural note below this sharp
         base_semitone = semitone - 1
         idx = natural_semitones.index(base_semitone)

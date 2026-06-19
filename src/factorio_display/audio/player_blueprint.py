@@ -31,7 +31,6 @@ from draftsman.blueprintable import Blueprint
 from draftsman.entity import new_entity
 
 from .pitch_mapping import (
-    SPEAKER_COUNT,
     iter_speaker_signals,
     pitch_index_to_signal,
 )
@@ -48,7 +47,7 @@ _MIDI_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 
 
 def _pitch_index_to_factorio_note(pitch_idx: int) -> str:
-    from .pitch_mapping import MIDI_BASE
+    from .pitch_mapping import MIDI_BASE  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
     midi = MIDI_BASE + pitch_idx
     octave = midi // 12 - 1
     semitone = midi % 12
@@ -82,21 +81,27 @@ SPK_Y = 0           # speaker grid (4 rows: 0..3)
 # Main builder
 # ═══════════════════════════════════════════════════════════════════════
 
-def build_audio_decoder(
+def build_audio_decoder(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     name: str = "Audio Decoder",
     instrument: str = "piano",
     clock_signal: str = "signal-clock",
     signal_pool: list[str] | None = None,
     qualities: list[str] | None = None,
 ) -> str:
-    from .. import SIGNAL_POOL, QUALITIES
+    """Build a 48-speaker audio decoder blueprint.
+
+    Generates the full decoder circuitry: clock modulo, page lookup,
+    matching deciders, selector arithmetic, unpacker chain, and
+    speaker matrix. Returns a Factorio blueprint string.
+    """
+    from .. import SIGNAL_POOL, QUALITIES  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
 
     if signal_pool is None:
         signal_pool = list(SIGNAL_POOL)
     if qualities is None:
         qualities = list(QUALITIES)
 
-    num_base = len(signal_pool)
+num_base = len(signal_pool)  # noqa: F841
     num_qual = len(qualities)
 
     blueprint = Blueprint()
@@ -231,15 +236,15 @@ def build_audio_decoder(
         # -- Unpacker chain (6 ACs) --
         spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(4)]
 
-        def _ac(uid, y, first_op, op, second_op, out):
-            ac = new_entity("arithmetic-combinator", id=f"{base_id}_{uid}",
+        def _ac(uid, y, first_op, op, second_op, out, *, _bid=base_id):  # pylint: disable=cell-var-from-loop
+            ac = new_entity("arithmetic-combinator", id=f"{_bid}_{uid}",
                             tile_position=(col, y))
             ac.set_arithmetic_condition(
                 first_operand=first_op, operation=op,
                 second_operand=second_op, output_signal=out,
             )
             blueprint.entities.append(ac)
-            return f"{base_id}_{uid}"
+            return f"{_bid}_{uid}"
 
         uid_l1 = _ac("l1", UNP_L1_Y, bell_sig, ">>", 21, spk_sigs[0])
         uid_s2 = _ac("s2", UNP_S2_Y, bell_sig, ">>", 14, "signal-5")

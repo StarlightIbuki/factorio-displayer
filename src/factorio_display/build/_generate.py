@@ -9,14 +9,14 @@ from pathlib import Path
 from typing import Any
 
 
-def generate_resources(config_path: str = "config.toml") -> dict[str, Any]:
+def generate_resources(config_path: str = "config.toml") -> dict[str, Any]:  # pylint: disable=too-many-locals
     """Compute and return all build-time resources.
 
     Returns a dict with keys ``pool_hash``, ``display_blueprint``, and ``pool``.
     """
-    from ..integer2signal.config_loader import load_config
-    from ..integer2signal.pool import get_filtered_pool
-    from ..integer2signal.mapping import SignalMapping
+    from ..integer2signal.config_loader import load_config  # pylint: disable=import-outside-toplevel
+    from ..integer2signal.pool import get_filtered_pool  # pylint: disable=import-outside-toplevel
+    from ..integer2signal.mapping import SignalMapping  # pylint: disable=import-outside-toplevel
 
     config = load_config(config_path)
     pool: list[str] = get_filtered_pool(config["reserved"]["clock_signal"])
@@ -41,8 +41,8 @@ def generate_resources(config_path: str = "config.toml") -> dict[str, Any]:
     ).hexdigest()
 
     # ---- build the display-unit blueprint -----------------------------------
-    from draftsman.blueprintable import Blueprint
-    from draftsman.entity import new_entity
+    from draftsman.blueprintable import Blueprint  # pylint: disable=import-error,import-outside-toplevel
+    from draftsman.entity import new_entity  # pylint: disable=import-error,import-outside-toplevel
 
     blueprint = Blueprint()
     blueprint.label = f"{display_width}x{display_height} Display Unit (2.0 RGB)"

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import math
+import os
+import statistics
 import sys
-from typing import Any
 
 import mido
-import statistics
-import argparse
-import os
 
-from .pitch_mapping import (
+from .pitch_mapping import (  # pylint: disable=relative-beyond-top-level
     MIDI_BASE,
     SPEAKER_COUNT,
     midi_to_pitch_index,
@@ -25,29 +24,39 @@ FACTORIO_INSTRUMENTS = {
 }
 
 # --- 2. AUTOMATED INSTRUMENT ROUTING ---
-def map_gm_to_factorio(program, channel):
-    if channel == 9: return 'drum'
-    if 0 <= program <= 7: return 'piano'
-    if 8 <= program <= 15: return 'celesta'
-    if 24 <= program <= 31: return 'plucked'
-    if 32 <= program <= 39: return 'bass'
-    if 80 <= program <= 87: return 'bass'
+def map_gm_to_factorio(program, channel):  # pylint: disable=too-many-return-statements
+    """Map a GM program number and channel to a Factorio instrument name."""
+    if channel == 9:
+        return 'drum'
+    if 0 <= program <= 7:
+        return 'piano'
+    if 8 <= program <= 15:
+        return 'celesta'
+    if 24 <= program <= 31:
+        return 'plucked'
+    if 32 <= program <= 39:
+        return 'bass'
+    if 80 <= program <= 87:
+        return 'bass'
     return 'piano'
 
 # --- 3. CONTEXT-AWARE OCTAVE FOLDING ---
 def fold_octaves(track_notes, target_instrument):
-    if not track_notes: return []
-    
+    """Fold notes to fit within the target instrument's range."""
+    if not track_notes:
+        return []
+
     target_range = FACTORIO_INSTRUMENTS[target_instrument]
     target_center = (target_range['min'] + target_range['max']) // 2
-    
+
     pitches = [msg.note for msg in track_notes if msg.type == 'note_on' and msg.velocity > 0]
-    if not pitches: return track_notes
+    if not pitches:
+        return track_notes
     median_pitch = statistics.median(pitches)
-    
+
     shift_amount = target_center - median_pitch
-    octave_shift = round(shift_amount / 12) * 12 
-    
+    octave_shift = round(shift_amount / 12) * 12
+
     folded_notes = []
     for msg in track_notes:
         if msg.type in ('note_on', 'note_off'):
@@ -57,11 +66,12 @@ def fold_octaves(track_notes, target_instrument):
             folded_notes.append(msg.copy(note=int(new_note)))
         else:
             folded_notes.append(msg)
-            
+
     return folded_notes
 
 # --- 4. UNIFIED TIMING & DYNAMICS ENGINE ---
-def process_timing(mid, min_note_gap_sec=0.06, chord_tolerance_sec=0.01, boost_melody=False):
+def process_timing(mid, min_note_gap_sec=0.06, chord_tolerance_sec=0.01, boost_melody=False):  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """Process MIDI timing: normalize note gaps, detect melody, scale velocity."""
     new_mid = mido.MidiFile()
     new_mid.ticks_per_beat = mid.ticks_per_beat
 
@@ -132,13 +142,13 @@ def process_timing(mid, min_note_gap_sec=0.06, chord_tolerance_sec=0.01, boost_m
             else:
                 new_msg = msg.copy(time=0)
                 absolute_events.append({'tick': absolute_tick, 'msg': new_msg, 'order': 0})
-                
+
         # --- PASS 2: Sort and Rebuild Delta Time ---
         absolute_events.sort(key=lambda e: (e['tick'], e['order']))
-        
+
         new_track = mido.MidiTrack()
         new_mid.tracks.append(new_track)
-        
+
         prev_tick = 0
         for event in absolute_events:
             msg = event['msg']
@@ -146,12 +156,12 @@ def process_timing(mid, min_note_gap_sec=0.06, chord_tolerance_sec=0.01, boost_m
             msg.time = max(0, delta_tick)
             new_track.append(msg)
             prev_tick = event['tick']
-            
+
     return new_mid
 
-# --- 5. MIDI → TICK_DATA ENGINE (float-based) ---
+# --- 5. MIDI �?TICK_DATA ENGINE (float-based) ---
 
-REFERENCE_TEMPO = 500_000  # 120 BPM — baseline for ticks_per_beat calibration
+REFERENCE_TEMPO = 500_000  # 120 BPM �?baseline for ticks_per_beat calibration
 
 
 def _midi_tick_to_game_tick(
@@ -175,7 +185,7 @@ def _midi_tick_to_game_tick(
 
 
 def _fold_note(note: int) -> tuple[int, str]:
-    """Fold a MIDI note into the F3–E7 range (53–100).
+    """Fold a MIDI note into the F3–E7 range (53�?00).
 
     Returns (folded_note, log_message).  If no folding was needed,
     log_message is empty.
@@ -195,7 +205,7 @@ def _fold_note(note: int) -> tuple[int, str]:
     def _name(m: int) -> str:
         return f"{note_names[m % 12]}{m // 12 - 1}"
 
-    return note, f"Note MIDI {original} ({_name(original)}) folded → MIDI {note} ({_name(note)})"
+    return note, f"Note MIDI {original} ({_name(original)}) folded �?MIDI {note} ({_name(note)})"
 
 
 def _adsr_shape(
@@ -210,10 +220,10 @@ def _adsr_shape(
     """Compute loudness at a given tick within a note using ADSR envelope.
 
     Phases:
-    - Attack:  ramp 70% → 100% of peak_loudness  (0 .. attack_ticks)
-    - Decay:   ramp 100% → sustain_level          (attack .. attack+decay)
+    - Attack:  ramp 70% �?100% of peak_loudness  (0 .. attack_ticks)
+    - Decay:   ramp 100% �?sustain_level          (attack .. attack+decay)
     - Sustain: hold at sustain_level               (attack+decay .. dur-release)
-    - Release: ramp sustain_level → 0%            (dur-release .. dur)
+    - Release: ramp sustain_level �?0%            (dur-release .. dur)
 
     If the note is too short for full attack+release, phases are shortened
     proportionally so the shape still fits.
@@ -232,7 +242,7 @@ def _adsr_shape(
 
     release_start = note_duration - release_ticks
 
-    # Release (comes first in priority — last ticks of note)
+    # Release (comes first in priority �?last ticks of note)
     if release_ticks > 0 and tick_in_note >= release_start:
         progress = (tick_in_note - release_start) / max(1, release_ticks)
         frac = sustain_level * (1.0 - progress)
@@ -241,7 +251,7 @@ def _adsr_shape(
     # Attack
     if attack_ticks > 0 and tick_in_note < attack_ticks:
         progress = tick_in_note / attack_ticks
-        frac = 0.70 + 0.30 * progress  # 70% → 100%
+        frac = 0.70 + 0.30 * progress  # 70% �?100%
         return peak_loudness * frac
 
     # Decay
@@ -249,7 +259,7 @@ def _adsr_shape(
     decay_end = attack_ticks + decay_ticks
     if decay_ticks > 0 and tick_in_note < decay_end:
         progress = (tick_in_note - decay_start) / decay_ticks
-        frac = 1.0 - (1.0 - sustain_level) * progress  # 100% → sustain_level
+        frac = 1.0 - (1.0 - sustain_level) * progress  # 100% �?sustain_level
         return peak_loudness * frac
 
     # Sustain
@@ -269,7 +279,7 @@ def midi_to_tick_data(
 ) -> list[list[float]]:
     """Convert a MIDI file to per-tick loudness data for all 48 speakers.
 
-    Returns ``tick_data[tick][speaker_idx] = loudness`` as floats (0.0–100.0+).
+    Returns ``tick_data[tick][speaker_idx] = loudness`` as floats (0.0�?00.0+).
     The caller is responsible for clipping and rounding to int.
 
     Parameters
@@ -287,13 +297,13 @@ def midi_to_tick_data(
     processed_midi_path : str | None
         If given, writes an octave-folded .mid file for preview in any player.
     attack_ticks : int
-        ADSR attack duration in game ticks (ramp 70%→100%).
+        ADSR attack duration in game ticks (ramp 70%�?00%).
     decay_ticks : int
         ADSR decay duration in game ticks (ramp 100%→sustain_level).
     sustain_level : float
-        ADSR sustain level as fraction of peak (0.0–1.0, default 1.0).
+        ADSR sustain level as fraction of peak (0.0�?.0, default 1.0).
     release_ticks : int
-        ADSR release duration in game ticks (ramp sustain_level→0%).
+        ADSR release duration in game ticks (ramp sustain_level�?%).
     """
     if not mid.tracks:
         return []
@@ -345,7 +355,7 @@ def midi_to_tick_data(
         is_melody = (track_idx == melody_track_idx)
 
         absolute_midi_tick = 0
-        active_notes: dict[int, tuple[float, float]] = {}  # note → (start_game_tick, loudness)
+        active_notes: dict[int, tuple[float, float]] = {}  # note �?(start_game_tick, loudness)
 
         for msg in track:
             absolute_midi_tick += int(msg.time)
@@ -463,26 +473,26 @@ def translate_to_factorio(input_file, output_file, boost=False):
     mid = mido.MidiFile(input_file)
 
     print(f"Processing Timing... (Boost: {boost})")
-    mid = process_timing(mid, boost_melody=boost) 
-    
+    mid = process_timing(mid, boost_melody=boost)
+
     processed_mid = mido.MidiFile()
     processed_mid.ticks_per_beat = mid.ticks_per_beat
-    
+
     for track in mid.tracks:
         new_track = mido.MidiTrack()
         processed_mid.tracks.append(new_track)
-        
-        current_instrument = 'piano' 
+
+        current_instrument = 'piano'
         for msg in track:
             if msg.type == 'program_change':
                 current_instrument = map_gm_to_factorio(msg.program, msg.channel)
             elif hasattr(msg, 'channel') and msg.channel == 9:
                 current_instrument = 'drum'
-                
+
         folded_track = fold_octaves(track, current_instrument)
         for msg in folded_track:
             new_track.append(msg)
-            
+
     processed_mid.save(output_file)
     print(f"Translation complete. Saved to {output_file}.")
 

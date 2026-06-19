@@ -16,10 +16,10 @@ def _signal_key(name: str, quality: str) -> str:
     return f"{name}|{quality}"
 
 
-class SignalMapping:
+class SignalMapping:  # pylint: disable=too-many-instance-attributes
     """Maps every valid display pixel to a Factorio signal and back."""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         width: int,
         height: int,
@@ -128,7 +128,7 @@ class SignalMapping:
 
     def export_manifest(self, path: str = "signal_manifest.json") -> None:
         """Write the base signal list to a JSON manifest for other tools."""
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(self.base_signals, f)
 
     # ------------------------------------------------------------------
@@ -136,7 +136,7 @@ class SignalMapping:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_manifest(
+    def from_manifest(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         cls,
         width: int,
         height: int,
@@ -150,6 +150,6 @@ class SignalMapping:
         This is the preferred constructor for tools that consume the mapping
         (e.g. the video encoder) rather than generating it from scratch.
         """
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             base_signals = json.load(f)
         return cls(width, height, hole_tl, hole_br, qualities, base_signals)

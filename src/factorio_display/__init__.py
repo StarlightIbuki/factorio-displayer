@@ -52,7 +52,7 @@ if not SIGNAL_POOL:
             _dev_pool,
         )
         SIGNAL_POOL = _dev_mapping.base_signals
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught — fallback for dev installs
         pass
 
 __all__ = [

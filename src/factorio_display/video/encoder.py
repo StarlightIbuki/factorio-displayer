@@ -1,4 +1,4 @@
-"""Media encoder — converts video, GIF, PNG series, and still images into
+"""Media encoder converts video, GIF, PNG series, and still images into
 Factorio animation-memory blueprint strings.
 
 All encoders share a common :func:`encode_frames` pipeline that builds the
@@ -38,9 +38,9 @@ from .. import (
 try:
     from tqdm import tqdm
 except ImportError:
-    class tqdm:
+    class tqdm:  # pylint: disable=invalid-name
         """Graceful fallback if tqdm is not installed."""
-        def __init__(self, iterable=None, *args, **kwargs):
+        def __init__(self, iterable=None, *_args, **_kwargs):  # pylint: disable=keyword-arg-before-vararg
             self.iterable = iterable or []
         def __iter__(self):
             yield from self.iterable
@@ -52,9 +52,9 @@ except ImportError:
             pass
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# Dimension resolution — auto-calculate omitted dimension + unit rounding
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
+# Dimension resolution �?auto-calculate omitted dimension + unit rounding
+# ══════════════════════════════════════════════════════════════════════�?
 
 def resolve_dimensions(
     source_w: int,
@@ -94,7 +94,7 @@ def resolve_dimensions(
         w = max(1, round(user_h * source_w / source_h))
         h = user_h
     else:
-        # Neither specified — use the single-unit default (current behaviour)
+        # Neither specified �?use the single-unit default (current behaviour)
         w, h = unit_w, unit_h
 
     if round_units:
@@ -105,13 +105,13 @@ def resolve_dimensions(
 
 
 def _frame_diff(a: np.ndarray, b: np.ndarray) -> float:
-    """Return 0.0–1.0 normalised mean absolute difference between two RGB frames."""
+    """Return 0.0�?.0 normalised mean absolute difference between two RGB frames."""
     return float(np.mean(np.abs(a.astype(np.float32) - b.astype(np.float32))) / 255.0)
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 # Core blueprint builder (extracted for reuse by chunked encoder)
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 
 def _encode_frames_core(
     kept_frames: list[np.ndarray],
@@ -131,7 +131,7 @@ def _encode_frames_core(
 ) -> str:
     """Build a blueprint string from pre-processed frame data.
 
-    This is the second half of :func:`encode_frames` — it takes already-resized
+    This is the second half of :func:`encode_frames` �?it takes already-resized
     and adaptive-dropped frames plus tick ranges, and produces the combinator
     blueprint.  It is a top-level function so :class:`~concurrent.futures.ProcessPoolExecutor`
     can serialise it.
@@ -170,8 +170,7 @@ def _encode_frames_core(
 
         total = len(unique_frames)
         cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
-        if cols > 26:
-            cols = 26
+        cols = min(cols, 26)
         rows = (total + cols - 1) // cols
 
         dc_grid: dict[tuple[int, int], str] = {}
@@ -267,7 +266,7 @@ def _encode_frames_core(
     # Multi-unit path
     # ==================================================================
 
-    # Phase 2 — split into per-unit regions
+    # Phase 2 �?split into per-unit regions
     unit_entries: list[list[tuple[np.ndarray, int, int]]] = [
         [] for _ in range(num_units)
     ]
@@ -286,7 +285,7 @@ def _encode_frames_core(
                     region = padded
                 unit_entries[ui].append((region, start, end))
 
-    # Phase 3 — deduplicate per unit
+    # Phase 3 �?deduplicate per unit
     unit_unique: list[list[tuple[np.ndarray, list[tuple[int, int]]]]] = []
     for entries in unit_entries:
         if deduplicate:
@@ -305,7 +304,7 @@ def _encode_frames_core(
                 current_unique.append((resized, [(start, end)]))
             unit_unique.append(current_unique)
 
-    # Phase 4 — build blueprint: per-unit grids, padding, direct wiring
+    # Phase 4 �?build blueprint: per-unit grids, padding, direct wiring
     blueprint = Blueprint()
     blueprint.label = (
         f"Video Memory: {output_name}{label_suffix} "
@@ -327,7 +326,7 @@ def _encode_frames_core(
                 unique_frames.append((dummy, dummy_ranges))
         unit_grids.append((c * r, c, r))
 
-    MARGIN = 2
+    margin = 2  # pylint: disable=invalid-name
 
     row_max_rows: list[int] = []
     for ur in range(unit_rows):
@@ -344,8 +343,8 @@ def _encode_frames_core(
         for uc in range(unit_cols):
             unit_origins.append((cum_col, cum_row))
             _, c, _ = unit_grids[ur * unit_cols + uc]
-            cum_col += c + MARGIN
-        cum_row += row_max_rows[ur] * 2 + MARGIN
+            cum_col += c + margin
+        cum_row += row_max_rows[ur] * 2 + margin
 
     unit_top_left: dict[int, str] = {}
     unit_top_right: dict[int, str] = {}
@@ -457,15 +456,15 @@ def _encode_frames_core(
     total_combinators = sum(len(uf) for uf in unit_unique)
     sys.stderr.write(
         f"\nEncoded {total_input} frames "
-        f"→ {total_combinators} combinators across {num_units} display units "
+        f"�?{total_combinators} combinators across {num_units} display units "
         f"({unit_cols}×{unit_rows} grid, unit size {unit_w}×{unit_h}).\n"
     )
     return blueprint.to_string()
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 # Chunk-cache helpers
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 
 def _chunk_cache_dir(source_id: str, time_chunks: int, total_w: int, total_h: int,
                      fps: float, adaptive: bool, threshold: float, deduplicate: bool) -> Path:
@@ -484,9 +483,9 @@ def _chunk_meta_path(cache_dir: Path) -> Path:
     return cache_dir / "meta.json"
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 # ProcessPoolExecutor worker (top-level so it can be pickled)
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 
 def _build_chunk_worker(payload: bytes) -> tuple[int, str]:
     """Build a single time-chunk blueprint in a worker process.
@@ -514,9 +513,9 @@ def _build_chunk_worker(payload: bytes) -> tuple[int, str]:
     return chunk_idx, bp_str
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 # Merge helpers
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 
 def _max_col_in_blueprint(bp: Blueprint) -> int:
     """Return the maximum tile X coordinate of any entity in the blueprint."""
@@ -567,7 +566,7 @@ def _merge_chunk_blueprints(
     chunk_last_id: list[str] = []
 
     cum_x_offset = 0.0
-    MARGIN = 2
+    margin = 2  # pylint: disable=invalid-name
 
     for ci, bp in enumerate(parsed):
         entity_dicts = bp.to_dict().get("blueprint", {}).get("entities", [])
@@ -577,7 +576,7 @@ def _merge_chunk_blueprints(
             chunk_last_id.append("")
             continue
 
-        # Map: id(old_entity_object) → new entity ID string
+        # Map: id(old_entity_object) �?new entity ID string
         old_obj_to_new_id: dict[int, str] = {}
 
         first_dc_id = ""
@@ -663,7 +662,7 @@ def _merge_chunk_blueprints(
 
             # wire_type: 2 = green, 3 = red (from draftsman's internal encoding)
             # Actual Factorio: color 1=red, 2=green; circuit_id 1=input, 2=output
-            # draftsman encodes: wire type = color + (side * 2?) 
+            # draftsman encodes: wire type = color + (side * 2?)
             # Observed: green wire with input→input = 2, red wire with output→output = 3
             # Let's just add both green+red for robustness
             if wire_type_1 in (2,) and wire_type_2 in (2,):
@@ -687,7 +686,7 @@ def _merge_chunk_blueprints(
         chunk_last_id.append(last_dc_id)
 
         # Compute next X offset
-        cum_x_offset += _max_col_in_blueprint(bp) + 1 + MARGIN
+        cum_x_offset += _max_col_in_blueprint(bp) + 1 + margin
 
     # ── inter-chunk wiring ────────────────────────────────────────────
     for ci in range(len(non_empty) - 1):
@@ -705,7 +704,7 @@ def _merge_chunk_blueprints(
 
     sys.stderr.write(
         f"Merged {len(non_empty)} time chunks "
-        f"→ {len(merged.entities)} entities.\n"
+        f"�?{len(merged.entities)} entities.\n"
     )
     return merged.to_string()
 
@@ -721,10 +720,10 @@ def _merge_with_cross_dedup(
     are combined into a single DC, reducing the total combinator count.
     """
     # Collect all DCs from all chunks
-    # Key: hash of (output_signals, output_values) → merged conditions
+    # Key: hash of (output_signals, output_values) �?merged conditions
     from collections import OrderedDict
 
-    # dc_signature → (conditions_list, first_entity_for_reference)
+    # dc_signature �?(conditions_list, first_entity_for_reference)
     merged_dcs: dict[str, dict] = OrderedDict()
 
     for bp in parsed:
@@ -801,8 +800,7 @@ def _merge_with_cross_dedup(
 
     total = len(merged_dcs)
     cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
-    if cols > 26:
-        cols = 26
+    cols = min(cols, 26)
     rows = (total + cols - 1) // cols
 
     dc_grid: dict[tuple[int, int], str] = {}
@@ -873,7 +871,7 @@ def _merge_with_cross_dedup(
     original_total = sum(len([e for e in bp.entities if "decider-combinator" in e.name])
                          for bp in parsed)
     sys.stderr.write(
-        f"Cross-chunk dedup: {original_total} → {total} combinators "
+        f"Cross-chunk dedup: {original_total} �?{total} combinators "
         f"({original_total - total} removed) over {total_ticks} ticks.\n"
     )
     return merged.to_string()
@@ -921,7 +919,7 @@ def encode_frames(
     # ==================================================================
     # Phase 0 & 1: Parallel Resizing, Adaptive Dropping, and Caching
     # ==================================================================
-    
+
     # Generate a unique cache name based on inputs to prevent cross-run collisions
     hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}"
     safe_name = hashlib.md5(hash_str.encode('utf-8')).hexdigest()[:8]
@@ -946,7 +944,7 @@ def encode_frames(
 
     if not loaded_from_cache:
         sys.stderr.write("Decoding, resizing, and processing frames...\n")
-        
+
         def _resize_task(rgb):
             resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
             if resized.dtype != np.uint8:
@@ -959,7 +957,7 @@ def encode_frames(
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = executor.map(_resize_task, rgb_frames)
-            
+
             for resized in tqdm(futures, total=expected_frames, desc="Resizing & Dropping", unit="frame"):
                 accum += ticks_float
                 needed = max(1, int(accum + 1e-9))
@@ -974,14 +972,14 @@ def encode_frames(
                 # We are keeping this frame. Update the anchor.
                 if adaptive:
                     prev_resized = resized.copy()
-                
+
                 frame_ticks = needed + carry_ticks
                 carry_ticks = 0
 
                 tick_ranges.append((current_tick, current_tick + frame_ticks - 1))
                 kept_frames.append(resized)
                 current_tick += frame_ticks
-                
+
         # Flush any remaining ticks if the video ends on a dropped/static frame
         if carry_ticks > 0 and tick_ranges:
             start, end = tick_ranges[-1]
@@ -1025,9 +1023,9 @@ def encode_frames(
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 # Chunked time-dimension encoder
-# ═══════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════�?
 
 def encode_frames_chunked(
     rgb_frames: Iterator[np.ndarray],
@@ -1072,7 +1070,7 @@ def encode_frames_chunked(
     Returns
     -------
     dict
-        ``{"full": str, "chunks": list[str]}`` — the merged blueprint
+        ``{"full": str, "chunks": list[str]}`` �?the merged blueprint
         string and a list of per-chunk blueprint strings.
     """
     # ── Phase 0 & 1 (same as encode_frames) ───────────────────────────
@@ -1204,7 +1202,7 @@ def encode_frames_chunked(
 
     sys.stderr.write(
         f"Splitting {total_input} frames over {total_ticks} ticks "
-        f"→ {time_chunks} time chunk(s) (~{chunk_size} frames each).\n"
+        f"�?{time_chunks} time chunk(s) (~{chunk_size} frames each).\n"
     )
 
     # ── Chunk cache setup ─────────────────────────────────────────────
@@ -1243,7 +1241,7 @@ def encode_frames_chunked(
             f"with {workers} worker(s)…\n"
         )
 
-        # Build payloads — picklable data for each worker
+        # Build payloads �?picklable data for each worker
         payloads: list[bytes] = []
         for ci in pending_indices:
             # Determine current_tick for this chunk (for the summary line)
@@ -1326,7 +1324,7 @@ def encode_video(
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
 ) -> str:
-    """Encode a video file (``.mp4``, ``.avi``, ``.mov``, …)."""
+    """Encode a video file (``.mp4``, ``.avi``, ``.mov``, �?."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_path}")
@@ -1349,13 +1347,13 @@ def encode_video(
         round_units=round_units,
     )
     sys.stderr.write(
-        f"Source: {source_w}×{source_h} → output: {resolved_w}×{resolved_h}"
+        f"Source: {source_w}×{source_h} �?output: {resolved_w}×{resolved_h}"
     )
     if round_units:
         sys.stderr.write(f"  (rounded to units, {resolved_w // DISPLAY_WIDTH}×{resolved_h // DISPLAY_HEIGHT} units)")
     sys.stderr.write("\n")
-    
-    # Scale the FPS so skipped frames still preserve identical playback duration 
+
+    # Scale the FPS so skipped frames still preserve identical playback duration
     effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
 
     def _iter() -> Iterator[np.ndarray]:
@@ -1420,7 +1418,7 @@ def encode_gif(
         round_units=round_units,
     )
     sys.stderr.write(
-        f"Source GIF: {source_w}×{source_h} → output: {resolved_w}×{resolved_h}"
+        f"Source GIF: {source_w}×{source_h} �?output: {resolved_w}×{resolved_h}"
     )
     if round_units:
         sys.stderr.write(f"  (rounded to units, {resolved_w // DISPLAY_WIDTH}×{resolved_h // DISPLAY_HEIGHT} units)")
@@ -1489,7 +1487,7 @@ def encode_png_series(
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
 ) -> str:
-    """Encode a sequence of image files (PNG, JPEG, …)."""
+    """Encode a sequence of image files (PNG, JPEG, �?."""
     if fps <= 0:
         fps = 60.0
 
@@ -1504,7 +1502,7 @@ def encode_png_series(
         round_units=round_units,
     )
     sys.stderr.write(
-        f"Source image: {source_w}×{source_h} → output: {resolved_w}×{resolved_h}"
+        f"Source image: {source_w}×{source_h} �?output: {resolved_w}×{resolved_h}"
     )
     if round_units:
         sys.stderr.write(f"  (rounded to units, {resolved_w // DISPLAY_WIDTH}×{resolved_h // DISPLAY_HEIGHT} units)")
@@ -1569,7 +1567,7 @@ def encode_frame(
 
 
 # ---------------------------------------------------------------------------
-# Convenience — auto-detect input type and dispatch
+# Convenience �?auto-detect input type and dispatch
 # ---------------------------------------------------------------------------
 
 def encode_auto(

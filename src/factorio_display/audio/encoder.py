@@ -29,7 +29,7 @@ from typing import Sequence
 
 import mido
 
-from .pitch_mapping import SPEAKER_COUNT
+from .pitch_mapping import SPEAKER_COUNT  # pylint: disable=relative-beyond-top-level
 
 
 # ── packing / unpacking constants ──────────────────────────────────────
@@ -114,8 +114,7 @@ def loudness_to_packed(
         Channel ch → semitone ch:  pitch[ch+0*12], pitch[ch+1*12],
                                     pitch[ch+2*12], pitch[ch+3*12]
     """
-    SEMITONES = 12
-    OCTAVES = 4
+    semitone_count = 12
     result: list[list[int]] = []
     for tick_loudness in tick_data:
         if len(tick_loudness) != SPEAKER_COUNT:
@@ -124,13 +123,13 @@ def loudness_to_packed(
                 f"got {len(tick_loudness)}"
             )
         packed: list[int] = []
-        for semitone in range(SEMITONES):
+        for semitone in range(SEMITONE_COUNT):
             packed.append(
                 pack_four(
-                    tick_loudness[semitone + 0 * SEMITONES],  # octave 3
-                    tick_loudness[semitone + 1 * SEMITONES],  # octave 4
-                    tick_loudness[semitone + 2 * SEMITONES],  # octave 5
-                    tick_loudness[semitone + 3 * SEMITONES],  # octave 6
+                    tick_loudness[semitone + 0 * SEMITONE_COUNT],  # octave 3
+                    tick_loudness[semitone + 1 * SEMITONE_COUNT],  # octave 4
+                    tick_loudness[semitone + 2 * SEMITONE_COUNT],  # octave 5
+                    tick_loudness[semitone + 3 * SEMITONE_COUNT],  # octave 6
                 )
             )
         result.append(packed)
@@ -155,14 +154,13 @@ def flatten_packed(
 
 def compute_page_layout(
     total_cells: int,
-    num_base_signals: int,
-    num_qualities: int,
+    _num_base_signals: int,
+    _num_qualities: int,
 ) -> tuple[int, int, int]:
     """Return ``(page_count, cells_per_page, ticks_per_page)``.
 
     Pages are fixed at *CELLS_PER_PAGE* (=720) cells each, matching the
-    decoder's ``clock % 60`` sub-tick selection.  The caller must ensure
-    ``num_base_signals * num_qualities >= CELLS_PER_PAGE``.
+    decoder's ``clock % 60`` sub-tick selection.
     """
     cells_per_page = CELLS_PER_PAGE
     page_count = math.ceil(total_cells / cells_per_page) if total_cells > 0 else 0
@@ -192,9 +190,9 @@ def encode_audio_memory(
         flat_idx   = page_idx * cells_per_page + in_page * 12 + channel
         signal_idx = flat_idx % cells_per_page
     """
-    from draftsman.blueprintable import Blueprint
-    from draftsman.constants import Direction
-    from draftsman.entity import DeciderCombinator, new_entity
+    from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
+    from draftsman.constants import Direction  # pylint: disable=import-outside-toplevel
+    from draftsman.entity import DeciderCombinator, new_entity  # pylint: disable=import-outside-toplevel
 
     if not tick_data:
         sys.stderr.write("No audio data to encode.\n")
@@ -355,8 +353,8 @@ def encode_audio_auto(
         sys.stderr.write(f"Audio auto-encode: unsupported format: {path}\n")
         return ""
 
-    from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL
-    from .midi_translator import midi_to_tick_data
+    from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from .midi_translator import midi_to_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
 
     # Gather midi_translator kwargs
     midi_kwargs: dict[str, object] = {}
@@ -385,10 +383,10 @@ def encode_audio_auto(
     # ── debug JSON dump ──────────────────────────────────────────────
     debug_json_path = kwargs.get("debug_json_path")
     if debug_json_path and isinstance(debug_json_path, str):
-        import json
+        import json  # pylint: disable=import-outside-toplevel
         # Round to 3 decimal places for readability
         json_data = [[round(v, 3) for v in tick] for tick in float_data]
-        with open(debug_json_path, "w") as f:
+        with open(debug_json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f)
         sys.stderr.write(f"Debug JSON written to: {debug_json_path}\n")
 

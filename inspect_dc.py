@@ -2,10 +2,13 @@
 import sys
 sys.path.insert(0, "src")
 
-from draftsman.blueprintable import Blueprint
+# pylint: disable=wrong-import-position — path setup must precede imports
+from draftsman.blueprintable import Blueprint  # pylint: disable=import-error
 from factorio_display.audio.encoder import unpack_four
+# pylint: enable=wrong-import-position
 
-text = open("twinkle.txt", encoding="utf-8").read()
+with open("twinkle.txt", encoding="utf-8") as fh:
+    text = fh.read()
 lines = text.split("\n")
 bp_lines = [l for l in lines if l.startswith("0e")]
 
@@ -26,13 +29,14 @@ print()
 #                       cell_offset 5 -> signal_pool[1], quality[0]
 # cell_offset = signal_idx * 5 + quality_idx
 
-from factorio_display import SIGNAL_POOL, QUALITIES
+from factorio_display import SIGNAL_POOL, QUALITIES  # pylint: disable=wrong-import-position
 
 QUAL_MAP = {q: i for i, q in enumerate(QUALITIES)}
 SIG_MAP = {s: i for i, s in enumerate(SIGNAL_POOL)}
 
 # Sort outputs by cell_offset
 def cell_offset_of(output):
+    """Compute the flat cell offset for a DC output signal."""
     sig_name = output.signal.name
     sig_qual = output.signal.quality
     sig_idx = SIG_MAP.get(sig_name, 99999)

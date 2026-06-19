@@ -7,6 +7,10 @@
         "/^\\.venv\\\\Scripts\\\\python\\.exe -m factorio_display\\.cli .*$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^gh run view .*$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }
