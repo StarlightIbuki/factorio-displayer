@@ -379,6 +379,7 @@ def encode_audio_auto(
         Override instrument detection. One entry per rail.
     ticks_per_beat, boost_melody, velocity_scale,
     attack_ticks, decay_ticks, sustain_level, release_ticks,
+    attack_curve, decay_curve, release_curve,
     processed_midi_path, debug_json_path
         Forwarded to :func:`midi_to_tick_data`.
     """
@@ -396,7 +397,9 @@ def encode_audio_auto(
     for key in (
         "ticks_per_beat", "boost_melody", "velocity_scale",
         "attack_ticks", "decay_ticks", "sustain_level", "release_ticks",
+        "attack_curve", "decay_curve", "release_curve",
         "processed_midi_path",
+        "use_global_shift",
     ):
         if key in kwargs:
             midi_kwargs[key] = kwargs[key]
@@ -431,7 +434,8 @@ def encode_audio_auto(
     _multi_kwargs = {k: v for k, v in midi_kwargs.items()
                      if k in ("ticks_per_beat", "boost_melody", "velocity_scale",
                               "attack_ticks", "decay_ticks", "sustain_level",
-                              "release_ticks")}
+                              "release_ticks", "attack_curve", "decay_curve",
+                              "release_curve", "use_global_shift")}
 
     if rail_mode == "piano":
         # Default: single piano rail, ignore everything else

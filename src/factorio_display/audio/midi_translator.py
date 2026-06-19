@@ -188,8 +188,11 @@ def _midi_tick_to_game_tick(
     return seconds * 2.0 * game_ticks_per_beat
 
 
-def _fold_note(note: int, instrument: str = "piano") -> tuple[int, str]:
+def _fold_note(note: int, instrument: str = "piano", global_shift: int = 0) -> tuple[int, str]:
     """Fold a MIDI note into the 4-octave range of *instrument*.
+
+    *global_shift* is applied first (in semitones, always a multiple of 12),
+    then individual octave folding is done if the note is still out of range.
 
     Returns (folded_note, log_message).  If no folding was needed,
     log_message is empty.
@@ -198,10 +201,13 @@ def _fold_note(note: int, instrument: str = "piano") -> tuple[int, str]:
     note_min = midi_base
     note_max = midi_base + SPEAKER_COUNT - 1
 
+    original = note
+    if global_shift:
+        note += global_shift
+
     if note_min <= note <= note_max:
         return note, ""
 
-    original = note
     while note < note_min:
         note += 12
     while note > note_max:
@@ -219,6 +225,44 @@ def _fold_note(note: int, instrument: str = "piano") -> tuple[int, str]:
     )
 
 
+def find_optimal_octave_shift(notes: list[int], instrument: str) -> int:
+    """Find the octave shift (multiple of 12) that maximises notes in range.
+
+    For a list of MIDI note numbers and a target Factorio instrument, this
+    returns the octave shift *k* such that ``note + k*12`` falls inside the
+    instrument's 4-octave range for the largest number of unique notes.
+
+    Tie-breaking: prefers *k=0*, then the smallest absolute value.
+    Returns 0 (no shift) for empty inputs.
+    """
+    if not notes:
+        return 0
+
+    midi_base = INSTRUMENT_MIDI_BASES.get(instrument, MIDI_BASE)
+    note_min = midi_base
+    note_max = midi_base + SPEAKER_COUNT - 1
+
+    # Consider octave shifts from -5 to +5 (covering extreme MIDI ranges)
+    best_shift = 0
+    best_count = -1
+    for k in range(-5, 6):
+        shift = k * 12
+        count = sum(1 for n in notes if note_min <= n + shift <= note_max)
+        if count > best_count:
+            best_count = count
+            best_shift = shift
+        elif count == best_count:
+            # Tie-break: prefer 0, then smaller absolute shift
+            if best_shift == 0:
+                continue
+            if shift == 0:
+                best_shift = 0
+            elif abs(shift) < abs(best_shift):
+                best_shift = shift
+
+    return best_shift
+
+
 def _adsr_shape(
     tick_in_note: int,
     note_duration: int,
@@ -227,14 +271,22 @@ def _adsr_shape(
     decay_ticks: int,
     sustain_level: float,
     release_ticks: int,
+    attack_curve: float = 1.0,
+    decay_curve: float = 1.0,
+    release_curve: float = 1.0,
 ) -> float:
     """Compute loudness at a given tick within a note using ADSR envelope.
 
-    Phases:
-    - Attack:  ramp 70% �?100% of peak_loudness  (0 .. attack_ticks)
-    - Decay:   ramp 100% �?sustain_level          (attack .. attack+decay)
-    - Sustain: hold at sustain_level               (attack+decay .. dur-release)
-    - Release: ramp sustain_level �?0%            (dur-release .. dur)
+    Phases (with optional power-curve shaping):
+    - Attack:  ramp 70% → 100% of peak_loudness  (0 .. attack_ticks)
+    - Decay:   ramp 100% → sustain_level         (attack .. attack+decay)
+    - Sustain: hold at sustain_level             (attack+decay .. dur-release)
+    - Release: ramp sustain_level → 0%           (dur-release .. dur)
+
+    Each phase uses ``progress ** curve_exp`` interpolation:
+      curve_exp > 1.0  → gentle start, fast finish (convex)
+      curve_exp = 1.0  → linear (backward-compatible default)
+      curve_exp < 1.0  → fast start, gentle finish (concave)
 
     If the note is too short for full attack+release, phases are shortened
     proportionally so the shape still fits.
@@ -253,16 +305,18 @@ def _adsr_shape(
 
     release_start = note_duration - release_ticks
 
-    # Release (comes first in priority �?last ticks of note)
+    # Release (comes first in priority — last ticks of note)
     if release_ticks > 0 and tick_in_note >= release_start:
         progress = (tick_in_note - release_start) / max(1, release_ticks)
-        frac = sustain_level * (1.0 - progress)
+        shaped = progress ** max(0.01, release_curve)
+        frac = sustain_level * (1.0 - shaped)
         return peak_loudness * max(0.0, frac)
 
     # Attack
     if attack_ticks > 0 and tick_in_note < attack_ticks:
         progress = tick_in_note / attack_ticks
-        frac = 0.70 + 0.30 * progress  # 70% �?100%
+        shaped = progress ** max(0.01, attack_curve)
+        frac = 0.70 + 0.30 * shaped  # 70% → 100%
         return peak_loudness * frac
 
     # Decay
@@ -270,7 +324,8 @@ def _adsr_shape(
     decay_end = attack_ticks + decay_ticks
     if decay_ticks > 0 and tick_in_note < decay_end:
         progress = (tick_in_note - decay_start) / decay_ticks
-        frac = 1.0 - (1.0 - sustain_level) * progress  # 100% �?sustain_level
+        shaped = progress ** max(0.01, decay_curve)
+        frac = 1.0 - (1.0 - sustain_level) * shaped  # 100% → sustain_level
         return peak_loudness * frac
 
     # Sustain
@@ -287,10 +342,14 @@ def midi_to_tick_data(
     decay_ticks: int = 0,
     sustain_level: float = 1.0,
     release_ticks: int = 0,
+    attack_curve: float = 1.0,
+    decay_curve: float = 1.0,
+    release_curve: float = 1.0,
+    use_global_shift: bool = True,
 ) -> list[list[float]]:
     """Convert a MIDI file to per-tick loudness data for all 48 speakers.
 
-    Returns ``tick_data[tick][speaker_idx] = loudness`` as floats (0.0�?00.0+).
+    Returns ``tick_data[tick][speaker_idx] = loudness`` as floats (0.0–100.0+).
     The caller is responsible for clipping and rounding to int.
 
     Parameters
@@ -308,13 +367,23 @@ def midi_to_tick_data(
     processed_midi_path : str | None
         If given, writes an octave-folded .mid file for preview in any player.
     attack_ticks : int
-        ADSR attack duration in game ticks (ramp 70%�?00%).
+        ADSR attack duration in game ticks (ramp 70%→100%).
     decay_ticks : int
         ADSR decay duration in game ticks (ramp 100%→sustain_level).
     sustain_level : float
-        ADSR sustain level as fraction of peak (0.0�?.0, default 1.0).
+        ADSR sustain level as fraction of peak (0.0–1.0, default 1.0).
     release_ticks : int
-        ADSR release duration in game ticks (ramp sustain_level�?%).
+        ADSR release duration in game ticks (ramp sustain_level→0%).
+    attack_curve : float
+        Power-curve exponent for attack phase (>1=gentle, <1=snappy).
+    decay_curve : float
+        Power-curve exponent for decay phase (>1=gentle, <1=snappy).
+    release_curve : float
+        Power-curve exponent for release phase (>1=gentle, <1=snappy).
+    use_global_shift : bool
+        If True (default), compute an optimal octave shift that minimises
+        the number of notes needing per-note folding. If False, use only
+        per-note octave folding.
     """
     if not mid.tracks:
         return []
@@ -357,6 +426,23 @@ def midi_to_tick_data(
                     highest_avg_pitch = avg
                     melody_track_idx = i
 
+    # ── Pre-scan: optimal global octave shift ─────────────────────
+    # Collect all unique note pitches across all tracks to find the
+    # octave shift that minimises per-note folding.
+    global_shift = 0
+    if use_global_shift:
+        all_note_pitches: list[int] = []
+        for track in mid.tracks:
+            for msg in track:
+                if msg.type == "note_on" and msg.velocity > 0:
+                    all_note_pitches.append(msg.note)
+        global_shift = find_optimal_octave_shift(all_note_pitches, "piano")
+        if global_shift != 0:
+            sys.stderr.write(
+                f"[midi_translator] Global octave shift: {global_shift:+d} semitones "
+                f"({global_shift // 12:+d} octaves) [piano]\n"
+            )
+
     # ── Collect note events from all tracks ─────────────────────────
     # Each note event: (pitch_idx, start_game_tick, end_game_tick, loudness)
     all_notes: list[tuple[int, float, float, float]] = []
@@ -387,8 +473,8 @@ def midi_to_tick_data(
                     velocity = min(127.0, velocity * boost_melody)
                 loudness = velocity / 127.0 * 100.0 * velocity_scale
 
-                # Octave folding
-                folded_note, log_msg = _fold_note(msg.note)
+                # Octave folding (with optimal global shift)
+                folded_note, log_msg = _fold_note(msg.note, global_shift=global_shift)
                 if log_msg and log_msg not in fold_logged:
                     fold_logged.add(log_msg)
                     sys.stderr.write(f"[midi_translator] {log_msg}\n")
@@ -412,7 +498,7 @@ def midi_to_tick_data(
                 )
 
                 # Fold the note for pitch_idx
-                folded_note, _ = _fold_note(msg.note)
+                folded_note, _ = _fold_note(msg.note, global_shift=global_shift)
                 pitch_idx = midi_to_pitch_index(folded_note)
                 if pitch_idx is None:
                     continue
@@ -446,6 +532,7 @@ def midi_to_tick_data(
                 shaped = _adsr_shape(
                     tick_in_note, note_duration, loudness,
                     attack_ticks, decay_ticks, sustain_level, release_ticks,
+                    attack_curve, decay_curve, release_curve,
                 )
             else:
                 shaped = loudness
@@ -471,7 +558,11 @@ def midi_to_multi_rail_tick_data(
     decay_ticks: int = 0,
     sustain_level: float = 1.0,
     release_ticks: int = 0,
+    attack_curve: float = 1.0,
+    decay_curve: float = 1.0,
+    release_curve: float = 1.0,
     map_drums: bool = False,
+    use_global_shift: bool = True,
 ) -> tuple[list[str], list[list[list[float]]]]:
     """Convert a MIDI file to per-rail tick→loudness data.
 
@@ -482,6 +573,9 @@ def midi_to_multi_rail_tick_data(
     Each rail gets its own 48-speaker tick_data array folded to that
     instrument's range.  If only one instrument is detected, returns a
     single-rail list.
+
+    use_global_shift : bool
+        If True (default), compute per-instrument optimal octave shifts.
     """
     if not mid.tracks:
         return [], []
@@ -633,6 +727,30 @@ def midi_to_multi_rail_tick_data(
                     key=lambda c: c,
                 )
 
+    # ── Pre-scan: optimal global octave shift per instrument ─────
+    # Collect unique note pitches per non-drum rail to find the
+    # octave shift that minimises per-note folding for each instrument.
+    rail_global_shifts: dict[int, int] = {}
+    if use_global_shift:
+        rail_note_pitches: dict[int, list[int]] = {ri: [] for ri in range(num_rails)}
+        for track in mid.tracks:
+            for msg in track:
+                ch = getattr(msg, 'channel', -1)
+                if msg.type == 'note_on' and msg.velocity > 0 and ch in channel_rail:
+                    ri = channel_rail[ch]
+                    inst = rail_instruments[ri]
+                    if inst != 'drum' and not (map_drums and msg.note in GM_DRUM_MAP
+                                               and channel_instrument.get(ch) != 'drum'):
+                        rail_note_pitches[ri].append(msg.note)
+        for ri, pitches in rail_note_pitches.items():
+            shift = find_optimal_octave_shift(pitches, rail_instruments[ri])
+            rail_global_shifts[ri] = shift
+            if shift != 0:
+                sys.stderr.write(
+                    f"[midi_translator] Global octave shift: {shift:+d} semitones "
+                    f"({shift // 12:+d} octaves) [{rail_instruments[ri]}]\n"
+                )
+
     # ── Collect note events per rail (by channel) ───────────────────
     rail_notes: list[list[tuple[int, float, float, float]]] = [
         [] for _ in range(num_rails)
@@ -691,7 +809,10 @@ def midi_to_multi_rail_tick_data(
                     if pitch_idx is None:
                         continue
                 else:
-                    folded_note, log_msg = _fold_note(msg.note, instrument=inst)
+                    folded_note, log_msg = _fold_note(
+                        msg.note, instrument=inst,
+                        global_shift=rail_global_shifts.get(ri, 0),
+                    )
                     if log_msg and log_msg not in fold_logged:
                         fold_logged.add(log_msg)
                         sys.stderr.write(f"[midi_translator] {log_msg}\n")
@@ -719,7 +840,10 @@ def midi_to_multi_rail_tick_data(
                     if pitch_idx is None:
                         continue
                 else:
-                    folded_note, _ = _fold_note(msg.note, instrument=inst)
+                    folded_note, _ = _fold_note(
+                        msg.note, instrument=inst,
+                        global_shift=rail_global_shifts.get(ri, 0),
+                    )
                     pitch_idx = midi_to_pitch_index(folded_note)
                     if pitch_idx is None:
                         continue
@@ -753,6 +877,7 @@ def midi_to_multi_rail_tick_data(
                     shaped = _adsr_shape(
                         tick_in_note, note_duration, loudness,
                         attack_ticks, decay_ticks, sustain_level, release_ticks,
+                        attack_curve, decay_curve, release_curve,
                     )
                 else:
                     shaped = loudness

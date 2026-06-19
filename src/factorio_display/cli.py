@@ -42,6 +42,12 @@ def _add_audio_midi_options(parser: argparse.ArgumentParser) -> None:
                     help="ADSR sustain level 0.0~1.0 (default: 1.0)")
     g2.add_argument("--release-ticks", type=int, default=10,
                     help="ADSR release duration in game ticks (default: 10, 0 = off)")
+    g2.add_argument("--attack-curve", type=float, default=1.0,
+                    help="ADSR attack power-curve exp (>1=gentle, <1=snappy, default: 1.0=linear)")
+    g2.add_argument("--decay-curve", type=float, default=1.0,
+                    help="ADSR decay power-curve exp (>1=gentle, <1=snappy, default: 1.0=linear)")
+    g2.add_argument("--release-curve", type=float, default=1.0,
+                    help="ADSR release power-curve exp (>1=gentle, <1=snappy, default: 1.0=linear)")
     g3 = parser.add_argument_group("Debug / intermediate files")
     g3.add_argument("--debug-json", type=str, default=None,
                     help="Dump tick_data as JSON to PATH (development only)")
@@ -144,6 +150,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         "--map-drums", action="store_true",
         help="Map GM drum notes (24-81) to Factorio drum-kit sounds instead of octave folding.",
     )
+    encode_parser.add_argument(
+        "--no-global-shift", action="store_true", default=False,
+        help="Disable optimal global octave shift; use only per-note octave folding.",
+    )
 
     display_parser = subparsers.add_parser(
         "export-display",
@@ -196,6 +206,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         "--map-drums", action="store_true", default=True, # Filter drum notes by default to prevent excessive volume stacking
         help="Map GM drum notes (24-81) to Factorio drum-kit sounds.",
     )
+    encode_audio_parser.add_argument(
+        "--no-global-shift", action="store_true", default=False,
+        help="Disable optimal global octave shift; use only per-note octave folding.",
+    )
 
     args = parser.parse_args()
 
@@ -215,6 +229,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                 "attach_player": not args.no_attach_player,
                 "map_drums": args.map_drums,
                 "rail_mode": rail_mode,
+                "use_global_shift": not args.no_global_shift,
             }
             audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
             if audio_bp:
@@ -265,11 +280,15 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             "decay_ticks": args.decay_ticks,
             "sustain_level": args.sustain_level,
             "release_ticks": args.release_ticks,
+            "attack_curve": args.attack_curve,
+            "decay_curve": args.decay_curve,
+            "release_curve": args.release_curve,
             "processed_midi_path": args.processed_midi,
             "debug_json_path": args.debug_json,
             "attach_player": not args.no_attach_player,
             "map_drums": args.map_drums,
             "rail_mode": rail_mode,
+            "use_global_shift": not args.no_global_shift,
         }
         audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
         if audio_bp:

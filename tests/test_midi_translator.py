@@ -95,10 +95,10 @@ class TestMidiToTickDataBasic:
         max_loud = max(max(t) for t in result)
         assert 99.0 <= max_loud <= 100.1
 
-    def test_note_outside_range_is_folded(self):
-        """MIDI 101 (F7) is above E7=100, should be folded down by an octave to 89 (F6)."""
+    def test_note_outside_range_is_globally_shifted(self):
+        """MIDI 101 (F7) above E7=100 — optimal global shift -12 brings it to
+        89 (F6), in range without per-note folding."""
         mid = _make_midi([(101, 100, 0, 480)])
-        # Capture stderr
         buf = io.StringIO()
         old_stderr = sys.stderr
         sys.stderr = buf
@@ -108,20 +108,21 @@ class TestMidiToTickDataBasic:
         finally:
             sys.stderr = old_stderr
 
-        # Should have logged the fold
-        assert (
-            "folded" in log_output.lower()
-            or "101" in log_output
-        ), f"Expected fold log, got: {log_output!r}"
-        # The folded note (MIDI 89 = F6 → pitch 36) should have activity
+        # Global shift should have been logged, NOT per-note folding
+        assert "Global octave shift" in log_output, (
+            f"Expected global shift log, got: {log_output!r}"
+        )
+        assert "folded" not in log_output.lower(), (
+            f"Should NOT have per-note fold with global shift, got: {log_output!r}"
+        )
+        # After -12 shift: 101→89 (F6) → pitch index 36
         assert len(result) > 0
-        # Verify there's no activity at pitch 48 (out of range)
-        # and there IS activity at the folded pitch
         has_active = any(t[36] > 0 for t in result)
-        assert has_active, "Folded note should produce activity at pitch 36"
+        assert has_active, "Globally-shifted note should produce activity at pitch 36"
 
-    def test_note_below_range_is_folded_up(self):
-        """MIDI 52 (E3) is below F3=53, should be folded up to 64 (E4)."""
+    def test_note_below_range_is_globally_shifted(self):
+        """MIDI 52 (E3) below F3=53 — optimal global shift +12 brings it to
+        64 (E4), in range without per-note folding."""
         mid = _make_midi([(52, 100, 0, 480)])
         buf = io.StringIO()
         old_stderr = sys.stderr
@@ -132,11 +133,13 @@ class TestMidiToTickDataBasic:
         finally:
             sys.stderr = old_stderr
 
-        assert (
-            "folded" in log_output.lower()
-            or "52" in log_output
-        ), f"Expected fold log, got: {log_output!r}"
-        # 52 → folded to 52+12=64 → pitch index 11
+        assert "Global octave shift" in log_output, (
+            f"Expected global shift log, got: {log_output!r}"
+        )
+        assert "folded" not in log_output.lower(), (
+            f"Should NOT have per-note fold with global shift, got: {log_output!r}"
+        )
+        # After +12 shift: 52→64 (E4) → pitch index 11
         has_active = any(t[11] > 0 for t in result)
         assert has_active, "Folded-up note should produce activity at pitch 11"
 
@@ -438,6 +441,168 @@ class TestAdsrEnvelope:
             f"Without ADSR, all active ticks should have same loudness, got {set(active_loudness)}"
         )
 
+    def test_curve_1_is_linear(self):
+        """With curve=1.0, ADSR should produce same values as old linear behavior."""
+        mid = _make_midi([(60, 100, 0, 480)])
+        result_old = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=3, release_ticks=3,
+        )
+        result_curve = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=3, release_ticks=3,
+            attack_curve=1.0, decay_curve=1.0, release_curve=1.0,
+        )
+        pitch = midi_to_pitch_index(60)
+        assert pitch is not None
+        old_loudness = [t[pitch] for t in result_old]
+        curve_loudness = [t[pitch] for t in result_curve]
+        assert len(old_loudness) == len(curve_loudness)
+        for i, (old, cur) in enumerate(zip(old_loudness, curve_loudness)):
+            assert abs(old - cur) < 0.01, (
+                f"Curve=1.0 should match linear at tick {i}: old={old:.3f} curve={cur:.3f}"
+            )
+
+    def test_attack_curve_concave(self):
+        """attack_curve=0.5 (concave): fast initial rise, slow approach to peak.
+
+        Concave (exp<1) means progress**exp rises faster early (after t=0),
+        so tick 1 is HIGHER than linear's tick 1,
+        and the peak is higher (reaches closer to 1.0 by end of attack).
+        Tick 0 is unchanged (progress=0 → 0**anything = 0).
+        """
+        mid = _make_midi([(60, 100, 0, 960)])  # long note for clear attack
+        result_lin = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=5, release_ticks=0,
+            attack_curve=1.0, release_curve=1.0,
+        )
+        result_concave = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=5, release_ticks=0,
+            attack_curve=0.5, release_curve=1.0,
+        )
+        pitch = midi_to_pitch_index(60)
+        assert pitch is not None
+
+        lin_vals = [t[pitch] for t in result_lin[:5]]
+        cav_vals = [t[pitch] for t in result_concave[:5]]
+
+        # Tick 0: same (progress=0)
+        assert abs(lin_vals[0] - cav_vals[0]) < 0.01
+        # Tick 1+: concave rises faster
+        assert cav_vals[1] > lin_vals[1], (
+            f"Concave tick 1 should be higher: "
+            f"linear={lin_vals[1]:.3f}, concave={cav_vals[1]:.3f}"
+        )
+        # Concave peak should be higher (reaches closer to 1.0)
+        assert max(cav_vals) > max(lin_vals), (
+            f"Concave peak should be higher: "
+            f"linear_peak={max(lin_vals):.3f}, concave_peak={max(cav_vals):.3f}"
+        )
+
+    def test_attack_curve_convex(self):
+        """attack_curve=2.0 (convex): slow initial rise, fast finish.
+
+        Convex (exp>1) means progress**exp rises slower early, so
+        tick 1 is LOWER than linear's tick 1, and the peak is lower.
+        Tick 0 is unchanged (progress=0 → 0**anything = 0).
+        """
+        mid = _make_midi([(60, 100, 0, 960)])
+        result_lin = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=5, release_ticks=0,
+            attack_curve=1.0, release_curve=1.0,
+        )
+        result_convex = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=5, release_ticks=0,
+            attack_curve=2.0, release_curve=1.0,
+        )
+        pitch = midi_to_pitch_index(60)
+        assert pitch is not None
+
+        lin_vals = [t[pitch] for t in result_lin[:5]]
+        cvx_vals = [t[pitch] for t in result_convex[:5]]
+
+        # Tick 0: same (progress=0)
+        assert abs(lin_vals[0] - cvx_vals[0]) < 0.01
+        # Tick 1+: convex rises slower
+        assert cvx_vals[1] < lin_vals[1], (
+            f"Convex tick 1 should be lower: "
+            f"linear={lin_vals[1]:.3f}, convex={cvx_vals[1]:.3f}"
+        )
+        # Convex peak should be lower (doesn't reach 1.0 by end of attack)
+        assert max(cvx_vals) < max(lin_vals), (
+            f"Convex peak should be lower: "
+            f"linear_peak={max(lin_vals):.3f}, convex_peak={max(cvx_vals):.3f}"
+        )
+
+    def test_release_curve_concave(self):
+        """release_curve=0.5 (concave): fast initial drop, stays lower throughout.
+
+        Concave (exp<1): progress**0.5 > progress (for 0<progress<1),
+        so (1 - progress**0.5) < (1 - progress) — values drop FASTER
+        and are LOWER throughout the release phase.
+        """
+        mid = _make_midi([(60, 100, 0, 480)])
+        result_lin = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=0, release_ticks=4,
+            release_curve=1.0,
+        )
+        result_concave = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=0, release_ticks=4,
+            release_curve=0.5,
+        )
+        pitch = midi_to_pitch_index(60)
+        assert pitch is not None
+
+        lin_vals = [t[pitch] for t in result_lin]
+        cav_vals = [t[pitch] for t in result_concave]
+        assert len(lin_vals) == len(cav_vals)
+        # Check last 4 ticks (release phase): concave should be lower throughout
+        for i in range(len(lin_vals) - 4, len(lin_vals)):
+            assert cav_vals[i] < lin_vals[i] + 0.01, (
+                f"Concave release tick {i} should be < linear: "
+                f"linear={lin_vals[i]:.3f}, concave={cav_vals[i]:.3f}"
+            )
+
+    def test_release_curve_convex(self):
+        """release_curve=2.0 (convex): holds volume longer, all release ticks higher.
+
+        Convex (exp>1): progress**2.0 < progress (for 0<progress<1),
+        so (1 - progress**2.0) > (1 - progress) — values stay HIGHER
+        throughout the release phase.  This models natural damping where
+        the sound fades slowly at first, then drops quickly near the end
+        (which would be visible with more release ticks).
+        """
+        mid = _make_midi([(60, 100, 0, 480)])
+        result_lin = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=0, release_ticks=4,
+            release_curve=1.0,
+        )
+        result_convex = midi_to_tick_data(
+            mid, ticks_per_beat=30,
+            attack_ticks=0, release_ticks=4,
+            release_curve=2.0,
+        )
+        pitch = midi_to_pitch_index(60)
+        assert pitch is not None
+
+        lin_vals = [t[pitch] for t in result_lin]
+        cvx_vals = [t[pitch] for t in result_convex]
+        assert len(lin_vals) == len(cvx_vals)
+        # Convex: all release ticks should be higher (holds volume)
+        release_start = len(lin_vals) - 4
+        for i in range(release_start, len(lin_vals)):
+            assert cvx_vals[i] > lin_vals[i] - 0.01, (
+                f"Convex release tick {i} should be >= linear: "
+                f"linear={lin_vals[i]:.3f}, convex={cvx_vals[i]:.3f}"
+            )
+
 
 # ── multi-rail tests ──────────────────────────────────────────────────
 
@@ -521,3 +686,158 @@ class TestMultiRailMidi:
         instruments, rail_data = midi_to_multi_rail_tick_data(mid)
         assert instruments == []
         assert rail_data == []
+
+
+# ── optimal global octave shift tests ─────────────────────────────────
+
+class TestFindOptimalOctaveShift:
+    """Tests for ``find_optimal_octave_shift``."""
+
+    def test_empty_notes_returns_zero(self):
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        assert find_optimal_octave_shift([], "piano") == 0
+
+    def test_all_in_range_no_shift(self):
+        """All notes already in piano range → shift=0."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        notes = [60, 64, 67, 72]  # C4, E4, G4, C5 — all in 53-100
+        assert find_optimal_octave_shift(notes, "piano") == 0
+
+    def test_mostly_above_range_shift_down(self):
+        """Most notes above piano range → shift down."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # F5-E7 (77-100) fits; E8 (112) doesn't
+        notes = [77, 80, 84, 88, 92, 96, 100, 112]
+        # With shift -12: 65,68,72,76,80,84,88,100 — all in range (53-100)
+        assert find_optimal_octave_shift(notes, "piano") == -12
+
+    def test_mostly_below_range_shift_up(self):
+        """Most notes below piano range → shift up."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # All notes in octave 2 (36-47), below F3=53
+        notes = [36, 40, 43, 47]
+        # Shift +24: 60,64,67,71 — all in range
+        assert find_optimal_octave_shift(notes, "piano") == 24
+
+    def test_tie_prefers_zero(self):
+        """When multiple shifts have same count, prefer 0."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # Half in range at shift=0, half at shift=-12 — tie, prefer 0
+        notes = [60, 64, 67, 72,  # in range at shift=0
+                  89, 93, 96, 100]  # also in range at shift=0
+        assert find_optimal_octave_shift(notes, "piano") == 0
+
+    def test_tie_prefers_smaller_abs_shift(self):
+        """When tied and 0 not an option, prefer smaller |shift|."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # All notes at MIDI 101-112 → shift -12 gives 89-100 (all in range)
+        # shift -24 gives 77-88 (all in range too) — -12 wins (smaller |shift|)
+        notes = list(range(101, 113))
+        assert find_optimal_octave_shift(notes, "piano") == -12
+
+    def test_celesta_range(self):
+        """Celesta range F4-E7 (65-112) has different optimal shifts."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # C3-E3 (48-52) — well below celesta range
+        notes = [48, 50, 52]
+        # Shift +24: 72,74,76 — in celesta range
+        assert find_optimal_octave_shift(notes, "celesta") == 24
+
+    def test_bass_range(self):
+        """Bass range F2-E5 (41-88)."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # C5-E6 (72-88) — upper end of bass range
+        notes = [72, 76, 79, 84, 88]
+        # At shift=0: all in range → 0
+        assert find_optimal_octave_shift(notes, "bass") == 0
+
+    def test_degenerate_single_note(self):
+        """Single note: shift should bring it into range if possible."""
+        from factorio_display.audio.midi_translator import find_optimal_octave_shift
+        # MIDI 112 (E8) way above piano range 53-100
+        # -12→100 (E7, in range), -24→88 (E6, in range)
+        # Both get count=1, tie-breaker picks -12 (smaller |shift|)
+        assert find_optimal_octave_shift([112], "piano") == -12
+
+
+class TestGlobalShiftIntegration:
+    """Tests for global octave shift in ``midi_to_tick_data`` and
+    ``midi_to_multi_rail_tick_data``."""
+
+    def test_mixed_notes_get_optimal_shift(self):
+        """Mix of in-range and out-of-range notes → optimal shift logged,
+        no per-note folds needed if all fit after shift."""
+        # Most notes at C5-E7 (72-100, in piano range), one at E8 (112)
+        mid = _make_midi([
+            (72, 100, 0, 480),
+            (76, 100, 0, 480),
+            (80, 100, 0, 480),
+            (84, 100, 0, 480),
+            (112, 100, 0, 480),  # E8, out of range
+        ])
+        buf = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = buf
+        try:
+            result = midi_to_tick_data(mid, ticks_per_beat=30)
+            log_output = buf.getvalue()
+        finally:
+            sys.stderr = old_stderr
+
+        assert len(result) > 0
+        assert "Global octave shift" in log_output
+        # With -12 shift: 60,64,68,72,100 — all in range, no per-note folds
+        assert "folded" not in log_output.lower(), (
+            f"Optimised shift should avoid per-note folds: {log_output!r}"
+        )
+
+    def test_multi_rail_per_instrument_shift(self):
+        """Each instrument rail gets its own optimal global shift."""
+        mid = mido.MidiFile(ticks_per_beat=480)
+        # Track 0: bass (program 32), notes in C5-C6 (72-84)
+        t0 = mido.MidiTrack()
+        t0.append(mido.Message("program_change", program=32, channel=0, time=0))
+        for n in [72, 76, 79, 84]:
+            t0.append(mido.Message("note_on", note=n, velocity=100, channel=0, time=0))
+            t0.append(mido.Message("note_off", note=n, velocity=0, channel=0, time=480))
+        # Track 1: celesta (program 8), notes in C3-C4 (48-60)
+        t1 = mido.MidiTrack()
+        t1.append(mido.Message("program_change", program=8, channel=1, time=0))
+        for n in [48, 52, 55, 60]:
+            t1.append(mido.Message("note_on", note=n, velocity=100, channel=1, time=0))
+            t1.append(mido.Message("note_off", note=n, velocity=0, channel=1, time=480))
+        mid.tracks.extend([t0, t1])
+
+        buf = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = buf
+        try:
+            instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+            log_output = buf.getvalue()
+        finally:
+            sys.stderr = old_stderr
+
+        assert len(instruments) == 2
+        # Bass range (41-88): C5-C6 already fits → shift=0
+        # Celesta range (65-112): C3-C4 needs +24 → shift=+24 logged
+        assert "Global octave shift" in log_output
+        # Celesta should have a +24 shift logged
+        assert "[celesta]" in log_output
+
+    def test_drum_rail_skips_global_shift(self):
+        """Drum rails should not get global shift (they use GM_DRUM_MAP)."""
+        mid = TestMultiRailMidi._make_midi_with_channel([
+            (36, 80, 0, 240, 9),   # drum kick on ch9
+        ])
+        buf = io.StringIO()
+        old_stderr = sys.stderr
+        sys.stderr = buf
+        try:
+            instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+            log_output = buf.getvalue()
+        finally:
+            sys.stderr = old_stderr
+
+        assert 'drum' in instruments
+        # No global shift should be logged for drum
+        assert "[drum]" not in log_output or "Global octave shift" not in log_output
