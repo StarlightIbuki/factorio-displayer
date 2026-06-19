@@ -17,18 +17,49 @@ factorio-display export-display --width 28 --height 28
 Generates the blueprint unit used to demultiplex and interpret the memory audio signal for programmable speakers.
 
 ```bash
-factorio-display export-audio --instrument bell
+factorio-display export-audio --instrument piano
 ```
+
+Supported instruments: `piano`, `bass`, `celesta`, `plucked`, `drum`.
 
 ### 3. Encode Media
 
-Converts a video file, gif, or image sequence into Decider Combinator "Memory" arrays.
+Converts a video file, GIF, or image sequence into Decider Combinator "Memory" arrays. MIDI files (`.mid`) are auto-detected and routed to the audio pipeline.
 
 ```bash
+# Video
 factorio-display encode ./bad_apple.mp4 --name "Bad Apple Frame Data" --adaptive --fps 30
+
+# Audio (auto-detected from extension)
+factorio-display encode ./song.mid --ticks-per-beat 30
 ```
 
-_Tip: Use --adaptive and --deduplicate to save massive amounts of combinators by skipping idle frames and recycling identical frames._
+_Tip: Use `--adaptive` and `--deduplicate` to save massive amounts of combinators by skipping idle frames and recycling identical frames._
+
+### 4. Encode Audio (MIDI)
+
+Dedicated subcommand for encoding `.mid` files with full control over translation parameters.
+
+```bash
+factorio-display encode-audio ./song.mid \
+    --ticks-per-beat 30 \
+    --boost-melody 1.5 \
+    --attack-ticks 2 --decay-ticks 4 --sustain-level 0.8 --release-ticks 6 \
+    -o song_audio.txt
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--ticks-per-beat` | `30` | Game ticks per quarter note (30 = real-time at any tempo) |
+| `--boost-melody` | `1.0` | Velocity multiplier for the highest-pitch track (1.5 = 50% boost) |
+| `--velocity-scale` | `1.0` | Global velocity multiplier |
+| `--attack-ticks` | `0` | ADSR attack ramp duration (70%→100%) |
+| `--decay-ticks` | `0` | ADSR decay ramp duration (100%→sustain) |
+| `--sustain-level` | `1.0` | ADSR sustain level (0.0–1.0) |
+| `--release-ticks` | `0` | ADSR release ramp duration (sustain→0%) |
+| `--debug-json` | — | Dump raw tick_data as JSON for inspection |
+| `--processed-midi` | — | Save octave-folded MIDI for preview in any player |
+| `-o`, `--output` | — | Write blueprint to file instead of stdout |
 
 ## How It Works in Factorio
 
@@ -49,14 +80,31 @@ In Factorio, a color display must process an X/Y grid of RGB pixels.
 
 ### Audio Player Implementation
 
-Because Factorio's Programmable Speakers require explicit pitch mapping (0-36) and specific instrument signals, passing an audio sequence over time requires a filtering layer so signals don't overlap into a cacophony.
+The audio decoder drives a 48-speaker matrix (12 semitones × 4 octaves, F3–E7) using a compact combinator layout with zero wasted tile rows. Each speaker is mapped to a unique `(signal_name, quality)` pair — natural notes use letter signals (F→`signal-F`), sharps offset by +10 (F#→`signal-P`), and Space Age quality tiers encode octave.
 
-1.  **Mapping:** The system uses the available signal pool to map distinct signals to integer values (which correspond to specific pitches or ticks).
-    
-2.  **The Constant Combinator (Dictionary):** A single constant combinator holds the index definition, assigning signals a sequence of continuous integers (1, 2, 3...).
-    
-3.  **The Decider Combinator (Time Gate):** It compares the incoming signals against the global signal-clock tick. It filters the dictionary stream down to _only_ the signal assigned to the current tick.
-    
-4.  **First Arithmetic Combinator (Normalization):** It divides the output of the Decider Combinator by itself (Each / Each), transforming the output of the isolated tick signal into exactly 1.
-    
-5.  **Second Arithmetic Combinator (Target Application):** It multiplies the Normalized output (1 of the isolated signal) by the incoming Audio Memory Bank's payload (Each \* Each). This perfectly filters the sound memory down to exactly the pitch and volume intended for the current tick, and finally outputs it on the target sound signal (e.g., bell, lightning, programmable-speaker-instrument-piano), cleanly driving your speaker array.
+**Decoder pipeline (top → bottom):**
+
+1.  **Modulo AC:** `clock % 60 → signal-M` — produces a sub-tick index (0–59) that cycles every 60 ticks.
+2.  **Lookup CCs:** 12 constant combinators store the packed audio data for all 720 cells of the current page, keyed by sub-tick.
+3.  **Match DCs:** `each == signal-M → signal=1` — for sub-ticks 1–59, the cell whose signal matches the current sub-tick outputs 1. A separate set of match0 DCs handles sub-tick 0 (since Factorio drops 0-value signals).
+4.  **Selector ACs:** `each(red) × each(green) → bell` — multiplies the memory page data (red wire) by the match output (green wire), isolating the packed integer for the current sub-tick onto the `bell` bus.
+5.  **Unpacker AC chain (6 per channel):** Extracts the four 7-bit loudness values from the packed `bell` signal via bit-shifts and masks:
+    - `l1 = bell >> 21`
+    - `s2 = bell >> 14` → `l2 = s2 & 127`
+    - `s3 = bell >> 7` → `l3 = s3 & 127`
+    - `l4 = bell & 127`
+6.  **Speakers:** 48 programmable speakers (4 rows × 12 columns), each listening on its assigned `(signal, quality)` pair with `allow_polyphony=True`.
+
+**Total entities:** 48 spk + 85 AC + 24 DC + 13 CC = 170.  
+**Wire colors:** RED = page data bus + sub_tick distribution, GREEN = CC lookup outputs + bell bus.
+
+### Audio Normalization
+
+Black MIDIs and dense orchestrations can produce summed loudness values far exceeding the 0–100 range used by the 7-bit packing scheme. By default, the encoder applies **global peak normalization**: after all notes are mixed, the entire tick dataset is linearly scaled so the loudest peak hits exactly 100. This preserves relative dynamics (a note 2× louder stays 2× louder) instead of hard-clipping everything above 100 to the same ceiling.
+
+## Roadmap
+
+1. **All-in-one blueprint** — generate a single, fully-wired blueprint that includes the display/audio decoder, memory banks, and clock combinator, ready to place with zero manual wiring.
+2. **Blueprint book output** — pack chunked memory blueprints into a Factorio blueprint book, with separated player blueprints for easy in-game organization.
+3. **More instruments & 5-octave support** — extend beyond the current 4-octave (F3–E7) range to a full 5-octave speaker matrix, and add support for more Factorio instrument prototypes.
+4. **Better display layout** — move power poles to the edges of the display grid (both sides) instead of placing them in the middle, for cleaner tiling when building large multi-unit screens.

@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import math
 import sys
 import io
 
 import mido
-import pytest
 
 from factorio_display.audio.midi_translator import midi_to_tick_data
 from factorio_display.audio.pitch_mapping import (
-    MIDI_BASE,
     SPEAKER_COUNT,
     midi_to_pitch_index,
 )
@@ -35,7 +32,10 @@ def _make_midi(
     # Sort by start_tick, then by note for determinism
     events: list[tuple[int, str, mido.Message]] = []
     for note, velocity, start, duration in notes:
-        events.append((start, "on", mido.Message("note_on", note=note, velocity=velocity, time=0)))
+        events.append((
+            start, "on",
+            mido.Message("note_on", note=note, velocity=velocity, time=0),
+        ))
         events.append((start + duration, "off", mido.Message("note_off", note=note, velocity=0, time=0)))
     events.sort(key=lambda e: (e[0], 0 if e[1] == "on" else 1))
 
@@ -51,10 +51,12 @@ def _make_midi(
     return mid
 
 
-def _midi_tick_to_game_tick(midi_tick: int, ticks_per_beat: int, tempo: int, game_ticks_per_beat: int) -> float:
+def _midi_tick_to_game_tick(
+    midi_tick: int, ticks_per_beat: int,
+    tempo: int, game_ticks_per_beat: int,
+) -> float:
     """Convert a MIDI absolute tick to a game tick (float)."""
     seconds = mido.tick2second(midi_tick, ticks_per_beat, tempo)
-    beats = seconds / (tempo / 1_000_000)  # seconds → beats at this tempo
     # Re-derive game ticks: seconds * game_ticks_per_beat / seconds_per_beat
     seconds_per_beat = tempo / 1_000_000
     return seconds / seconds_per_beat * game_ticks_per_beat
@@ -104,7 +106,10 @@ class TestMidiToTickDataBasic:
             sys.stderr = old_stderr
 
         # Should have logged the fold
-        assert "folded" in log_output.lower() or "101" in log_output, f"Expected fold log, got: {log_output!r}"
+        assert (
+            "folded" in log_output.lower()
+            or "101" in log_output
+        ), f"Expected fold log, got: {log_output!r}"
         # The folded note (MIDI 89 = F6 → pitch 36) should have activity
         assert len(result) > 0
         # Verify there's no activity at pitch 48 (out of range)
@@ -124,7 +129,10 @@ class TestMidiToTickDataBasic:
         finally:
             sys.stderr = old_stderr
 
-        assert "folded" in log_output.lower() or "52" in log_output, f"Expected fold log, got: {log_output!r}"
+        assert (
+            "folded" in log_output.lower()
+            or "52" in log_output
+        ), f"Expected fold log, got: {log_output!r}"
         # 52 → folded to 52+12=64 → pitch index 11
         has_active = any(t[11] > 0 for t in result)
         assert has_active, "Folded-up note should produce activity at pitch 11"
@@ -222,7 +230,9 @@ class TestMidiToTickDataMelody:
         max_80 = max(t[pitch_80] for t in result)
         max_60 = max(t[pitch_60] for t in result)
         # Allow small float difference
-        assert abs(max_80 - max_60) < 0.5, f"Without boost, loudness should be equal: {max_80} vs {max_60}"
+        assert abs(max_80 - max_60) < 0.5, (
+            f"Without boost, loudness should be equal: {max_80} vs {max_60}"
+        )
 
 
 # ── velocity scaling ───────────────────────────────────────────────────

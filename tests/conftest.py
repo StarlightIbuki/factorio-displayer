@@ -1,8 +1,9 @@
 """Shared test fixtures for factorio-display audio tests."""
 
+import pytest
 from __future__ import annotations
 
-import pytest
+from factorio_display.integer2signal.pool import get_filtered_pool
 
 
 @pytest.fixture(scope="session")
@@ -32,7 +33,6 @@ def large_signal_pool() -> list[str]:
     Uses real Factorio item names from draftsman's items.raw registry.
     """
     try:
-        from factorio_display.integer2signal.pool import get_filtered_pool
         pool = get_filtered_pool("signal-clock")
         # Ensure we have at least 144 base signals
         if len(pool) < 144:
@@ -41,7 +41,7 @@ def large_signal_pool() -> list[str]:
             for i in range(144 - len(pool)):
                 pool.append(f"dummy-signal-{i}")
         return pool[:144]  # exactly 144 = 720 / 5
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught — test fixture fallback
         return [f"test-signal-{i:04d}" for i in range(144)]
 
 

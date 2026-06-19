@@ -1594,11 +1594,11 @@ def encode_auto(
     video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
     image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 
-    chunk_kwargs = dict(
-        time_chunks=time_chunks, chunk_workers=chunk_workers,
-        output_chunks_dir=output_chunks_dir,
-        deduplicate_cross=deduplicate_cross,
-    )
+    chunk_kwargs = {
+        "time_chunks": time_chunks, "chunk_workers": chunk_workers,
+        "output_chunks_dir": output_chunks_dir,
+        "deduplicate_cross": deduplicate_cross,
+    }
 
     if path.is_dir():
         pngs = sorted(path.glob("*.png"))
@@ -1629,7 +1629,13 @@ def encode_auto(
                              **chunk_kwargs)
 
     if ext == ".gif":
-        from PIL import Image
+        try:
+            from PIL import Image
+        except ImportError:
+            raise ImportError(
+                "Pillow is required for GIF encoding. "
+                "Install it with: pip install Pillow"
+            )
         try:
             gif = Image.open(str(path))
             gif.seek(1)

@@ -28,10 +28,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import defaultdict
 from pathlib import Path
-
-# Allow running from repo root (demos/ → repo root → src/)
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from factorio_display.audio.pitch_mapping import (
     SPEAKER_COUNT,
@@ -41,7 +39,6 @@ from factorio_display.audio.pitch_mapping import (
 from factorio_display.audio.encoder import encode_audio_memory
 from factorio_display.audio.player_blueprint import build_audio_decoder
 from factorio_display import CLOCK_SIGNAL, SIGNAL_POOL, QUALITIES
-
 
 # ── melody definitions ─────────────────────────────────────────────────
 
@@ -110,14 +107,13 @@ def _envelope_velocity(
         # Attack: ramp 70% → 100%
         frac = 0.70 + 0.30 * (tick_in_note / attack_len)
         return max(1, int(target_vel * frac))
-    elif tick_in_note >= duration - release_len:
+    if tick_in_note >= duration - release_len:
         # Release: ramp 100% → 55%
         progress = (tick_in_note - (duration - release_len)) / release_len
         frac = 1.0 - 0.45 * progress
         return max(1, int(target_vel * frac))
-    else:
-        # Sustain: hold at full velocity
-        return target_vel
+    # Sustain: hold at full velocity
+    return target_vel
 
 
 def voice_to_tick_data(
@@ -131,8 +127,6 @@ def voice_to_tick_data(
     :func:`_envelope_velocity` so notes bloom naturally instead of
     cutting in/out abruptly.
     """
-    from collections import defaultdict
-
     tick_notes: dict[int, dict[int, int]] = defaultdict(dict)
     current_tick = 0
 
@@ -208,7 +202,7 @@ def chromatic_scale(
 # ── rich chord progression (I–vi–IV–V–I with dynamics) ─────────────────
 
 def rich_chord_progression(
-    base_velocity: int = 55,
+    _base_velocity: int = 55,  # noqa: ARG001 — kept for CLI compat
     ticks_per_chord: int = 90,
 ) -> list[list[int]]:
     """F major → D minor → Bb major → C major → F major.
@@ -230,9 +224,9 @@ def rich_chord_progression(
     tick_data: list[list[int]] = []
     current_tick = 0
 
-    for chord_idx, (chord, vel) in enumerate(zip(chords, velocities)):
+    for _chord_idx, (chord, vel) in enumerate(zip(chords, velocities)):
         # Each chord sustains for ticks_per_chord
-        for t in range(current_tick, current_tick + ticks_per_chord):
+        for _t in range(current_tick, current_tick + ticks_per_chord):
             loudness = [0] * SPEAKER_COUNT
             for midi in chord:
                 pi = midi_to_pitch_index(midi)
@@ -426,7 +420,7 @@ ODE_SPARKLE: list[tuple[int, int, int, int]] = [
 
 
 def ode_to_joy_tick_data(
-    note_duration: int = 25,  # noqa: ARG001 — kept for CLI compat
+    _note_duration: int = 25,  # noqa: ARG001 — kept for CLI compat
 ) -> list[list[int]]:
     """Build the full 5-voice Ode to Joy arrangement.
 
@@ -455,6 +449,7 @@ def ode_to_joy_tick_data(
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
+    """Parse CLI args and generate audio blueprint(s) to stdout or file."""
     parser = argparse.ArgumentParser(
         description="Generate PoC Factorio audio blueprints"
     )
@@ -555,7 +550,7 @@ def main():
         for section_name, data, is_tick_data in section_defs:
             if is_tick_data:
                 tick_data = data  # type: ignore[assignment]
-                note_info = f"multi-track polyphonic"
+                note_info = "multi-track polyphonic"
             else:
                 notes = data  # type: ignore[assignment]
                 tick_data = melody_to_tick_data(

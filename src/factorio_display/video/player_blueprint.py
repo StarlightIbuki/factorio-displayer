@@ -3,6 +3,7 @@
 from draftsman.blueprintable import Blueprint
 from draftsman.entity import new_entity
 
+# pylint: disable=relative-beyond-top-level — valid intra-package imports
 from .. import (
     CLOCK_SIGNAL,
     DISPLAY_BLUEPRINT,
@@ -14,9 +15,10 @@ from .. import (
 )
 from ..integer2signal.pool import get_filtered_pool
 from ..integer2signal.mapping import SignalMapping
+# pylint: enable=relative-beyond-top-level
 
 
-def build_display(
+def build_display(  # pylint: disable=too-many-locals
     name: str = "Video Display",
     width: int | None = None,
     height: int | None = None,

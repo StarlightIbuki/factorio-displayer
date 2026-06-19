@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from factorio_display.audio.encoder import (
@@ -114,7 +112,7 @@ class TestLoudnessToPacked:
 
 class TestFlattenPacked:
     def test_empty(self):
-        assert flatten_packed([]) == []
+        assert not flatten_packed([])
 
     def test_one_tick(self):
         packed = [[10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]]
@@ -138,30 +136,30 @@ class TestFlattenPacked:
 class TestComputePageLayout:
     def test_exact_fill(self):
         """720 cells = exactly 1 page."""
-        pc, cpp, tpp = compute_page_layout(720, 200, 5)
+        pc, cpp, _ = compute_page_layout(720, 200, 5)
         assert pc == 1
         assert cpp == CELLS_PER_PAGE  # always 720
-        assert tpp == TICKS_PER_PAGE  # always 60
+        assert _ == TICKS_PER_PAGE  # always 60
 
     def test_partial_page(self):
         """100 cells still needs 1 page."""
-        pc, cpp, tpp = compute_page_layout(100, 200, 5)
+        pc, cpp, _ = compute_page_layout(100, 200, 5)
         assert pc == 1
         assert cpp == CELLS_PER_PAGE
 
     def test_two_pages(self):
         """721 cells needs 2 pages."""
-        pc, cpp, tpp = compute_page_layout(721, 200, 5)
+        pc, cpp, _ = compute_page_layout(721, 200, 5)
         assert pc == 2
         assert cpp == CELLS_PER_PAGE
 
     def test_zero_cells(self):
-        pc, cpp, tpp = compute_page_layout(0, 200, 5)
+        pc, cpp, _ = compute_page_layout(0, 200, 5)
         assert pc == 0
         assert cpp == CELLS_PER_PAGE
 
     def test_many_pages(self):
-        pc, cpp, tpp = compute_page_layout(7200, 200, 5)
+        pc, cpp, _ = compute_page_layout(7200, 200, 5)
         assert pc == 10
         assert cpp == CELLS_PER_PAGE
 
@@ -180,7 +178,8 @@ class TestTicksPerPage:
 
 class TestEncodeAudioMemory:
     @pytest.fixture(autouse=True)
-    def _pool_and_qual(self, large_signal_pool, sample_qualities):
+    def _pool_and_qual(self, large_signal_pool, sample_qualities):  # pylint: disable=attribute-defined-outside-init
+        """Inject signal pool and qualities as instance attributes."""
         self.pool = large_signal_pool
         self.qual = sample_qualities
 
@@ -201,7 +200,7 @@ class TestEncodeAudioMemory:
         ]
         bp = encode_audio_memory(data, "Test", self.pool, self.qual)
         assert bp.startswith("0e")
-        from draftsman.blueprintable import Blueprint
+        from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
         parsed = Blueprint.from_string(bp)
         assert parsed.label == "Audio Memory: Test"
         entities = parsed.entities
@@ -214,7 +213,7 @@ class TestEncodeAudioMemory:
         # 50 ticks → 1 page
         data_50 = [[(t + i) % 101 for i in range(SPEAKER_COUNT)] for t in range(50)]
         bp = encode_audio_memory(data_50, "Test", self.pool, self.qual)
-        from draftsman.blueprintable import Blueprint
+        from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
         parsed = Blueprint.from_string(bp)
         dc_count = sum(1 for e in parsed.entities if "decider-combinator" in e.name)
         assert dc_count == 1  # 50 < 60
