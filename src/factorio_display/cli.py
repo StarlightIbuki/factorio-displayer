@@ -69,6 +69,9 @@ def main():
     encode_parser.add_argument("--deduplicate", action="store_true", help="Share one combinator across identical frames.")
     encode_parser.add_argument("--width", type=int, default=None, help="Override display width (tiles).")
     encode_parser.add_argument("--height", type=int, default=None, help="Override display height (tiles).")
+    encode_parser.add_argument("--no-round-units", action="store_true",
+                               help="Disable auto-rounding dimensions to unit boundaries (28×28). "
+                                    "By default, dimensions are rounded up to fill display units.")
 
     # Time-chunking options
     chunk_g = encode_parser.add_argument_group("Time-chunked generation")
@@ -143,6 +146,7 @@ def main():
             deduplicate=args.deduplicate,
             total_width=args.width, 
             total_height=args.height,
+            round_units=not args.no_round_units,
             time_chunks=args.time_chunks,
             chunk_workers=args.chunk_workers,
             output_chunks_dir=args.output_chunks,

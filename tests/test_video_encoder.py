@@ -19,6 +19,7 @@ from factorio_display.video.encoder import (
     _merge_with_cross_dedup,
     encode_frames,
     encode_frames_chunked,
+    resolve_dimensions,
 )
 from factorio_display.integer2signal.mapping import SignalMapping
 
@@ -576,3 +577,119 @@ class TestEdgeCases:
         dcs = [e for e in bp.entities if "decider-combinator" in e.name]
         # 4 unique colors, cross-dedup merges across chunks
         assert len(dcs) <= 4
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# resolve_dimensions
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestResolveDimensions:
+    """Tests for the dimension auto-calculation and unit-rounding helper."""
+
+    UNIT_W = 28
+    UNIT_H = 28
+
+    # ── both specified ────────────────────────────────────────────────
+
+    def test_both_specified_no_rounding(self):
+        w, h = resolve_dimensions(1920, 1080, user_w=56, user_h=84, round_units=False)
+        assert w == 56
+        assert h == 84
+
+    def test_both_specified_with_rounding_already_aligned(self):
+        """When both are already multiples of unit size, rounding is a no-op."""
+        w, h = resolve_dimensions(1920, 1080, user_w=56, user_h=84, round_units=True)
+        assert w == 56
+        assert h == 84
+
+    def test_both_specified_with_rounding_partial_units(self):
+        """Rounding snaps each dimension up to the next unit boundary."""
+        w, h = resolve_dimensions(1920, 1080, user_w=30, user_h=30, round_units=True,
+                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
+        assert w == 56   # ceil(30/28)*28 = 2*28
+        assert h == 56
+
+    # ── only width specified ──────────────────────────────────────────
+
+    def test_width_only_preserves_ratio_16_9(self):
+        """Source 1920×1080 (16:9), user specifies width=56."""
+        w, h = resolve_dimensions(1920, 1080, user_w=56, round_units=False)
+        assert w == 56
+        # 56 * 1080 / 1920 = 31.5 → round → 32
+        assert h == 32
+
+    def test_width_only_preserves_ratio_4_3(self):
+        """Source 640×480 (4:3), user specifies width=84."""
+        w, h = resolve_dimensions(640, 480, user_w=84, round_units=False)
+        assert w == 84
+        # 84 * 480 / 640 = 63.0 → 63
+        assert h == 63
+
+    def test_width_only_with_rounding(self):
+        """Width-only with rounding snaps height to unit boundary."""
+        w, h = resolve_dimensions(1920, 1080, user_w=56, round_units=True,
+                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
+        assert w == 56   # already a multiple of 28
+        # h = ceil(32/28)*28 = 2*28 = 56
+        assert h == 56
+
+    def test_width_only_very_narrow_source(self):
+        """Extreme aspect ratio: 100×1000 source, width=28."""
+        w, h = resolve_dimensions(100, 1000, user_w=28, round_units=False)
+        assert w == 28
+        assert h == 280  # 28 * 1000 / 100
+
+    # ── only height specified ─────────────────────────────────────────
+
+    def test_height_only_preserves_ratio(self):
+        """Source 1920×1080, user specifies height=84."""
+        w, h = resolve_dimensions(1920, 1080, user_h=84, round_units=False)
+        assert h == 84
+        # 84 * 1920 / 1080 = 149.33... → round → 149
+        assert w == 149
+
+    def test_height_only_with_rounding(self):
+        """Height-only with rounding snaps width to unit boundary."""
+        w, h = resolve_dimensions(1920, 1080, user_h=84, round_units=True,
+                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
+        assert h == 84   # already a multiple of 28
+        # w = ceil(149/28)*28 = 6*28 = 168
+        assert w == 168
+
+    # ── neither specified ─────────────────────────────────────────────
+
+    def test_neither_specified_returns_unit_default(self):
+        w, h = resolve_dimensions(1920, 1080, round_units=False)
+        assert w == self.UNIT_W
+        assert h == self.UNIT_H
+
+    def test_neither_specified_with_rounding_still_unit_default(self):
+        """Unit default is already aligned, rounding is a no-op."""
+        w, h = resolve_dimensions(1920, 1080, round_units=True)
+        assert w == self.UNIT_W
+        assert h == self.UNIT_H
+
+    # ── edge cases ────────────────────────────────────────────────────
+
+    def test_minimum_dimension_one(self):
+        """Very small source, width=1 → height ≥ 1."""
+        w, h = resolve_dimensions(1, 1, user_w=1, round_units=False,
+                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
+        assert w == 1
+        assert h == 1
+
+    def test_custom_unit_sizes(self):
+        """Custom unit_w/unit_h are respected."""
+        w, h = resolve_dimensions(100, 50, user_w=10, round_units=True,
+                                  unit_w=5, unit_h=5)
+        assert w == 10   # already multiple of 5
+        # h = round(10 * 50 / 100) = 5, ceil(5/5)*5 = 5
+        assert h == 5
+
+    def test_rounding_ceil_not_floor(self):
+        """Partial units round UP, not down."""
+        # 29 is just over one unit (28)
+        w, h = resolve_dimensions(100, 100, user_w=29, round_units=True,
+                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
+        assert w == 56   # ceil(29/28)*28 = 2*28, not 1*28
+        assert h == 56   # same since square source

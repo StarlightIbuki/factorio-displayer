@@ -51,6 +51,59 @@ except ImportError:
         def __exit__(self, *args):
             pass
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# Dimension resolution — auto-calculate omitted dimension + unit rounding
+# ═══════════════════════════════════════════════════════════════════════
+
+def resolve_dimensions(
+    source_w: int,
+    source_h: int,
+    user_w: int | None = None,
+    user_h: int | None = None,
+    *,
+    round_units: bool = True,
+    unit_w: int = DISPLAY_WIDTH,
+    unit_h: int = DISPLAY_HEIGHT,
+) -> tuple[int, int]:
+    """Compute the final ``(total_w, total_h)`` for frame resizing.
+
+    Parameters
+    ----------
+    source_w, source_h : int
+        Original media dimensions (pixels).
+    user_w, user_h : int or None
+        User-specified overrides from ``--width`` / ``--height``.
+    round_units : bool
+        If True (default), round each dimension **up** to the nearest
+        multiple of *unit_w* / *unit_h* so no display units are partially
+        filled.
+    unit_w, unit_h : int
+        Tile dimensions of a single display unit (default 28×28).
+
+    Returns
+    -------
+    (total_w, total_h) : tuple[int, int]
+    """
+    if user_w is not None and user_h is not None:
+        w, h = user_w, user_h
+    elif user_w is not None:
+        h = max(1, round(user_w * source_h / source_w))
+        w = user_w
+    elif user_h is not None:
+        w = max(1, round(user_h * source_w / source_h))
+        h = user_h
+    else:
+        # Neither specified — use the single-unit default (current behaviour)
+        w, h = unit_w, unit_h
+
+    if round_units:
+        w = ((w + unit_w - 1) // unit_w) * unit_w
+        h = ((h + unit_h - 1) // unit_h) * unit_h
+
+    return w, h
+
+
 def _frame_diff(a: np.ndarray, b: np.ndarray) -> float:
     """Return 0.0–1.0 normalised mean absolute difference between two RGB frames."""
     return float(np.mean(np.abs(a.astype(np.float32) - b.astype(np.float32))) / 255.0)
@@ -1267,6 +1320,7 @@ def encode_video(
     total_width: int | None = None,
     total_height: int | None = None,
     *,
+    round_units: bool = True,
     time_chunks: int = 1,
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
@@ -1285,6 +1339,21 @@ def encode_video(
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     expected_frames = max(1, total_frames // fps_skip) if total_frames > 0 else None
+
+    # Resolve output dimensions from source aspect ratio + user overrides
+    source_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    source_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    resolved_w, resolved_h = resolve_dimensions(
+        source_w, source_h,
+        user_w=total_width, user_h=total_height,
+        round_units=round_units,
+    )
+    sys.stderr.write(
+        f"Source: {source_w}×{source_h} → output: {resolved_w}×{resolved_h}"
+    )
+    if round_units:
+        sys.stderr.write(f"  (rounded to units, {resolved_w // DISPLAY_WIDTH}×{resolved_h // DISPLAY_HEIGHT} units)")
+    sys.stderr.write("\n")
     
     # Scale the FPS so skipped frames still preserve identical playback duration 
     effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
@@ -1307,7 +1376,7 @@ def encode_video(
         if time_chunks > 1 or deduplicate_cross:
             result = encode_frames_chunked(
                 _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
-                total_width=total_width, total_height=total_height,
+                total_width=resolved_w, total_height=resolved_h,
                 expected_frames=expected_frames, source_id=source_id,
                 time_chunks=time_chunks, chunk_workers=chunk_workers,
                 output_chunks_dir=output_chunks_dir,
@@ -1315,7 +1384,7 @@ def encode_video(
             )
             return result["full"]
         return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
-                              total_width=total_width, total_height=total_height,
+                              total_width=resolved_w, total_height=resolved_h,
                               expected_frames=expected_frames, source_id=source_id)
     finally:
         cap.release()
@@ -1332,6 +1401,7 @@ def encode_gif(
     total_width: int | None = None,
     total_height: int | None = None,
     *,
+    round_units: bool = True,
     time_chunks: int = 1,
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
@@ -1341,6 +1411,20 @@ def encode_gif(
     from PIL import Image
 
     gif = Image.open(str(gif_path))
+
+    # Resolve output dimensions from source GIF size
+    source_w, source_h = gif.size
+    resolved_w, resolved_h = resolve_dimensions(
+        source_w, source_h,
+        user_w=total_width, user_h=total_height,
+        round_units=round_units,
+    )
+    sys.stderr.write(
+        f"Source GIF: {source_w}×{source_h} → output: {resolved_w}×{resolved_h}"
+    )
+    if round_units:
+        sys.stderr.write(f"  (rounded to units, {resolved_w // DISPLAY_WIDTH}×{resolved_h // DISPLAY_HEIGHT} units)")
+    sys.stderr.write("\n")
 
     if fps <= 0:
         duration = gif.info.get("duration", 0)
@@ -1376,7 +1460,7 @@ def encode_gif(
     if time_chunks > 1 or deduplicate_cross:
         result = encode_frames_chunked(
             _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
-            total_width=total_width, total_height=total_height,
+            total_width=resolved_w, total_height=resolved_h,
             expected_frames=expected_frames, source_id=source_id,
             time_chunks=time_chunks, chunk_workers=chunk_workers,
             output_chunks_dir=output_chunks_dir,
@@ -1384,7 +1468,7 @@ def encode_gif(
         )
         return result["full"]
     return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
-                          total_width=total_width, total_height=total_height,
+                          total_width=resolved_w, total_height=resolved_h,
                           expected_frames=expected_frames, source_id=source_id)
 
 
@@ -1399,6 +1483,7 @@ def encode_png_series(
     total_width: int | None = None,
     total_height: int | None = None,
     *,
+    round_units: bool = True,
     time_chunks: int = 1,
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
@@ -1407,6 +1492,23 @@ def encode_png_series(
     """Encode a sequence of image files (PNG, JPEG, …)."""
     if fps <= 0:
         fps = 60.0
+
+    # Read the first image to resolve output dimensions from source aspect ratio
+    first_img = cv2.imread(str(paths[0]))
+    if first_img is None:
+        raise FileNotFoundError(f"Cannot read image: {paths[0]}")
+    source_h, source_w = first_img.shape[:2]
+    resolved_w, resolved_h = resolve_dimensions(
+        source_w, source_h,
+        user_w=total_width, user_h=total_height,
+        round_units=round_units,
+    )
+    sys.stderr.write(
+        f"Source image: {source_w}×{source_h} → output: {resolved_w}×{resolved_h}"
+    )
+    if round_units:
+        sys.stderr.write(f"  (rounded to units, {resolved_w // DISPLAY_WIDTH}×{resolved_h // DISPLAY_HEIGHT} units)")
+    sys.stderr.write("\n")
 
     expected_frames = math.ceil(len(paths) / fps_skip)
     effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
@@ -1424,7 +1526,7 @@ def encode_png_series(
     if time_chunks > 1 or deduplicate_cross:
         result = encode_frames_chunked(
             _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
-            total_width=total_width, total_height=total_height,
+            total_width=resolved_w, total_height=resolved_h,
             expected_frames=expected_frames, source_id=source_id,
             time_chunks=time_chunks, chunk_workers=chunk_workers,
             output_chunks_dir=output_chunks_dir,
@@ -1432,7 +1534,7 @@ def encode_png_series(
         )
         return result["full"]
     return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
-                          total_width=total_width, total_height=total_height,
+                          total_width=resolved_w, total_height=resolved_h,
                           expected_frames=expected_frames, source_id=source_id)
 
 
@@ -1446,6 +1548,7 @@ def encode_frame(
     total_width: int | None = None,
     total_height: int | None = None,
     *,
+    round_units: bool = True,
     time_chunks: int = 1,
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
@@ -1458,6 +1561,7 @@ def encode_frame(
         [image_path], output_name, fps_skip=1, fps=fps,
         adaptive=adaptive, threshold=threshold, deduplicate=deduplicate,
         total_width=total_width, total_height=total_height,
+        round_units=round_units,
         time_chunks=time_chunks, chunk_workers=chunk_workers,
         output_chunks_dir=output_chunks_dir,
         deduplicate_cross=deduplicate_cross,
@@ -1479,6 +1583,7 @@ def encode_auto(
     total_width: int | None = None,
     total_height: int | None = None,
     *,
+    round_units: bool = True,
     time_chunks: int = 1,
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
@@ -1502,6 +1607,7 @@ def encode_auto(
         sys.stderr.write(f"Found {len(pngs)} PNG(s) in {input_path}\n")
         return encode_png_series(pngs, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                                   total_width=total_width, total_height=total_height,
+                                  round_units=round_units,
                                   **chunk_kwargs)
 
     if "*" in input_path or "?" in input_path:
@@ -1511,6 +1617,7 @@ def encode_auto(
         sys.stderr.write(f"Matched {len(matches)} file(s) for pattern: {input_path}\n")
         return encode_png_series(matches, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                                   total_width=total_width, total_height=total_height,
+                                  round_units=round_units,
                                   **chunk_kwargs)
 
     ext = path.suffix.lower()
@@ -1518,6 +1625,7 @@ def encode_auto(
     if ext in video_exts:
         return encode_video(input_path, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                              total_width=total_width, total_height=total_height,
+                             round_units=round_units,
                              **chunk_kwargs)
 
     if ext == ".gif":
@@ -1528,14 +1636,17 @@ def encode_auto(
         except EOFError:
             return encode_frame(input_path, output_name, fps, adaptive, threshold, deduplicate,
                                  total_width=total_width, total_height=total_height,
+                                 round_units=round_units,
                                  **chunk_kwargs)
         return encode_gif(input_path, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                            total_width=total_width, total_height=total_height,
+                           round_units=round_units,
                            **chunk_kwargs)
 
     if ext in image_exts:
         return encode_frame(input_path, output_name, fps, adaptive, threshold, deduplicate,
                              total_width=total_width, total_height=total_height,
+                             round_units=round_units,
                              **chunk_kwargs)
 
     raise ValueError(
