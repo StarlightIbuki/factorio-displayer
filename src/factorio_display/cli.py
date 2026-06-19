@@ -66,11 +66,8 @@ def main():
 
     args = parser.parse_args()
 
-    from .integer2signal.config_loader import load_config
+    from . import CLOCK_SIGNAL
     from .integer2signal.pool import get_filtered_pool
-
-    config = load_config()
-    pool = get_filtered_pool(config["reserved"]["clock_signal"])
 
     if args.command == "encode":
         sys.stderr.write(f"Encoding video data from {args.input_path}...\n")
@@ -93,10 +90,7 @@ def main():
         if not args.no_audio:
             sys.stderr.write("\n")
             from .audio.encoder import encode_audio_auto
-            audio_bp = encode_audio_auto(
-                args.input_path, 
-                config=config
-            )
+            audio_bp = encode_audio_auto(args.input_path)
             if audio_bp:
                 sys.stdout.write(audio_bp + "\n")
             
@@ -112,12 +106,13 @@ def main():
     elif args.command == "export-audio":
         sys.stderr.write(f"Building audio decoder blueprint (Instrument: {args.instrument})...\n")
         
+        pool = get_filtered_pool(CLOCK_SIGNAL)
         # If the user didn't explicitly provide signals, default to the whole pool
         used_signals = args.signals if "signal-A" not in args.signals else pool
 
         audio_bp = build_audio_decoder(
             signals=used_signals,
-            clock_signal=config["reserved"]["clock_signal"],
+            clock_signal=CLOCK_SIGNAL,
             target_signal=args.instrument
         )
         sys.stdout.write(audio_bp + "\n")

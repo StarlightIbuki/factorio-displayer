@@ -19,22 +19,38 @@ def _signal_key(name: str, quality: str) -> str:
 class SignalMapping:
     """Maps every valid display pixel to a Factorio signal and back."""
 
-    def __init__(self, config: dict, signal_pool: list[str]) -> None:
-        """Build the mapping from display config and a pool of available signals.
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        hole_tl: tuple[int, int],
+        hole_br: tuple[int, int],
+        qualities: list[str],
+        signal_pool: list[str],
+    ) -> None:
+        """Build the mapping from display parameters and a pool of available signals.
 
         Parameters
         ----------
-        config : dict
-            Parsed TOML config (requires ``display`` and ``signals`` sections).
+        width : int
+            Display grid width in tiles.
+        height : int
+            Display grid height in tiles.
+        hole_tl : tuple[int, int]
+            Top-left corner of the power-pole cutout hole.
+        hole_br : tuple[int, int]
+            Bottom-right corner of the power-pole cutout hole.
+        qualities : list[str]
+            Space Age quality tiers (e.g. ``["normal","uncommon","rare","epic","legendary"]``).
         signal_pool : list[str]
-            Pool of available signal names.  Only the first *N* required signals
+            Pool of available signal names. Only the first *N* required signals
             are used; the rest are ignored.
         """
-        self.width: int = config["display"]["width"]
-        self.height: int = config["display"]["height"]
-        self.hole_tl: tuple[int, int] = tuple(config["display"]["hole_top_left"])
-        self.hole_br: tuple[int, int] = tuple(config["display"]["hole_bottom_right"])
-        self.qualities: list[str] = config["signals"]["qualities"]
+        self.width: int = width
+        self.height: int = height
+        self.hole_tl: tuple[int, int] = hole_tl
+        self.hole_br: tuple[int, int] = hole_br
+        self.qualities: list[str] = qualities
 
         hole_w = self.hole_br[0] - self.hole_tl[0] + 1
         hole_h = self.hole_br[1] - self.hole_tl[1] + 1
@@ -121,7 +137,13 @@ class SignalMapping:
 
     @classmethod
     def from_manifest(
-        cls, config: dict, manifest_path: str = "signal_manifest.json"
+        cls,
+        width: int,
+        height: int,
+        hole_tl: tuple[int, int],
+        hole_br: tuple[int, int],
+        qualities: list[str],
+        manifest_path: str = "signal_manifest.json",
     ) -> "SignalMapping":
         """Build a SignalMapping using a previously exported manifest file.
 
@@ -130,4 +152,4 @@ class SignalMapping:
         """
         with open(manifest_path) as f:
             base_signals = json.load(f)
-        return cls(config, base_signals)
+        return cls(width, height, hole_tl, hole_br, qualities, base_signals)

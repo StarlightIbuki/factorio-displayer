@@ -1,4 +1,10 @@
-"""Shared configuration loader for the Factorio display project."""
+"""Shared configuration loader — **build-time only**.
+
+This module exists solely for the Hatchling build hook (:file:`hatch_build.py`)
+to read :file:`config.toml` and bake its values into :file:`_generated.py`.
+Runtime code must import constants from :mod:`factorio_display` (e.g.
+``DISPLAY_WIDTH``, ``CLOCK_SIGNAL``) — never call :func:`load_config` at runtime.
+"""
 
 import tomllib
 

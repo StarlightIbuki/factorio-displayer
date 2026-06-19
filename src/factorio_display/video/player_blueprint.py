@@ -3,20 +3,41 @@
 from draftsman.blueprintable import Blueprint
 from draftsman.entity import new_entity
 
-from ..integer2signal.config_loader import load_config
+from .. import (
+    CLOCK_SIGNAL,
+    DISPLAY_BLUEPRINT,
+    DISPLAY_HEIGHT,
+    DISPLAY_WIDTH,
+    HOLE_BOTTOM_RIGHT,
+    HOLE_TOP_LEFT,
+    QUALITIES,
+)
 from ..integer2signal.pool import get_filtered_pool
 from ..integer2signal.mapping import SignalMapping
 
 
-def build_display(name: str) -> str:
-    config = load_config()
-    w, h = config["display"]["width"], config["display"]["height"]
-    hole_tl = tuple(config["display"]["hole_top_left"])
+def build_display(
+    name: str = "Video Display",
+    width: int | None = None,
+    height: int | None = None,
+) -> str:
+    """Build a lamp-grid display blueprint.
 
-    # Generate signal pool, build mapping, and export manifest
-    pool = get_filtered_pool(config["reserved"]["clock_signal"])
-    mapping = SignalMapping(config, pool)
-    mapping.export_manifest()
+    If *width* and *height* match the baked defaults, returns the pre-computed
+    ``DISPLAY_BLUEPRINT``.  Otherwise builds a fresh blueprint with the custom
+    dimensions (using the baked hole position and qualities).
+    """
+    w = width if width is not None else DISPLAY_WIDTH
+    h = height if height is not None else DISPLAY_HEIGHT
+
+    if w == DISPLAY_WIDTH and h == DISPLAY_HEIGHT and DISPLAY_BLUEPRINT:
+        return DISPLAY_BLUEPRINT
+
+    hole_tl = HOLE_TOP_LEFT
+    hole_br = HOLE_BOTTOM_RIGHT
+
+    pool = get_filtered_pool(CLOCK_SIGNAL)
+    mapping = SignalMapping(w, h, hole_tl, hole_br, QUALITIES, pool)
 
     blueprint = Blueprint()
     blueprint.label = name

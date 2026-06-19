@@ -21,8 +21,17 @@ from draftsman.blueprintable import Blueprint
 from draftsman.constants import Direction
 from draftsman.entity import DeciderCombinator, new_entity
 
-from ..integer2signal.config_loader import load_config
 from ..integer2signal.mapping import SignalMapping
+
+from .. import (
+    CLOCK_SIGNAL,
+    DISPLAY_HEIGHT,
+    DISPLAY_WIDTH,
+    HOLE_BOTTOM_RIGHT,
+    HOLE_TOP_LEFT,
+    QUALITIES,
+    SIGNAL_POOL,
+)
 
 try:
     from tqdm import tqdm
@@ -52,7 +61,6 @@ def encode_frames(
     adaptive: bool = False,
     threshold: float = 0.03,
     deduplicate: bool = False,
-    config: dict | None = None,
     mapping: SignalMapping | None = None,
     total_width: int | None = None,
     total_height: int | None = None,
@@ -65,20 +73,25 @@ def encode_frames(
     fps = max(1.0, min(fps, 60.0))
     ticks_float = 60.0 / fps
 
-    if config is None:
-        config = load_config()
     if mapping is None:
-        mapping = SignalMapping.from_manifest(config)
+        mapping = SignalMapping(
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
+            HOLE_TOP_LEFT,
+            HOLE_BOTTOM_RIGHT,
+            QUALITIES,
+            SIGNAL_POOL,
+        )
 
-    unit_w = config["display"]["width"]
-    unit_h = config["display"]["height"]
+    unit_w = DISPLAY_WIDTH
+    unit_h = DISPLAY_HEIGHT
     total_w = total_width if total_width is not None else unit_w
     total_h = total_height if total_height is not None else unit_h
     unit_cols = math.ceil(total_w / unit_w)
     unit_rows = math.ceil(total_h / unit_h)
     num_units = unit_cols * unit_rows
 
-    clock = config["reserved"]["clock_signal"]
+    clock = CLOCK_SIGNAL
 
     # ==================================================================
     # Phase 0 & 1: Parallel Resizing, Adaptive Dropping, and Caching
