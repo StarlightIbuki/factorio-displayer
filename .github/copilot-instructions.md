@@ -16,6 +16,7 @@ This project builds Factorio blueprints for audio/video display using combinator
 
 Before implementation:
 1. confirm design with me by repharsing in your own words
+1. make sure the plan is feasible and sound
 1. write unit tests
 
 When iterating/writting code, always stop and ask for help from me if:

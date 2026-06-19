@@ -205,6 +205,9 @@ def encode_frames(
 
         total = len(unique_frames)
         cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
+        # Cap columns at 26 (one-sided limit — rows may grow unbounded)
+        if cols > 26:
+            cols = 26
         rows = (total + cols - 1) // cols
 
         dc_grid: dict[tuple[int, int], str] = {}
@@ -362,16 +365,15 @@ def encode_frames(
 
     # Compute per-unit grid dimensions, pad to fill the rectangle completely
     # so the snake wiring never encounters gaps > 1 tile.
+    # The 26-column cap is a one-sided limit: either cols or rows may exceed
+    # 26, but not both.  When the square-ish grid would exceed 26 on both
+    # axes we force a tall, narrow rectangle (cols=26, rows unbounded).
     unit_grids: list[tuple[int, int, int]] = []  # (padded_total, cols, rows)
     for ui, unique_frames in enumerate(unit_unique):
         t = len(unique_frames)
         c = max(1, math.isqrt(max(0, 2 * t - 1)) + 1) if t > 0 else 1
         if c > 26:
-            raise ValueError(
-                f"Unit {ui} combinator grid is {c} columns wide (max 26). "
-                f"Too many frames ({t}) — reduce frame count, increase --skip, "
-                f"or use --adaptive/--deduplicate."
-            )
+            c = 26
         r = (t + c - 1) // c
         # Pad with dummy frames so every grid cell is occupied
         missing = c * r - t
