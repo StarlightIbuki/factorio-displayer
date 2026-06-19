@@ -123,13 +123,13 @@ def loudness_to_packed(
                 f"got {len(tick_loudness)}"
             )
         packed: list[int] = []
-        for semitone in range(SEMITONE_COUNT):
+        for semitone in range(semitone_count):
             packed.append(
                 pack_four(
-                    tick_loudness[semitone + 0 * SEMITONE_COUNT],  # octave 3
-                    tick_loudness[semitone + 1 * SEMITONE_COUNT],  # octave 4
-                    tick_loudness[semitone + 2 * SEMITONE_COUNT],  # octave 5
-                    tick_loudness[semitone + 3 * SEMITONE_COUNT],  # octave 6
+                    tick_loudness[semitone + 0 * semitone_count],  # octave 3
+                    tick_loudness[semitone + 1 * semitone_count],  # octave 4
+                    tick_loudness[semitone + 2 * semitone_count],  # octave 5
+                    tick_loudness[semitone + 3 * semitone_count],  # octave 6
                 )
             )
         result.append(packed)
@@ -176,6 +176,10 @@ def encode_audio_memory(
     signal_pool: list[str],
     qualities: list[str],
     clock_signal: str = "signal-clock",
+    blueprint: "Blueprint | None" = None,  # noqa: F821
+    y_offset: int = 0,
+    x_offset: int = 0,
+    id_prefix: str = "",
 ) -> str:
     """Encode tick→loudness data into an audio-memory blueprint string.
 
@@ -233,24 +237,20 @@ def encode_audio_memory(
         f"{TICKS_PER_PAGE} ticks/page).\n"
     )
 
-    # 4. Build blueprint — snake-grid layout
-    blueprint = Blueprint()
-    blueprint.label = f"Audio Memory: {output_name}"
+    # 4. Collect non-empty pages — defer grid layout until wiring
+    #    quality-first interleaving:
+    #      signal_pool[cell_offset // num_qual] × qualities[cell_offset % num_qual]
+    own_blueprint = blueprint is None
+    if own_blueprint:
+        blueprint = Blueprint()
+        blueprint.label = f"Audio Memory: {output_name}"
 
-    cols = max(1, math.isqrt(max(0, 2 * page_count - 1)) + 1) if page_count > 0 else 1
-    rows = (page_count + cols - 1) // cols
-
-    dc_grid: dict[tuple[int, int], str] = {}
-
-    # Pre-compute cell_offset → (signal_name, quality) using
-    # quality-first interleaving:
-    #   signal_pool[cell_offset // num_qual] × qualities[cell_offset % num_qual]
+    # Each entry: (dc_id, page_idx, tick_start, conditions, outputs)
+    PageEntry = tuple[str, int, int, list, list]
+    non_empty: list[PageEntry] = []
 
     for page_idx in range(page_count):
-        col = page_idx % cols
-        row = page_idx // cols
-        dc_id = f"ap{page_idx}"
-        tile_row = row * 2
+        dc_id = f"{id_prefix}ap{page_idx}"
 
         # Tick range for this page
         page_start_cell = page_idx * CELLS_PER_PAGE
@@ -297,39 +297,66 @@ def encode_audio_memory(
                 )
             )
 
+        # Skip entirely silent pages — no DC needed
+        if not outputs:
+            continue
+
+        non_empty.append((dc_id, page_idx, tick_start, conditions, outputs))
+
+    created_count = len(non_empty)
+
+    # 5. Layout: place non-empty DCs sequentially with no gaps
+    MAX_COLS = 12  # align with 12-channel width
+    cols = min(MAX_COLS, max(1, created_count)) if created_count > 0 else 1
+    rows = (created_count + cols - 1) // cols
+
+    dc_ids: list[str] = []  # ordered by grid position (snake order)
+
+    for seq_idx, (dc_id, page_idx, tick_start, conditions, outputs) in enumerate(non_empty):
+        col = seq_idx % cols
+        row = seq_idx // cols
+        tile_row = row * 2
+
         dc = new_entity(
             "decider-combinator",
             id=dc_id,
-            tile_position=(col, tile_row),
-            direction=Direction.SOUTH,
+            tile_position=(col + x_offset, tile_row + y_offset),
+            direction=Direction.NORTH,
         )
         dc.conditions = conditions
         dc.outputs = outputs
         blueprint.entities.append(dc)
-        dc_grid[(row, col)] = dc_id
+        dc_ids.append(dc_id)
 
-    # Wire pages — green for clock/input bus, red for output bus
-    prev_id: str | None = None
+    # 6. Wire pages — green for clock/input bus, red for output bus
+    #    Build snake-order list matching the sequential grid placement.
+    snake_order: list[str] = []
     for r in range(rows):
         col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
         for c in col_iter:
-            dc_id = dc_grid.get((r, c))
-            if dc_id is None:
-                continue
-            if prev_id is not None:
-                blueprint.add_circuit_connection(
-                    "green", prev_id, dc_id, side_1="input", side_2="input",
-                )
-                blueprint.add_circuit_connection(
-                    "red", prev_id, dc_id, side_1="output", side_2="output",
-                )
-            prev_id = dc_id
+            seq_idx = r * cols + c
+            if seq_idx < len(dc_ids):
+                snake_order.append(dc_ids[seq_idx])
+
+    for i in range(1, len(snake_order)):
+        blueprint.add_circuit_connection(
+            "green", snake_order[i - 1], snake_order[i],
+            side_1="input", side_2="input",
+        )
+        blueprint.add_circuit_connection(
+            "red", snake_order[i - 1], snake_order[i],
+            side_1="output", side_2="output",
+        )
 
     sys.stderr.write(
-        f"Audio memory: {page_count} DCs, {total_cells} cells, "
-        f"{total_ticks} ticks.\n"
+        f"Audio memory: {created_count}/{page_count} DCs (skipped {page_count - created_count} "
+        f"silent), {total_cells} cells, {total_ticks} ticks.\n"
     )
-    return blueprint.to_string()
+    if own_blueprint:
+        return blueprint.to_string()
+    # When embedding into an existing blueprint, return the id of the
+    # last placed DC for cross-connection by the caller.
+    return snake_order[-1] if snake_order else ""
 
 
 # ── auto-detect convenience (MIDI → encoder bridge) ───────────────────
@@ -343,10 +370,17 @@ def encode_audio_auto(
 
     Currently supports ``.mid`` / ``.midi`` files via :func:`midi_to_tick_data`.
 
-    Keyword arguments are forwarded to :func:`midi_to_tick_data`:
-    ``ticks_per_beat``, ``boost_melody``, ``velocity_scale``,
-    ``attack_ticks``, ``decay_ticks``, ``sustain_level``, ``release_ticks``,
-    ``processed_midi_path``, ``debug_json_path``.
+    Keyword arguments
+    -----------------
+    attach_player : bool
+        If True (default), build the player decoder into the same blueprint
+        above the memory pages, producing a single self-contained blueprint.
+    instruments : list[str] | None
+        Override instrument detection. One entry per rail.
+    ticks_per_beat, boost_melody, velocity_scale,
+    attack_ticks, decay_ticks, sustain_level, release_ticks,
+    processed_midi_path, debug_json_path
+        Forwarded to :func:`midi_to_tick_data`.
     """
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     if ext not in ("mid", "midi"):
@@ -354,7 +388,8 @@ def encode_audio_auto(
         return ""
 
     from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
-    from .midi_translator import midi_to_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from .midi_translator import midi_to_multi_rail_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from .player_blueprint import build_multi_rail_decoder  # pylint: disable=relative-beyond-top-level
 
     # Gather midi_translator kwargs
     midi_kwargs: dict[str, object] = {}
@@ -374,27 +409,152 @@ def encode_audio_auto(
         f"length={mid.length:.1f}s\n"
     )
 
-    float_data = midi_to_tick_data(mid, **midi_kwargs)  # type: ignore[arg-type]
+    # ── Determine instruments via rail_mode ─────────────────────────
+    rail_mode: str = str(kwargs.get("rail_mode", "piano"))
+    attach_player = bool(kwargs.get("attach_player", True))
+    map_drums = bool(kwargs.get("map_drums", False))
 
-    # ── normalize (peak scaling, on by default) ─────────────────────
-    normalize_target = float(kwargs.get("normalize_target", 100.0))
-    float_data = normalize_tick_data(float_data, target_max=normalize_target)
+    # Parse rail_mode: "piano", "all", "auto:0.05", or "piano,bass"
+    # Backward compat: accept "instruments" kwarg too
+    if "instruments" in kwargs:
+        inst_val = kwargs["instruments"]
+        if isinstance(inst_val, list):
+            rail_mode = ",".join(inst_val)
+        elif isinstance(inst_val, str):
+            rail_mode = inst_val
+
+    instruments: list[str] = []
+    threshold: float = 0.05  # default threshold for auto mode
+    multi_data: list[list[list[float]]] = []
+
+    # Allowed kwargs for midi_to_multi_rail_tick_data
+    _multi_kwargs = {k: v for k, v in midi_kwargs.items()
+                     if k in ("ticks_per_beat", "boost_melody", "velocity_scale",
+                              "attack_ticks", "decay_ticks", "sustain_level",
+                              "release_ticks")}
+
+    if rail_mode == "piano":
+        # Default: single piano rail, ignore everything else
+        instruments = ["piano"]
+    elif rail_mode == "all":
+        # Use all detected instruments
+        instruments, multi_data = midi_to_multi_rail_tick_data(
+            mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
+        )
+    elif rail_mode.startswith("auto"):
+        # auto[:threshold] — auto-detect, filter below threshold
+        if ":" in rail_mode:
+            try:
+                threshold = float(rail_mode.split(":", 1)[1])
+            except ValueError:
+                pass
+        instruments, multi_data = midi_to_multi_rail_tick_data(
+            mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
+        )
+        # Filter: drop rails with too few note events vs total
+        if len(instruments) > 1:
+            # Count note events per rail from multi_data
+            total_ticks = max((len(td) for td in multi_data), default=0)
+            kept_instruments: list[str] = []
+            kept_data: list[list[list[float]]] = []
+            for ri, inst in enumerate(instruments):
+                td = multi_data[ri]
+                active_ticks = sum(1 for tick in td if any(v > 0 for v in tick))
+                ratio = active_ticks / max(1, total_ticks)
+                if ratio >= threshold:
+                    kept_instruments.append(inst)
+                    kept_data.append(td)
+                else:
+                    sys.stderr.write(
+                        f"Dropping rail '{inst}' ({active_ticks}/{total_ticks} "
+                        f"active ticks, {ratio:.1%} < {threshold:.1%})\n"
+                    )
+            if kept_instruments:
+                instruments = kept_instruments
+                multi_data = kept_data
+            # If everything got filtered, keep the most active one
+            if not instruments:
+                best = max(range(len(multi_data)), key=lambda i: sum(
+                    1 for t in multi_data[i] if any(v > 0 for v in t)
+                ))
+                instruments = [instruments[best]]  # type: ignore[index] — will be overridden below
+                # Need to re-fetch just that one
+                instruments = [instruments[0]]
+    else:
+        # Comma-separated instrument names: "piano,bass,drum"
+        instruments = [s.strip() for s in rail_mode.split(",") if s.strip()]
+        if not instruments:
+            instruments = ["piano"]
+
+    if not instruments:
+        sys.stderr.write("No instruments selected.\n")
+        return ""
+
+    sys.stderr.write(
+        f"Using {len(instruments)} rail(s): {', '.join(instruments)}\n"
+    )
+
+    # ── Generate tick_data per rail ──────────────────────────────────
+    int_data_list: list[list[list[int]]] = []
+
+    if multi_data:
+        # Data already came from multi-rail translator
+        for float_data in multi_data:
+            normalize_target = float(kwargs.get("normalize_target", 100.0))
+            float_data = normalize_tick_data(float_data, target_max=normalize_target)
+            int_data = [
+                [max(0, min(100, int(round(v)))) for v in tick]
+                for tick in float_data
+            ]
+            int_data_list.append(int_data)
+    else:
+        # Need to generate tick_data for manual instruments
+        # For single piano, use the simple translator; for multi, use multi-rail
+        if len(instruments) == 1 and instruments[0] == "piano" and not map_drums:
+            from .midi_translator import midi_to_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+            float_data = midi_to_tick_data(mid, **midi_kwargs)  # type: ignore[arg-type]
+            normalize_target = float(kwargs.get("normalize_target", 100.0))
+            float_data = normalize_tick_data(float_data, target_max=normalize_target)
+            int_data_list.append([
+                [max(0, min(100, int(round(v)))) for v in tick]
+                for tick in float_data
+            ])
+        else:
+            # Use multi-rail translator for manual instruments
+            all_inst, all_data = midi_to_multi_rail_tick_data(
+                mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
+            )
+            # Pick only the requested instruments
+            for inst in instruments:
+                if inst in all_inst:
+                    ri = all_inst.index(inst)
+                    float_data = all_data[ri]
+                else:
+                    # Instrument not found in MIDI, create empty data
+                    max_ticks = max((len(td) for td in all_data), default=0)
+                    float_data = [[0.0] * 48 for _ in range(max_ticks)] if max_ticks > 0 else []
+                normalize_target = float(kwargs.get("normalize_target", 100.0))
+                float_data = normalize_tick_data(float_data, target_max=normalize_target)
+                int_data_list.append([
+                    [max(0, min(100, int(round(v)))) for v in tick]
+                    for tick in float_data
+                ])
+
+    if not int_data_list or not any(any(any(v for v in tick) for tick in td) for td in int_data_list):
+        sys.stderr.write("No notes found in MIDI.\n")
+        return ""
 
     # ── debug JSON dump ──────────────────────────────────────────────
     debug_json_path = kwargs.get("debug_json_path")
     if debug_json_path and isinstance(debug_json_path, str):
         import json  # pylint: disable=import-outside-toplevel
-        # Round to 3 decimal places for readability
-        json_data = [[round(v, 3) for v in tick] for tick in float_data]
+        json_data = [
+            [[round(v, 3) for v in tick] for tick in td]
+            for td in int_data_list
+        ]
         with open(debug_json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f)
         sys.stderr.write(f"Debug JSON written to: {debug_json_path}\n")
-
-    # Round float → int, clip to 0..100
-    int_data: list[list[int]] = [
-        [max(0, min(100, int(round(v)))) for v in tick]
-        for tick in float_data
-    ]
 
     signal_pool = list(SIGNAL_POOL)
     qualities = list(QUALITIES)
@@ -402,10 +562,147 @@ def encode_audio_auto(
     if not signal_pool:
         sys.stderr.write("Warning: SIGNAL_POOL is empty, audio encoding may fail.\n")
 
-    return encode_audio_memory(
-        int_data,
-        output_name=path,
-        signal_pool=signal_pool,
-        qualities=qualities,
-        clock_signal=CLOCK_SIGNAL,
+    num_rails = len(instruments)
+
+    if not attach_player:
+        # Memory-only: encode each rail, concatenate
+        parts: list[str] = []
+        for ri in range(num_rails):
+            mem = encode_audio_memory(
+                int_data_list[ri],
+                output_name=f"{path}_r{ri}",
+                signal_pool=signal_pool,
+                qualities=qualities,
+                clock_signal=CLOCK_SIGNAL,
+            )
+            if mem:
+                parts.append(mem)
+        return "\n".join(parts)
+
+    # ── Combined blueprint: player + memory ─────────────────────────
+    import io as _io
+    import contextlib as _cl
+    from draftsman.blueprintable import Blueprint
+    from draftsman.entity import new_entity
+    from .player_blueprint import (
+        RAIL_WIDTH, MOD_Y, TICKS_PER_PAGE, SUB_TICK_SIG,
+        INSTRUMENT_MIDI_BASES, _build_rail, _RailEndpoints,
     )
+
+    with _cl.redirect_stdout(_io.StringIO()):
+        combined = Blueprint()
+        combined.label = f"Audio: {path}"
+
+        # Build rails one at a time: player + memory per rail, side by side.
+        # Memory sits directly above its player at the same X offset.
+        endpoints: list[_RailEndpoints] = []
+        mem_last_ids: list[str] = []
+
+        for ri in range(num_rails):
+            rail_x = ri * RAIL_WIDTH
+            inst = instruments[ri]
+            midi_base = INSTRUMENT_MIDI_BASES.get(
+                inst.lower().replace("programmable-speaker-instrument-", ""), 53,
+            )
+
+            # Build player rail
+            ep = _build_rail(
+                combined, ri, rail_x,
+                inst, signal_pool, qualities,
+                debug_lamps=False,
+                midi_base=midi_base,
+                map_drums=map_drums,
+            )
+            endpoints.append(ep)
+
+            # Find max Y within this rail's X range to place memory above
+            rail_max_y = 0.0
+            for e in combined.entities:
+                try:
+                    pos = e.tile_position
+                    y = float(pos[1]) if hasattr(pos, '__getitem__') else float(pos.y) if hasattr(pos, 'y') else 0.0
+                    x = float(pos[0]) if hasattr(pos, '__getitem__') else float(pos.x) if hasattr(pos, 'x') else 999.0
+                    if rail_x <= x < rail_x + RAIL_WIDTH:
+                        rail_max_y = max(rail_max_y, y)
+                except (TypeError, ValueError, IndexError):
+                    pass
+
+            MEM_GAP = 4
+            memory_y = int(rail_max_y) + MEM_GAP
+
+            # Build memory pages above this rail's player (same X offset)
+            last_id = encode_audio_memory(
+                int_data_list[ri],
+                output_name=f"{path}_r{ri}",
+                signal_pool=signal_pool,
+                qualities=qualities,
+                clock_signal=CLOCK_SIGNAL,
+                blueprint=combined,
+                y_offset=memory_y,
+                x_offset=rail_x,
+                id_prefix=f"r{ri}_",
+            )
+            if isinstance(last_id, str) and last_id:
+                mem_last_ids.append(last_id)
+                # Wire memory → this rail's player (same X, short vertical hop)
+                # Each rail is independent — no cross-rail page data sharing.
+                import warnings as _w2
+                with _w2.catch_warnings():
+                    _w2.simplefilter("ignore")
+                    combined.add_circuit_connection(
+                        "green", last_id, ep.port_id,
+                        side_1="input", side_2="input",
+                    )
+                    combined.add_circuit_connection(
+                        "red", last_id, f"r{ri}_ch11_sel",
+                        side_1="output", side_2="input",
+                    )
+
+        # ── Shared modulo AC at the last rail's port column ──────
+        # Same X as the last rail's page_port, different Y — no overlap.
+        mod_x = (num_rails - 1) * RAIL_WIDTH + RAIL_WIDTH - 1
+        ac_mod = new_entity("arithmetic-combinator", id="mod",
+                            tile_position=(mod_x, MOD_Y))
+        ac_mod.set_arithmetic_condition(
+            first_operand=CLOCK_SIGNAL, operation="%",
+            second_operand=TICKS_PER_PAGE, output_signal=SUB_TICK_SIG,
+        )
+        combined.entities.append(ac_mod)
+
+        # ── Cross-rail wiring: sub_tick + clock only ─────────────
+        # Sub-tick (red): shared mod → all rails' match DCs
+        import warnings as _w3
+        last_ep = endpoints[-1]
+        with _w3.catch_warnings():
+            _w3.simplefilter("ignore")
+            combined.add_circuit_connection(
+                "red", "mod", last_ep.first_match_id,
+                side_1="output", side_2="input",
+            )
+            combined.add_circuit_connection(
+                "red", "mod", last_ep.first_match0_id,
+                side_1="output", side_2="input",
+            )
+            for ri in range(num_rails - 1, 0, -1):
+                prev = endpoints[ri - 1]
+                combined.add_circuit_connection(
+                    "red", f"r{ri}_ch0_match", prev.first_match_id,
+                    side_1="input", side_2="input",
+                )
+                combined.add_circuit_connection(
+                    "red", f"r{ri}_ch0_match0", prev.first_match0_id,
+                    side_1="input", side_2="input",
+                )
+
+            # Clock (green): chain ports across rails → mod
+            for ri in range(num_rails - 1):
+                combined.add_circuit_connection(
+                    "green", endpoints[ri].port_id, endpoints[ri + 1].port_id,
+                    side_1="input", side_2="input",
+                )
+            combined.add_circuit_connection(
+                "green", endpoints[-1].port_id, "mod",
+                side_1="input", side_2="input",
+            )
+
+    return combined.to_string()

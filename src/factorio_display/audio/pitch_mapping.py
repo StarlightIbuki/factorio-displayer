@@ -27,6 +27,80 @@ MIDI_BASE: int = 53
 # Number of pitches per instrument (12 semitones × 4 octaves)
 SPEAKER_COUNT: int = 48
 
+# MIDI base per Factorio instrument — the F-aligned start of each 4-octave window
+INSTRUMENT_MIDI_BASES: dict[str, int] = {
+    "piano": 53,     # F3-E7  (53-100)
+    "bass": 41,      # F2-E6  (41-88)
+    "celesta": 65,   # F4-E7  (65-112)
+    "plucked": 65,   # F4-E7  (65-100)
+    "drum": 53,      # F3-E7  (53-100) — only first 17 slots used when map_drums
+}
+
+# GM drum note → Factorio drum-kit note name mapping
+# Maps standard GM percussion MIDI notes (35–81) to Factorio's 17 drum-kit sounds.
+# When ``--map-drums`` is on, low drum notes use this instead of octave folding.
+GM_DRUM_MAP: dict[int, str] = {
+    # Extended low range (some MIDI files use 24-34 for drums)
+    24: "kick-1",       # Low C
+    25: "snare-1",      # Low C#
+    26: "kick-2",       # Low D
+    27: "snare-2",      # Low D#
+    28: "snare-3",      # Low E
+    29: "kick-1",       # Low F
+    30: "hat-1",        # Low F#
+    31: "hat-2",        # Low G
+    32: "perc-1",       # Low G#
+    33: "perc-2",       # Low A
+    34: "crash",        # Low A#
+    # Standard GM drum map (35-81)
+    35: "kick-1",       # Acoustic Bass Drum
+    36: "kick-2",       # Bass Drum 1
+    37: "snare-3",      # Side Stick → snare-3
+    38: "snare-1",      # Acoustic Snare
+    39: "clap",         # Hand Clap
+    40: "snare-2",      # Electric Snare
+    41: "perc-1",       # Low Floor Tom
+    42: "hat-1",        # Closed Hi-hat
+    43: "perc-2",       # High Floor Tom
+    44: "hat-1",        # Pedal Hi-hat → hat-1
+    45: "perc-1",       # Low Tom
+    46: "hat-2",        # Open Hi-hat
+    47: "perc-2",       # Low-Mid Tom
+    48: "perc-1",       # Hi-Mid Tom
+    49: "crash",        # Crash Cymbal 1
+    50: "perc-2",       # High Tom
+    51: "hat-2",        # Ride Cymbal 1 → hat-2
+    52: "reverse-cymbal",  # Chinese Cymbal
+    53: "hat-2",        # Ride Bell → hat-2
+    54: "high-q",       # Tambourine
+    55: "crash",        # Splash Cymbal → crash
+    56: "cowbell",      # Cowbell
+    57: "crash",        # Crash Cymbal 2
+    58: "fx",           # Vibraslap → fx
+    59: "hat-2",        # Ride Cymbal 2 → hat-2
+    69: "shaker",       # Cabasa
+    70: "shaker",       # Maracas
+    75: "clap",         # Claves → clap
+    80: "triangle",     # Mute Triangle
+    81: "triangle",     # Open Triangle
+}
+
+# Factorio drum-kit note names in their internal index order (0..16)
+DRUM_KIT_NOTES: list[str] = [
+    "kick-1", "kick-2",
+    "snare-1", "snare-2", "snare-3",
+    "hat-1", "hat-2",
+    "fx", "high-q",
+    "perc-1", "perc-2",
+    "crash", "reverse-cymbal",
+    "clap", "shaker", "cowbell", "triangle",
+]
+
+# Reverse: drum note name → pitch_index within the drum rail
+DRUM_NOTE_TO_PITCH: dict[str, int] = {
+    name: i for i, name in enumerate(DRUM_KIT_NOTES)
+}
+
 
 def _semitone_to_letter(semitone: int) -> str:
     """Convert a chromatic semitone index (0=F, 1=F#, …, 11=E) to a signal letter.
@@ -61,15 +135,15 @@ def _letter_to_signal_name(letter: str) -> str:
     return f"signal-{letter}"
 
 
-def midi_to_pitch_index(midi_note: int) -> int | None:
+def midi_to_pitch_index(midi_note: int, midi_base: int = MIDI_BASE) -> int | None:
     """Convert a MIDI note number to a 0-based pitch index (0–47).
 
-    Returns None if the note is outside the 4-octave range.
-    MIDI 53 (F3) → 0, MIDI 100 (E7) → 47.
+    Returns None if the note is outside the 4-octave range starting at *midi_base*.
+    MIDI 53 (F3) → 0, MIDI 100 (E7) → 47 (default piano range).
     """
-    if midi_note < MIDI_BASE or midi_note >= MIDI_BASE + SPEAKER_COUNT:
+    if midi_note < midi_base or midi_note >= midi_base + SPEAKER_COUNT:
         return None
-    return midi_note - MIDI_BASE
+    return midi_note - midi_base
 
 
 def pitch_index_to_signal(pitch_index: int) -> dict[str, str]:

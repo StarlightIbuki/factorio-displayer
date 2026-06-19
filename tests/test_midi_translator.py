@@ -7,7 +7,10 @@ import io
 
 import mido
 
-from factorio_display.audio.midi_translator import midi_to_tick_data
+from factorio_display.audio.midi_translator import (
+    midi_to_multi_rail_tick_data,
+    midi_to_tick_data,
+)
 from factorio_display.audio.pitch_mapping import (
     SPEAKER_COUNT,
     midi_to_pitch_index,
@@ -434,3 +437,87 @@ class TestAdsrEnvelope:
         assert len(set(active_loudness)) == 1, (
             f"Without ADSR, all active ticks should have same loudness, got {set(active_loudness)}"
         )
+
+
+# ── multi-rail tests ──────────────────────────────────────────────────
+
+class TestMultiRailMidi:
+    """Tests for ``midi_to_multi_rail_tick_data``."""
+
+    @staticmethod
+    def _make_midi_with_channel(
+        notes: list[tuple[int, int, int, int, int]],  # (note, vel, start, dur, channel)
+        ticks_per_beat: int = 480,
+        tempo: int = 500_000,
+    ) -> mido.MidiFile:
+        """Build a single-track MIDI with channel info."""
+        mid = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
+        events = []
+        for note, velocity, start, duration, channel in notes:
+            events.append((
+                start, "on",
+                mido.Message("note_on", note=note, velocity=velocity, time=0, channel=channel),
+            ))
+            events.append((
+                start + duration, "off",
+                mido.Message("note_off", note=note, velocity=0, time=0, channel=channel),
+            ))
+        events.sort(key=lambda e: (e[0], 0 if e[1] == "on" else 1))
+        track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+        prev_tick = 0
+        for abs_tick, _, msg in events:
+            msg.time = abs_tick - prev_tick
+            track.append(msg)
+            prev_tick = abs_tick
+        return mid
+
+    def test_drum_channel_separate_rail(self):
+        """Channel 9 notes go to a drum rail, channel 0 to piano."""
+        mid = self._make_midi_with_channel([
+            (60, 100, 0, 480, 0),    # piano
+            (36, 80, 0, 240, 9),     # drum kick
+        ])
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        assert len(instruments) >= 1
+        assert 'drum' in instruments
+        # Drum rail should have activity
+        drum_ri = instruments.index('drum')
+        assert any(any(t) for t in rail_data[drum_ri]), "Drum rail should have activity"
+
+    def test_multi_instrument_auto_detect(self):
+        """Different program changes → different instrument rails."""
+        mid = mido.MidiFile(ticks_per_beat=480)
+        # Track 0: piano (program 0)
+        t0 = mido.MidiTrack()
+        t0.append(mido.Message("program_change", program=0, channel=0, time=0))
+        t0.append(mido.Message("note_on", note=60, velocity=100, channel=0, time=0))
+        t0.append(mido.Message("note_off", note=60, velocity=0, channel=0, time=480))
+        # Track 1: bass (program 32)
+        t1 = mido.MidiTrack()
+        t1.append(mido.Message("program_change", program=32, channel=1, time=0))
+        t1.append(mido.Message("note_on", note=41, velocity=80, channel=1, time=0))
+        t1.append(mido.Message("note_off", note=41, velocity=0, channel=1, time=480))
+        mid.tracks.extend([t0, t1])
+
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        assert len(instruments) == 2
+        assert set(instruments) == {"piano", "bass"}
+
+    def test_single_rail_when_all_same_instrument(self):
+        """All notes on same instrument → single rail."""
+        mid = self._make_midi_with_channel([
+            (60, 100, 0, 480, 0),
+            (64, 80, 0, 480, 0),
+        ])
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        assert len(instruments) == 1
+        assert instruments[0] == "piano"
+
+    def test_empty_midi(self):
+        """Empty MIDI returns empty lists."""
+        mid = mido.MidiFile()
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        assert instruments == []
+        assert rail_data == []

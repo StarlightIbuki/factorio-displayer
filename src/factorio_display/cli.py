@@ -7,7 +7,7 @@ export the audio decoder circuitry, and encode MIDI audio files.
 import argparse
 import sys
 
-from .audio.player_blueprint import build_audio_decoder
+from .audio.player_blueprint import build_audio_decoder, build_multi_rail_decoder
 from .video.encoder import encode_auto
 # Assuming you have a builder.py containing the logic to build the physical screen
 from .video.player_blueprint import build_display
@@ -34,14 +34,14 @@ def _add_audio_midi_options(parser: argparse.ArgumentParser) -> None:
         help="Global velocity multiplier (default: 1.0)",
     )
     g2 = parser.add_argument_group("ADSR envelope")
-    g2.add_argument("--attack-ticks", type=int, default=0,
-                    help="ADSR attack duration in game ticks (default: 0 = off)")
-    g2.add_argument("--decay-ticks", type=int, default=0,
-                    help="ADSR decay duration in game ticks (default: 0 = off)")
+    g2.add_argument("--attack-ticks", type=int, default=10,
+                    help="ADSR attack duration in game ticks (default: 10, 0 = off)")
+    g2.add_argument("--decay-ticks", type=int, default=10,
+                    help="ADSR decay duration in game ticks (default: 10, 0 = off)")
     g2.add_argument("--sustain-level", type=float, default=1.0,
-                    help="ADSR sustain level 0.0�?.0 (default: 1.0)")
-    g2.add_argument("--release-ticks", type=int, default=0,
-                    help="ADSR release duration in game ticks (default: 0 = off)")
+                    help="ADSR sustain level 0.0~1.0 (default: 1.0)")
+    g2.add_argument("--release-ticks", type=int, default=10,
+                    help="ADSR release duration in game ticks (default: 10, 0 = off)")
     g3 = parser.add_argument_group("Debug / intermediate files")
     g3.add_argument("--debug-json", type=str, default=None,
                     help="Dump tick_data as JSON to PATH (development only)")
@@ -123,6 +123,27 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         "--no-audio", action="store_true",
         help="Disable automatic audio track encoding.",
     )
+    encode_parser.add_argument(
+        "--no-attach-player", action="store_true",
+        help="Output audio memory pages only, without the player decoder attached.",
+    )
+    encode_parser.add_argument(
+        "--rail-mode", type=str, default="piano",
+        help=(
+            "Multi-rail mode: 'piano' (default, single piano rail), "
+            "'all' (use all detected instruments), "
+            "'auto' or 'auto:0.05' (auto-detect, drop rails below threshold), "
+            "or comma-separated instruments like 'piano,bass,drum'."
+        ),
+    )
+    encode_parser.add_argument(
+        "--instruments", type=str, default=None,
+        help="Deprecated alias for --rail-mode.",
+    )
+    encode_parser.add_argument(
+        "--map-drums", action="store_true",
+        help="Map GM drum notes (24-81) to Factorio drum-kit sounds instead of octave folding.",
+    )
 
     display_parser = subparsers.add_parser(
         "export-display",
@@ -142,9 +163,13 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         default="piano",
         help="Factorio instrument name (piano, bass, celesta, plucked, drum)"
     )
+    audio_parser.add_argument(
+        "--instruments", type=str, default=None,
+        help="Comma-separated instrument names for multi-rail (e.g. 'piano,bass').",
+    )
 
     # ==================================================================
-    # Subcommand: encode-audio (MIDI �?audio memory blueprint)
+    # Subcommand: encode-audio (MIDI → audio memory blueprint)
     # ==================================================================
     encode_audio_parser = subparsers.add_parser(
         "encode-audio",
@@ -152,6 +177,25 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     )
     encode_audio_parser.add_argument("input_path", help="Path to .mid file")
     _add_audio_midi_options(encode_audio_parser)
+    encode_audio_parser.add_argument(
+        "--no-attach-player", action="store_true",
+        help="Output audio memory pages only, without the player decoder.",
+    )
+    encode_audio_parser.add_argument(
+        "--rail-mode", type=str, default="piano",
+        help=(
+            "Multi-rail mode: 'piano' (default), 'all', 'auto[:threshold]', "
+            "or comma-separated instruments."
+        ),
+    )
+    encode_audio_parser.add_argument(
+        "--instruments", type=str, default=None,
+        help="Deprecated alias for --rail-mode.",
+    )
+    encode_audio_parser.add_argument(
+        "--map-drums", action="store_true", default=True, # Filter drum notes by default to prevent excessive volume stacking
+        help="Map GM drum notes (24-81) to Factorio drum-kit sounds.",
+    )
 
     args = parser.parse_args()
 
@@ -163,9 +207,15 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             sys.stderr.write(f"Detected MIDI file, routing to audio encoder: {args.input_path}\n")
             from .audio.encoder import encode_audio_auto
 
-            midi_kwargs: dict[str, object] = {}
-            # Only forward args that are set (not defaults we can't detect from 'encode' parser)
-            # For 'encode' command with .mid, we don't have audio options �?use defaults
+            rail_mode = args.rail_mode
+            if args.instruments:  # deprecated alias
+                rail_mode = args.instruments
+
+            midi_kwargs: dict[str, object] = {
+                "attach_player": not args.no_attach_player,
+                "map_drums": args.map_drums,
+                "rail_mode": rail_mode,
+            }
             audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
             if audio_bp:
                 sys.stdout.write(audio_bp + "\n")
@@ -203,6 +253,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     elif args.command == "encode-audio":
         from .audio.encoder import encode_audio_auto  # pylint: disable=import-outside-toplevel
 
+        rail_mode = args.rail_mode
+        if args.instruments:  # deprecated alias
+            rail_mode = args.instruments
+
         midi_kwargs: dict[str, object] = {
             "ticks_per_beat": args.ticks_per_beat,
             "boost_melody": args.boost_melody,
@@ -213,6 +267,9 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             "release_ticks": args.release_ticks,
             "processed_midi_path": args.processed_midi,
             "debug_json_path": args.debug_json,
+            "attach_player": not args.no_attach_player,
+            "map_drums": args.map_drums,
+            "rail_mode": rail_mode,
         }
         audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
         if audio_bp:
@@ -233,11 +290,18 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         sys.stdout.write(display_bp + "\n")
 
     elif args.command == "export-audio":
-        sys.stderr.write(f"Building audio decoder blueprint (Instrument: {args.instrument})...\n")
-
-        audio_bp = build_audio_decoder(
+        instruments: list[str]
+        if args.instruments:
+            instruments = [s.strip() for s in args.instruments.split(",") if s.strip()]
+        else:
+            instruments = [args.instrument]
+        sys.stderr.write(
+            f"Building audio decoder blueprint "
+            f"(Instruments: {', '.join(instruments)})...\n"
+        )
+        audio_bp = build_multi_rail_decoder(
             name=args.name,
-            instrument=args.instrument,
+            instruments=instruments,
             clock_signal=CLOCK_SIGNAL,
         )
         sys.stdout.write(audio_bp + "\n")

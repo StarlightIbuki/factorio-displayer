@@ -27,6 +27,9 @@ When iterating/writting code, always stop and ask for help from me if:
 When a non-trivial iteration finishes, before claiming a feature/bug is done:
 1. always run tests
 
+When fixed a bug:
+1. if not covered by tests, add a test to cover it
+
 ## Architecture Reference
 
 Before making any changes, read **`architecture.md`** for the full architecture: audio pipeline (pitch_mapping → encoder → player_blueprint), combinator conventions (AC/DC/CC/SPK wiring), wire colors (red=page data bus, green=CC lookup/bell bus), entity layout coordinates, and test structure.

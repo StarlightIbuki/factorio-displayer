@@ -9,6 +9,10 @@ import sys
 import mido
 
 from .pitch_mapping import (  # pylint: disable=relative-beyond-top-level
+    DRUM_KIT_NOTES,
+    DRUM_NOTE_TO_PITCH,
+    GM_DRUM_MAP,
+    INSTRUMENT_MIDI_BASES,
     MIDI_BASE,
     SPEAKER_COUNT,
     midi_to_pitch_index,
@@ -184,19 +188,23 @@ def _midi_tick_to_game_tick(
     return seconds * 2.0 * game_ticks_per_beat
 
 
-def _fold_note(note: int) -> tuple[int, str]:
-    """Fold a MIDI note into the F3–E7 range (53�?00).
+def _fold_note(note: int, instrument: str = "piano") -> tuple[int, str]:
+    """Fold a MIDI note into the 4-octave range of *instrument*.
 
     Returns (folded_note, log_message).  If no folding was needed,
     log_message is empty.
     """
-    if MIDI_BASE <= note <= MIDI_BASE + SPEAKER_COUNT - 1:
+    midi_base = INSTRUMENT_MIDI_BASES.get(instrument, MIDI_BASE)
+    note_min = midi_base
+    note_max = midi_base + SPEAKER_COUNT - 1
+
+    if note_min <= note <= note_max:
         return note, ""
 
     original = note
-    while note < MIDI_BASE:
+    while note < note_min:
         note += 12
-    while note > MIDI_BASE + SPEAKER_COUNT - 1:
+    while note > note_max:
         note -= 12
 
     # Map MIDI note numbers to note names for readable logging
@@ -205,7 +213,10 @@ def _fold_note(note: int) -> tuple[int, str]:
     def _name(m: int) -> str:
         return f"{note_names[m % 12]}{m // 12 - 1}"
 
-    return note, f"Note MIDI {original} ({_name(original)}) folded �?MIDI {note} ({_name(note)})"
+    return note, (
+        f"Note MIDI {original} ({_name(original)}) folded -> "
+        f"MIDI {note} ({_name(note)}) [{instrument}]"
+    )
 
 
 def _adsr_shape(
@@ -447,6 +458,316 @@ def midi_to_tick_data(
         _emit_processed_midi(mid, processed_midi_path)
 
     return tick_data
+
+
+# ── multi-rail MIDI translation ────────────────────────────────────
+
+def midi_to_multi_rail_tick_data(
+    mid: mido.MidiFile,
+    ticks_per_beat: int = 30,
+    boost_melody: float = 1.0,
+    velocity_scale: float = 1.0,
+    attack_ticks: int = 0,
+    decay_ticks: int = 0,
+    sustain_level: float = 1.0,
+    release_ticks: int = 0,
+    map_drums: bool = False,
+) -> tuple[list[str], list[list[list[float]]]]:
+    """Convert a MIDI file to per-rail tick→loudness data.
+
+    Auto-detects instruments from MIDI program changes and channel 9 drums.
+    Returns ``(instruments, rail_data)`` where ``rail_data[r][tick][pitch]``
+    gives the loudness for rail *r*, game tick *tick*, pitch index *pitch*.
+
+    Each rail gets its own 48-speaker tick_data array folded to that
+    instrument's range.  If only one instrument is detected, returns a
+    single-rail list.
+    """
+    if not mid.tracks:
+        return [], []
+
+    # ── Tempo map (shared across rails) ────────────────────────────
+    tempo_events: list[tuple[int, int]] = []
+    for track in mid.tracks:
+        abs_tick = 0
+        for msg in track:
+            abs_tick += int(msg.time)
+            if msg.type == "set_tempo":
+                tempo_events.append((abs_tick, msg.tempo))
+    tempo_events.sort(key=lambda e: e[0])
+    if not tempo_events:
+        tempo_events = [(0, mido.bpm2tempo(120))]
+
+    def _get_tempo_at(midi_tick: int) -> int:
+        current = tempo_events[0][1]
+        for t, tempo in tempo_events:
+            if t <= midi_tick:
+                current = tempo
+            else:
+                break
+        return current
+
+    # ── Pre-scan: determine instrument per channel ──────────────────
+    channel_instrument: dict[int, str] = {}
+    for track in mid.tracks:
+        abs_tick = 0
+        for msg in track:
+            abs_tick += int(msg.time)
+            ch = getattr(msg, 'channel', -1)
+            if ch == 9:
+                channel_instrument[ch] = 'drum'
+            elif msg.type == 'program_change' and ch >= 0 and ch not in channel_instrument:
+                channel_instrument[ch] = map_gm_to_factorio(msg.program, ch)
+
+    # Default: any channel without a program change is piano
+    for ch in range(16):
+        if ch not in channel_instrument:
+            channel_instrument[ch] = 'piano'
+    # Channel 9 is always drum
+    channel_instrument[9] = 'drum'
+
+    # ── Collect note events per channel → rail ──────────────────────
+    # Build a mapping: (channel) → rail_idx
+    channel_rail: dict[int, int] = {}
+    rail_instruments: list[str] = []
+    # Scan all tracks once to discover which channels have notes
+    channels_with_notes: set[int] = set()
+    for track in mid.tracks:
+        for msg in track:
+            ch = getattr(msg, 'channel', -1)
+            if msg.type == 'note_on' and msg.velocity > 0 and ch >= 0:
+                channels_with_notes.add(ch)
+
+    for ch in sorted(channels_with_notes):
+        inst = channel_instrument.get(ch, 'piano')
+        if inst not in rail_instruments:
+            # Check if we already have this instrument; merge if so
+            rail_instruments.append(inst)
+        channel_rail[ch] = rail_instruments.index(inst)
+
+    num_rails = len(rail_instruments)
+    if num_rails == 0:
+        return [], []
+
+    # Re-index: merge duplicate instruments
+    inst_to_rail: dict[str, int] = {}
+    compact_instruments: list[str] = []
+    old_to_new: dict[int, int] = {}
+    for ri, inst in enumerate(rail_instruments):
+        if inst not in inst_to_rail:
+            inst_to_rail[inst] = len(compact_instruments)
+            compact_instruments.append(inst)
+        old_to_new[ri] = inst_to_rail[inst]
+
+    # When map_drums is on, split mixed channels into piano + drum rails
+    # instead of promoting (which loses non-drum notes).
+    drum_channel_offset = 100  # virtual channel IDs for drum-split rails
+    if map_drums:
+        for ch in sorted(channels_with_notes):
+            if channel_instrument.get(ch) == 'drum':
+                continue  # already a dedicated drum channel
+            # Count drum vs non-drum notes on this channel
+            drum_notes = 0
+            total_notes = 0
+            for track in mid.tracks:
+                for msg in track:
+                    if (getattr(msg, 'channel', -1) == ch
+                            and msg.type == 'note_on' and msg.velocity > 0):
+                        total_notes += 1
+                        if hasattr(msg, 'note') and msg.note in GM_DRUM_MAP:
+                            drum_notes += 1
+            # If this channel has a significant mix of drum notes, split it
+            if drum_notes > 0 and total_notes > 0 and drum_notes < total_notes:
+                # Create a virtual drum channel
+                virt_ch = drum_channel_offset + ch
+                channel_instrument[virt_ch] = 'drum'
+                channels_with_notes.add(virt_ch)
+                sys.stderr.write(
+                    f"[midi_translator] Split channel {ch}: "
+                    f"{drum_notes}/{total_notes} drum notes → separate drum rail\n"
+                )
+
+    # Rebuild channel_rail with possibly new drum channels
+    channel_rail = {}
+    rail_instruments = []
+    for ch in sorted(channels_with_notes):
+        inst = channel_instrument.get(ch, 'piano')
+        if inst not in rail_instruments:
+            rail_instruments.append(inst)
+        channel_rail[ch] = rail_instruments.index(inst)
+
+    # Deduplicate instrument list
+    inst_to_rail = {}
+    compact_instruments: list[str] = []
+    old_to_new: dict[int, int] = {}
+    for ri, inst in enumerate(rail_instruments):
+        if inst not in inst_to_rail:
+            inst_to_rail[inst] = len(compact_instruments)
+            compact_instruments.append(inst)
+        old_to_new[ri] = inst_to_rail[inst]
+    rail_instruments = compact_instruments
+    num_rails = len(rail_instruments)
+
+    # Remap channel_rail
+    for ch in list(channel_rail.keys()):
+        channel_rail[ch] = old_to_new[channel_rail[ch]]
+
+    # ── Melody detection (per instrument group) ─────────────────────
+    melody_channel: dict[int, int] = {}  # inst_idx → channel
+    if boost_melody != 1.0:
+        inst_pitches: dict[int, list[tuple[int, float]]] = {ri: [] for ri in range(num_rails)}
+        for track in mid.tracks:
+            abs_tick = 0
+            for msg in track:
+                abs_tick += int(msg.time)
+                ch = getattr(msg, 'channel', -1)
+                if msg.type == 'note_on' and msg.velocity > 0 and ch in channel_rail:
+                    ri = channel_rail[ch]
+                    inst_pitches[ri].append(msg.note)
+        for ri, pitches in inst_pitches.items():
+            if pitches:
+                # Find the channel with highest avg pitch for this instrument
+                # (simplified: just mark it for boost)
+                melody_channel[ri] = max(
+                    set(ch for ch, cr in channel_rail.items() if cr == ri),
+                    key=lambda c: c,
+                )
+
+    # ── Collect note events per rail (by channel) ───────────────────
+    rail_notes: list[list[tuple[int, float, float, float]]] = [
+        [] for _ in range(num_rails)
+    ]
+    fold_logged: set[str] = set()
+
+    for track in mid.tracks:
+        # Track per-channel active notes within this track pass
+        active_notes: dict[int, dict[int, tuple[float, float]]] = {}  # ch → note → (start, loudness)
+        absolute_midi_tick = 0
+
+        for msg in track:
+            absolute_midi_tick += int(msg.time)
+
+            if msg.type == 'set_tempo':
+                continue
+
+            ch = getattr(msg, 'channel', -1)
+            # Route drum-range notes to virtual drum channel when split
+            if (map_drums
+                    and hasattr(msg, 'note')
+                    and msg.note in GM_DRUM_MAP
+                    and channel_instrument.get(ch) != 'drum'):
+                virt_ch = drum_channel_offset + ch
+                if virt_ch in channel_rail:
+                    ch = virt_ch
+
+            if ch not in channel_rail:
+                continue
+
+            ri = channel_rail[ch]
+            inst = rail_instruments[ri]
+            is_melody = melody_channel.get(ri) == ch
+            is_drum_mapped = inst == 'drum'
+
+            if ch not in active_notes:
+                active_notes[ch] = {}
+
+            if msg.type == 'note_on' and msg.velocity > 0:
+                tempo = _get_tempo_at(absolute_midi_tick)
+                start_game_tick = _midi_tick_to_game_tick(
+                    absolute_midi_tick, mid.ticks_per_beat,
+                    tempo, ticks_per_beat,
+                )
+                velocity = float(msg.velocity)
+                if is_melody:
+                    velocity = min(127.0, velocity * boost_melody)
+                loudness = velocity / 127.0 * 100.0 * velocity_scale
+
+                if is_drum_mapped:
+                    # Map GM drum note → Factorio drum-kit note name → pitch_index
+                    drum_name = GM_DRUM_MAP.get(msg.note)
+                    if drum_name is None:
+                        continue  # unmapped drum note, skip
+                    pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
+                    if pitch_idx is None:
+                        continue
+                else:
+                    folded_note, log_msg = _fold_note(msg.note, instrument=inst)
+                    if log_msg and log_msg not in fold_logged:
+                        fold_logged.add(log_msg)
+                        sys.stderr.write(f"[midi_translator] {log_msg}\n")
+                    pitch_idx = midi_to_pitch_index(folded_note)
+                    if pitch_idx is None:
+                        continue
+
+                active_notes[ch][msg.note] = (start_game_tick, loudness)
+
+            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                entry = active_notes[ch].pop(msg.note, None)
+                if entry is None:
+                    continue
+                start_game_tick, loudness = entry
+                tempo = _get_tempo_at(absolute_midi_tick)
+                end_game_tick = _midi_tick_to_game_tick(
+                    absolute_midi_tick, mid.ticks_per_beat,
+                    tempo, ticks_per_beat,
+                )
+                if is_drum_mapped:
+                    drum_name = GM_DRUM_MAP.get(msg.note)
+                    if drum_name is None:
+                        continue
+                    pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
+                    if pitch_idx is None:
+                        continue
+                else:
+                    folded_note, _ = _fold_note(msg.note, instrument=inst)
+                    pitch_idx = midi_to_pitch_index(folded_note)
+                    if pitch_idx is None:
+                        continue
+
+                rail_notes[ri].append((pitch_idx, start_game_tick, end_game_tick, loudness))
+
+    # ── Build per-rail tick_data ────────────────────────────────────
+    all_notes_flat = [n for rn in rail_notes for n in rn]
+    if not all_notes_flat:
+        return rail_instruments, [[[0.0] * SPEAKER_COUNT]]
+
+    max_game_tick = max(n[2] for n in all_notes_flat)
+    num_ticks = int(math.ceil(max_game_tick))
+    use_adsr = (
+        attack_ticks > 0 or decay_ticks > 0
+        or sustain_level < 1.0 or release_ticks > 0
+    )
+
+    rail_data: list[list[list[float]]] = []
+    for ri in range(num_rails):
+        td: list[list[float]] = [[0.0] * SPEAKER_COUNT for _ in range(num_ticks)]
+        for pitch_idx, start_t, end_t, loudness in rail_notes[ri]:
+            start_i = int(start_t)
+            end_i = int(math.ceil(end_t))
+            note_duration = end_i - start_i
+            if note_duration <= 0:
+                continue
+            for tick in range(max(0, start_i), min(num_ticks, end_i)):
+                tick_in_note = tick - start_i
+                if use_adsr:
+                    shaped = _adsr_shape(
+                        tick_in_note, note_duration, loudness,
+                        attack_ticks, decay_ticks, sustain_level, release_ticks,
+                    )
+                else:
+                    shaped = loudness
+                if shaped > 0.0:
+                    td[tick][pitch_idx] += shaped
+        # For drum rails, cap per-pitch loudness to prevent volume stacking
+        # when many GM notes map to the same Factorio drum sound.
+        if rail_instruments[ri] == 'drum':
+            for tick in range(num_ticks):
+                for p in range(SPEAKER_COUNT):
+                    if td[tick][p] > 100.0:
+                        td[tick][p] = 100.0
+        rail_data.append(td)
+
+    return rail_instruments, rail_data
 
 
 def _emit_processed_midi(mid: mido.MidiFile, path: str) -> None:
