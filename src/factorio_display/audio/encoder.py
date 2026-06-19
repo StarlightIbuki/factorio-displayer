@@ -27,6 +27,8 @@ import math
 import sys
 from typing import Sequence
 
+import mido
+
 from .pitch_mapping import SPEAKER_COUNT
 
 
@@ -301,14 +303,76 @@ def encode_audio_memory(
     return blueprint.to_string()
 
 
-# ── auto-detect convenience stub (MIDI → encoder bridge) ───────────────
+# ── auto-detect convenience (MIDI → encoder bridge) ───────────────────
 
 
-def encode_audio_auto(path: str) -> str:
-    """Placeholder: auto-detect audio format and encode.
+def encode_audio_auto(
+    path: str,
+    **kwargs: object,
+) -> str:
+    """Auto-detect audio format and encode to an audio-memory blueprint.
 
-    Currently returns an empty string.  The MIDI→loudness translator
-    will be implemented separately.
+    Currently supports ``.mid`` / ``.midi`` files via :func:`midi_to_tick_data`.
+
+    Keyword arguments are forwarded to :func:`midi_to_tick_data`:
+    ``ticks_per_beat``, ``boost_melody``, ``velocity_scale``,
+    ``attack_ticks``, ``decay_ticks``, ``sustain_level``, ``release_ticks``,
+    ``processed_midi_path``, ``debug_json_path``.
     """
-    sys.stderr.write(f"Audio auto-encode not yet implemented for: {path}\n")
-    return ""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    if ext not in ("mid", "midi"):
+        sys.stderr.write(f"Audio auto-encode: unsupported format: {path}\n")
+        return ""
+
+    from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL
+    from .midi_translator import midi_to_tick_data
+
+    # Gather midi_translator kwargs
+    midi_kwargs: dict[str, object] = {}
+    for key in (
+        "ticks_per_beat", "boost_melody", "velocity_scale",
+        "attack_ticks", "decay_ticks", "sustain_level", "release_ticks",
+        "processed_midi_path",
+    ):
+        if key in kwargs:
+            midi_kwargs[key] = kwargs[key]
+
+    sys.stderr.write(f"Loading MIDI: {path}\n")
+    mid = mido.MidiFile(path)
+    sys.stderr.write(
+        f"  {len(mid.tracks)} track(s), "
+        f"ticks_per_beat={mid.ticks_per_beat}, "
+        f"length={mid.length:.1f}s\n"
+    )
+
+    float_data = midi_to_tick_data(mid, **midi_kwargs)  # type: ignore[arg-type]
+
+    # ── debug JSON dump ──────────────────────────────────────────────
+    debug_json_path = kwargs.get("debug_json_path")
+    if debug_json_path and isinstance(debug_json_path, str):
+        import json
+        # Round to 3 decimal places for readability
+        json_data = [[round(v, 3) for v in tick] for tick in float_data]
+        with open(debug_json_path, "w") as f:
+            json.dump(json_data, f)
+        sys.stderr.write(f"Debug JSON written to: {debug_json_path}\n")
+
+    # Round float → int, clip to 0..100
+    int_data: list[list[int]] = [
+        [max(0, min(100, int(round(v)))) for v in tick]
+        for tick in float_data
+    ]
+
+    signal_pool = list(SIGNAL_POOL)
+    qualities = list(QUALITIES)
+
+    if not signal_pool:
+        sys.stderr.write("Warning: SIGNAL_POOL is empty, audio encoding may fail.\n")
+
+    return encode_audio_memory(
+        int_data,
+        output_name=path,
+        signal_pool=signal_pool,
+        qualities=qualities,
+        clock_signal=CLOCK_SIGNAL,
+    )

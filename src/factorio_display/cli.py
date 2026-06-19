@@ -1,17 +1,51 @@
 """Command Line Interface for factorio-display.
 
 Provides subcommands to encode media, export the physical display grid,
-and export the audio decoder circuitry.
+export the audio decoder circuitry, and encode MIDI audio files.
 """
 
 import argparse
 import sys
 import contextlib
+import os
 
 from .audio.player_blueprint import build_audio_decoder
 from .video.encoder import encode_auto
 # Assuming you have a builder.py containing the logic to build the physical screen
-from .video.player_blueprint import build_display 
+from .video.player_blueprint import build_display
+
+
+def _is_midi_file(path: str) -> bool:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return ext in ("mid", "midi")
+
+
+def _add_audio_midi_options(parser: argparse.ArgumentParser) -> None:
+    """Add MIDI→audio translation options to a subparser."""
+    g = parser.add_argument_group("MIDI translation")
+    g.add_argument("--ticks-per-beat", type=int, default=30,
+                   help="Game ticks per quarter note (default: 30)")
+    g.add_argument("--boost-melody", type=float, default=1.0,
+                   help="Melody velocity multiplier (default: 1.0 = off, 1.5 = 50%% boost)")
+    g.add_argument("--velocity-scale", type=float, default=1.0,
+                   help="Global velocity multiplier (default: 1.0)")
+    g2 = parser.add_argument_group("ADSR envelope")
+    g2.add_argument("--attack-ticks", type=int, default=0,
+                    help="ADSR attack duration in game ticks (default: 0 = off)")
+    g2.add_argument("--decay-ticks", type=int, default=0,
+                    help="ADSR decay duration in game ticks (default: 0 = off)")
+    g2.add_argument("--sustain-level", type=float, default=1.0,
+                    help="ADSR sustain level 0.0–1.0 (default: 1.0)")
+    g2.add_argument("--release-ticks", type=int, default=0,
+                    help="ADSR release duration in game ticks (default: 0 = off)")
+    g3 = parser.add_argument_group("Debug / intermediate files")
+    g3.add_argument("--debug-json", type=str, default=None,
+                    help="Dump tick_data as JSON to PATH (development only)")
+    g3.add_argument("--processed-midi", type=str, default=None,
+                    help="Save octave-folded MIDI to PATH for preview")
+    g4 = parser.add_argument_group("Output")
+    g4.add_argument("-o", "--output", type=str, default=None,
+                    help="Write blueprint to file instead of stdout") 
 
 def main():
     parser = argparse.ArgumentParser(
@@ -58,12 +92,35 @@ def main():
         help="Factorio instrument name (piano, bass, celesta, plucked, drum)"
     )
 
+    # ==================================================================
+    # Subcommand: encode-audio (MIDI → audio memory blueprint)
+    # ==================================================================
+    encode_audio_parser = subparsers.add_parser(
+        "encode-audio",
+        help="Encode a .mid file into a Factorio audio memory blueprint."
+    )
+    encode_audio_parser.add_argument("input_path", help="Path to .mid file")
+    _add_audio_midi_options(encode_audio_parser)
+
     args = parser.parse_args()
 
     from . import CLOCK_SIGNAL
     from .integer2signal.pool import get_filtered_pool
 
     if args.command == "encode":
+        # If input is a .mid file, route to audio pipeline
+        if _is_midi_file(args.input_path):
+            sys.stderr.write(f"Detected MIDI file, routing to audio encoder: {args.input_path}\n")
+            from .audio.encoder import encode_audio_auto
+
+            midi_kwargs: dict[str, object] = {}
+            # Only forward args that are set (not defaults we can't detect from 'encode' parser)
+            # For 'encode' command with .mid, we don't have audio options — use defaults
+            audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
+            if audio_bp:
+                sys.stdout.write(audio_bp + "\n")
+            return
+
         sys.stderr.write(f"Encoding video data from {args.input_path}...\n")
         video_bp = encode_auto(
             args.input_path, 
@@ -86,6 +143,29 @@ def main():
             from .audio.encoder import encode_audio_auto
             audio_bp = encode_audio_auto(args.input_path)
             if audio_bp:
+                sys.stdout.write(audio_bp + "\n")
+
+    elif args.command == "encode-audio":
+        from .audio.encoder import encode_audio_auto
+
+        midi_kwargs: dict[str, object] = {
+            "ticks_per_beat": args.ticks_per_beat,
+            "boost_melody": args.boost_melody,
+            "velocity_scale": args.velocity_scale,
+            "attack_ticks": args.attack_ticks,
+            "decay_ticks": args.decay_ticks,
+            "sustain_level": args.sustain_level,
+            "release_ticks": args.release_ticks,
+            "processed_midi_path": args.processed_midi,
+            "debug_json_path": args.debug_json,
+        }
+        audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
+        if audio_bp:
+            if args.output:
+                with open(args.output, "w") as f:
+                    f.write(audio_bp + "\n")
+                sys.stderr.write(f"Audio blueprint written to: {args.output}\n")
+            else:
                 sys.stdout.write(audio_bp + "\n")
             
     elif args.command == "export-display":

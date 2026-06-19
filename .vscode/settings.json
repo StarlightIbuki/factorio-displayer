@@ -1,0 +1,12 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^\\.venv\\\\Scripts\\\\python\\.exe -m pytest .*$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^\\.venv\\\\Scripts\\\\python\\.exe -m factorio_display\\.cli .*$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
