@@ -8,7 +8,7 @@ import argparse
 import sys
 import contextlib
 
-from .audio.build_audio_player import build_audio_decoder
+from .audio.player_blueprint import build_audio_decoder
 from .video.encoder import encode_auto
 # Assuming you have a builder.py containing the logic to build the physical screen
 from .video.player_blueprint import build_display 
@@ -54,14 +54,8 @@ def main():
     audio_parser.add_argument("--name", default="Audio Decoder", help="Blueprint name")
     audio_parser.add_argument(
         "--instrument", 
-        default="programmable-speaker-instrument-piano", 
-        help="Internal Factorio instrument name for the speaker"
-    )
-    audio_parser.add_argument(
-        "--signals", 
-        nargs="+", 
-        default=["signal-A", "signal-B", "signal-C", "signal-D", "signal-E", "signal-F", "signal-G"], 
-        help="List of signals for the audio decoder pool"
+        default="piano", 
+        help="Factorio instrument name (piano, bass, celesta, plucked, drum)"
     )
 
     args = parser.parse_args()
@@ -105,15 +99,11 @@ def main():
         
     elif args.command == "export-audio":
         sys.stderr.write(f"Building audio decoder blueprint (Instrument: {args.instrument})...\n")
-        
-        pool = get_filtered_pool(CLOCK_SIGNAL)
-        # If the user didn't explicitly provide signals, default to the whole pool
-        used_signals = args.signals if "signal-A" not in args.signals else pool
 
         audio_bp = build_audio_decoder(
-            signals=used_signals,
+            name=args.name,
+            instrument=args.instrument,
             clock_signal=CLOCK_SIGNAL,
-            target_signal=args.instrument
         )
         sys.stdout.write(audio_bp + "\n")
 
