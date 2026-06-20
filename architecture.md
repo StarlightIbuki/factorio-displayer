@@ -9,6 +9,29 @@
 - Qualities encode octave: normal=Oct3, uncommon=Oct4, rare=Oct5, epic=Oct6
 - MIDI_BASE=53 (F3), SPEAKER_COUNT=48
 
+**INSTRUMENT_MIDI_BASES** — per-instrument F-aligned MIDI base for each 4-octave
+speaker window (48 speakers cover `base .. base+47`):
+
+| Instrument | MIDI Base | Range   | Notes                     |
+|------------|-----------|---------|---------------------------|
+| piano      | 53        | F3–E7   | matches instrument range  |
+| bass       | 41        | F2–E6   | covers bass F2–E5         |
+| celesta    | 65        | F4–E7   | overlaps celesta F5–E8    |
+| plucked    | 65        | F4–E7   | matches plucked range     |
+| drum       | 53        | F3–E7   | covers drum F3–E6         |
+
+**GM drum map** (`GM_DRUM_MAP`) — maps standard GM percussion MIDI notes
+(24–81) to Factorio's 17 drum-kit sound names (kick-1, snare-1, hat-1, …).
+Active when `--map-drums` is on; drum notes use explicit sound names on a
+dedicated drum rail instead of pitch→signal mapping.
+
+**Global pitch shifting** (`find_optimal_octave_shift`) — per-instrument
+octave shift computed from source MIDI pitches to minimise folding.
+Controlled by `--pitch-shift` / `use_global_shift=True`.
+
+**`_pitch_index_to_factorio_note(pitch_idx, midi_base)`** — converts pitch
+index to note name (e.g. `"F3"`, `"C#4"`) using the rail's MIDI base.
+
 ### encoder.py
 tick→[48 loudness] → [12 packed] per tick → flat index→value → DC pages
 
@@ -17,6 +40,48 @@ tick→[48 loudness] → [12 packed] per tick → flat index→value → DC page
 - Quality-first cell_offset→signal interleaving: `signal_pool[off//nqual], quality[off%nqual]`
 - Pool needs ≥144 base signals (720/5 qualities)
 - Each page = 1 decider combinator, tick-gated (clock >= start AND clock <= end)
+
+#### Encoding entry points
+
+| Function | Purpose |
+|----------|---------|
+| `encode_audio_memory(tick_data, …)` | Core encoder — tick data → DC pages → blueprint string |
+| `encode_audio_to_logical(tick_data, …)` | Tick data → LogicalBlueprint (no positions) |
+| `encode_audio(midi_file, **kwargs)` | MIDI file → combined player+memory blueprint |
+| `encode_audio_file(path, **kwargs)` | Non-MIDI audio (WAV/FLAC/OGG/MP3) → blueprint |
+
+#### Embedding API
+
+`encode_audio_memory()` accepts optional parameters for embedding into a
+combined blueprint:
+
+| Parameter | Purpose |
+|-----------|---------|
+| `blueprint=combined` | Append entities to an existing Blueprint instead of creating one |
+| `y_offset=N` | Shift all memory DCs vertically by N tiles |
+| `x_offset=N` | Shift all memory DCs horizontally by N tiles |
+| `id_prefix="r0_"` | Prefix all entity ids (for multi-rail disambiguation) |
+
+Returns `""` if no data, otherwise the last DC id for cross-wiring.
+
+#### Audio file encoding pipeline (non-MIDI)
+
+```
+audio file (WAV/FLAC/OGG/MP3)
+  → STFT analysis (audio_analyzer.py)
+  → full-spectrum loudness [tick][128 MIDI notes]
+  → optional MIDI export (loudness_to_midi.py)
+  → octave fold to game range (F3–E7, 48 pitches)
+  → normalise to 0–100 int
+  → encode_audio_memory() → blueprint
+```
+
+CLI parameters:
+- `--activation-threshold` — STFT activation threshold
+- `--midi-activation-threshold` — MIDI extraction threshold
+- `--condense-midi` — condense contiguous MIDI notes
+- `--max-polyphony N` — cap simultaneous notes
+- `--normalize-target N` — target max loudness (default 100)
 
 #### Encoder input format
 
@@ -47,28 +112,138 @@ Capabilities:
   does no mixing — caller must combine simultaneous notes).
 
 ### player_blueprint.py
-Compact adjacent layout — entity sizes: CC=1×1, SPK=1×1, DC=1×2, AC=1×2
 
-| Y   | Entity           | Purpose                        |
-|-----|------------------|--------------------------------|
-| 22  | Mod AC (col 12)  | `clock % 60 → signal-M`        |
-| 22  | Lookup CCs       | sub-tick entries (t=0→60)      |
-| 20  | Match DCs        | `each==signal-M → signal=1`    |
-| 18  | Match0 DCs       | `signal-M==0 ∧ each==60 → 1`   |
-| 16  | Selector ACs     | `each(red)*each(green)→bell`   |
-| 16  | Page port (col12)| Constant combinator input      |
-| 14  | l1 AC            | `bell >> 21`                   |
-| 12  | s2 AC            | `bell >> 14`                   |
-| 10  | l2 AC            | `s2 & 127`                     |
-| 8   | s3 AC            | `bell >> 7`                    |
-| 6   | l3 AC            | `s3 & 127`                     |
-| 4   | l4 AC            | `bell & 127`                   |
-| 0-3 | Speakers (12×4)  | 48 programmable speakers       |
+Entity sizes: CC=1×1, SPK=1×1, DC=1×2, AC=1×2
 
-Total entities: 48 spk + 85 AC + 24 DC + 13 CC = 170
+#### Single-rail decoder (build_audio_decoder)
+
+Convenience wrapper around `build_multi_rail_decoder(instruments=[instrument])`.
+
+| Y      | Entity           | Purpose                        |
+|--------|------------------|--------------------------------|
+| 22     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
+| 22     | Lookup CCs       | sub-tick entries (t=0→60)      |
+| 20     | Match DCs        | `each==signal-M → signal=1`    |
+| 18     | Match0 DCs       | `signal-M==0 ∧ each==60 → 1`   |
+| 16     | Selector ACs     | `each(red)*each(green)→bell`   |
+| 16     | Page port (col12)| Constant combinator input      |
+| 14     | l1 AC            | `bell >> 21`                   |
+| 12     | s2 AC            | `bell >> 14`                   |
+| 10     | l2 AC            | `s2 & 127`                     |
+| 8      | s3 AC            | `bell >> 7`                    |
+| 6      | l3 AC            | `s3 & 127`                     |
+| 4      | l4 AC            | `bell & 127`                   |
+| 0–3    | Speakers (12×4)  | 48 programmable speakers       |
+| −4–−1  | Debug lamps (opt)| Blue glow = volume level       |
+
+Single-rail: 48 spk + 85 AC + 24 DC + 13 CC = **170** entities (178 with debug lamps).
 
 Match0 DCs handle sub_tick=0 (value-0 signals are dropped by Factorio).
 CC t=0 entry uses value 60 (never 0); other entries use t (1..59).
+
+#### Multi-rail decoder (build_multi_rail_decoder)
+
+Each instrument gets a complete 48-speaker **rail** placed side-by-side
+with `RAIL_WIDTH = 13` tiles (12 channel columns + 1 page port column).
+
+```
+Rail 0 (piano)        Rail 1 (bass)         Rail 2 (drum)
+x=0..12               x=13..25              x=26..38
+┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+│  page_port  │       │  page_port  │       │  page_port  │
+│  ch0..ch11  │       │  ch0..ch11  │       │  ch0..ch11  │
+│  speakers   │       │  speakers   │       │  speakers   │
+└─────────────┘       └─────────────┘       └─────────────┘
+     ↕ green              ↕ green              ↕ green
+  [clock bus daisy-chained across all rails]
+     ↕ red                ↕ red                ↕ red
+  [sub_tick daisy-chained: mod → last rail → … → first rail]
+  [page data: per-rail independent (no cross-rail page sharing)]
+```
+
+Key parameters:
+
+| Parameter | Purpose |
+|-----------|---------|
+| `instruments=[\"piano\", \"bass\"]` | One rail per instrument; length = rail count |
+| `debug_lamps=True` | 48 small-lamps below each rail's speakers |
+| `map_drums=True` | Use GM drum map for drum-kit instrument rail |
+| `blueprint=bp` | Append rails to an existing Blueprint |
+| `x_offset=N` | Shift all rails horizontally by N tiles |
+
+Each rail uses `r{ri}_` entity id prefix for disambiguation.
+Rails share one modulo AC (placed at the last rail's port column).
+Cross-rail wiring: sub_tick (red), clock (green) daisy-chained;
+page data (red) is per-rail independent.
+
+**`INSTRUMENT_MIDI_BASES`** — each rail's 48-speaker window starts at its
+instrument's MIDI base (see pitch_mapping section above).  Speakers are
+labeled with correct note names for their instrument's range.
+
+#### Logical-blueprint builder
+
+`build_audio_decoder_logical(name, instrument, …)` — builds the decoder
+as a `LogicalBlueprint` (entities + networks, no positions).
+Use `to_draftsman(lb)` to materialise positions and wiring.
+
+## MIDI Translation (midi_translator.py)
+
+Converts MIDI files into the tick→loudness format consumed by the encoder.
+
+### Entry points
+
+| Function | Purpose |
+|----------|---------|
+| `midi_to_tick_data(mid, …)` | Single-instrument MIDI → `tick_data[tick][pitch]` (list[list[float]]) |
+| `midi_to_multi_rail_tick_data(mid, …)` | Multi-instrument MIDI → `(instruments, rail_data)` where `rail_data[r][tick][pitch]` |
+
+### Processing pipeline
+
+```
+MIDI file
+  → process_timing() — prune short notes, chord detection
+  → map_gm_to_factorio() — GM program → Factorio instrument per channel
+  → fold_octaves() / find_optimal_octave_shift() — fit notes to instrument range
+  → ADSR shaping — attack/decay/sustain/release per note
+  → note overlay — sum simultaneous notes' loudness per tick
+  → tick_data[tick][speaker_idx] = loudness (0–100 float)
+```
+
+### Multi-rail routing
+
+`midi_to_multi_rail_tick_data()` auto-detects instruments from MIDI program
+changes and routes each channel to a dedicated rail:
+
+- **Channel 9** → drum (always)
+- **Other channels** → piano/celesta/plucked/bass based on GM program
+- **Duplicate instruments** are merged into one rail
+- **`map_drums=True`**: splits mixed channels (both drum + melodic notes)
+  into separate drum and instrument rails
+- **Melody detection**: per-instrument melody channel gets velocity boost
+  (highest average pitch)
+
+### ADSR envelope
+
+Per-note ADSR shaping with power-curve control:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `attack_ticks` | 10 | Attack duration in game ticks |
+| `decay_ticks` | 10 | Decay duration |
+| `sustain_level` | 1.0 | Sustain level (0.0–1.0) |
+| `release_ticks` | 10 | Release duration |
+| `attack_curve` | 1.0 | Power-curve exponent (>1=gentle, <1=snappy) |
+| `decay_curve` | 1.0 | Power-curve exponent for decay |
+| `release_curve` | 1.0 | Power-curve exponent for release |
+
+### Other parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ticks_per_beat` | 30 | Game ticks per quarter note |
+| `boost_melody` | 1.0 | Melody velocity multiplier (1.5 = +50%) |
+| `velocity_scale` | 1.0 | Global velocity multiplier |
+| `use_global_shift` | True | Compute per-instrument optimal octave shift |
 
 ## Combinator Conventions (draftsman)
 
@@ -97,8 +272,11 @@ blueprint.add_circuit_connection("red", id1, id2, side_1="output", side_2="input
 
 ## Test Structure
 
-- `conftest.py`: `large_signal_pool` (144 signals), `sample_qualities` (5 tiers)
-- `test_encoder.py`, `test_player_blueprint.py`, `test_pitch_mapping.py`
+- `conftest.py`: `large_signal_pool` (144 signals), `sample_qualities` (5 tiers),
+  `silent_tick` fixture, `validate_blueprint_via_logical()` helper,
+  `assert_no_unexpected_warnings()` helper
+- `test_encoder.py`, `test_player_blueprint.py`, `test_pitch_mapping.py`,
+  `test_midi_translator.py`, `test_logical_blueprint.py`
 - Blueprint parsing: `Blueprint.from_string(bp_str)` → inspect `.entities`
 - Filter entities: `[e for e in bp.entities if "name-fragment" in e.name]`
 
@@ -421,6 +599,32 @@ blueprint.
 - **Deduplication**: identical frames share one DC with merged tick ranges.
 - **Adaptive mode**: near-duplicate frames are dropped, extending the previous
   frame's tick range.
+
+`encode_auto(path, ...)` — top-level entry point that auto-detects the input
+type (video, GIF, image series, still image) and dispatches accordingly.
+
+#### Time-chunked parallel encoding
+
+`encode_frames(time_chunks=N, ...)` splits the video into N time slices and
+builds each slice's combinator grid in parallel via `ProcessPoolExecutor`:
+
+```
+Video frames [0..F]
+  → split into N chunks: [0..F/N], [F/N..2F/N], …
+  → each chunk: Phase 0 (parallel resize + adaptive drop + cache)
+  → each chunk: Phase 1 (build DCs in parallel worker)
+  → merge: concatenate DC grids + stitch red/green buses
+```
+
+| CLI flag | Purpose |
+|----------|---------|
+| `--time-chunks N` | Split into N time slices (default: 1 = off) |
+| `--max-workers N` | Max parallel workers (default: CPU count) |
+| `--cross-deduplicate` | Deduplicate identical frames across chunks (slower) |
+
+Caching: chunk results are cached to disk (pickle) keyed by source hash,
+chunk index, and encoding parameters.  Re-running the same encode reuses
+cached chunks.
 
 #### Vertical chunk splitting
 
