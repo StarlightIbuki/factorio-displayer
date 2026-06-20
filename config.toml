@@ -1,8 +1,6 @@
 [display]
 width = 28
-height = 28
-hole_top_left = [13, 13]
-hole_bottom_right = [14, 14]
+height = 26
 
 [signals]
 # The 5 Space Age qualities

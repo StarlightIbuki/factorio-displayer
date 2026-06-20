@@ -4,11 +4,8 @@ for in-game Factorio RGB displays and programmable-speaker audio playback."""
 try:
     from .build._generated import (
         CLOCK_SIGNAL,
-        DISPLAY_BLUEPRINT,
         DISPLAY_HEIGHT,
         DISPLAY_WIDTH,
-        HOLE_BOTTOM_RIGHT,
-        HOLE_TOP_LEFT,
         LOUDNESS_SIGNAL,
         POOL_HASH,
         QUALITIES,
@@ -19,11 +16,8 @@ except ImportError:
     # build/_generated.py is created by the build hook at wheel-build time.
     # It won't exist during a fresh editable install or before the first build.
     CLOCK_SIGNAL = "signal-clock"
-    DISPLAY_BLUEPRINT = ""
-    DISPLAY_HEIGHT = 28
+    DISPLAY_HEIGHT = 26
     DISPLAY_WIDTH = 28
-    HOLE_BOTTOM_RIGHT = (14, 14)
-    HOLE_TOP_LEFT = (13, 13)
     LOUDNESS_SIGNAL = "signal-info"
     POOL_HASH = ""
     QUALITIES = ["normal", "uncommon", "rare", "epic", "legendary"]
@@ -46,8 +40,6 @@ if not SIGNAL_POOL:
         _dev_mapping = SignalMapping(
             DISPLAY_WIDTH,
             DISPLAY_HEIGHT,
-            HOLE_TOP_LEFT,
-            HOLE_BOTTOM_RIGHT,
             QUALITIES,
             _dev_pool,
         )
@@ -57,11 +49,8 @@ if not SIGNAL_POOL:
 
 __all__ = [
     "CLOCK_SIGNAL",
-    "DISPLAY_BLUEPRINT",
     "DISPLAY_HEIGHT",
     "DISPLAY_WIDTH",
-    "HOLE_BOTTOM_RIGHT",
-    "HOLE_TOP_LEFT",
     "LOUDNESS_SIGNAL",
     "POOL_HASH",
     "QUALITIES",

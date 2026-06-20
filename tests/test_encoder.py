@@ -208,8 +208,18 @@ class TestEncodeAudioMemory:
         # 20 ticks fit in 1 page (60 ticks/page)
         assert dc_count == 1
 
+        # ── logical-blueprint validation ──────────────────────────
+        from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
+        result = validate_blueprint_via_logical(bp, require_wiring=False)
+        assert result["errors"] == [], (
+            f"Logical-blueprint validation failed: {result['errors']}"
+        )
+        assert result["entity_count"] == dc_count
+
     def test_page_count(self):
         """50 ticks fits in 1 page; 70 ticks needs 2 pages."""
+        from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
+
         # 50 ticks → 1 page
         data_50 = [[(t + i) % 101 for i in range(SPEAKER_COUNT)] for t in range(50)]
         bp = encode_audio_memory(data_50, "Test", self.pool, self.qual)
@@ -218,9 +228,30 @@ class TestEncodeAudioMemory:
         dc_count = sum(1 for e in parsed.entities if "decider-combinator" in e.name)
         assert dc_count == 1  # 50 < 60
 
+        result = validate_blueprint_via_logical(bp, require_wiring=False)
+        assert result["errors"] == [], f"Validation errors: {result['errors']}"
+        assert result["entity_count"] == 1
+
         # 70 ticks → 2 pages
         data_70 = [[(t + i) % 101 for i in range(SPEAKER_COUNT)] for t in range(70)]
         bp2 = encode_audio_memory(data_70, "Test", self.pool, self.qual)
         parsed2 = Blueprint.from_string(bp2)
         dc_count2 = sum(1 for e in parsed2.entities if "decider-combinator" in e.name)
         assert dc_count2 == 2  # ceil(70/60) = 2
+
+        result2 = validate_blueprint_via_logical(bp2)
+        assert result2["errors"] == [], f"Validation errors: {result2['errors']}"
+
+    def test_no_unexpected_warnings(self):
+        """Encoding audio memory should not produce unexpected warnings."""
+        import warnings
+        from conftest import assert_no_unexpected_warnings  # pylint: disable=import-outside-toplevel
+
+        data = [
+            [(t + i) % 101 for i in range(SPEAKER_COUNT)]
+            for t in range(10)
+        ]
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            encode_audio_memory(data, "Test", self.pool, self.qual)
+        assert_no_unexpected_warnings(w)

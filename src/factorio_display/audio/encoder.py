@@ -384,6 +384,13 @@ def encode_audio_auto(
         Forwarded to :func:`midi_to_tick_data`.
     """
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+
+    # Audio file formats (non-MIDI): WAV, FLAC, OGG, MP3, etc.
+    _AUDIO_EXTS = {"wav", "flac", "ogg", "aiff", "aif", "au", "caf", "mp3", "mp4", "m4a", "aac", "wma"}
+
+    if ext in _AUDIO_EXTS:
+        return _encode_audio_file(path, **kwargs)
+
     if ext not in ("mid", "midi"):
         sys.stderr.write(f"Audio auto-encode: unsupported format: {path}\n")
         return ""
@@ -710,3 +717,279 @@ def encode_audio_auto(
             )
 
     return combined.to_string()
+
+
+# ── audio-file encoding (non-MIDI: WAV/FLAC/OGG/MP3 → blueprint) ─────
+
+
+def _encode_audio_file(
+    path: str,
+    **kwargs: object,
+) -> str:
+    """Encode an audio file (WAV/FLAC/OGG/MP3) into an audio-memory blueprint.
+
+    Pipeline: read audio → STFT → full-spectrum loudness → (MIDI export) →
+    octave fold → encode memory → blueprint.
+
+    Keyword arguments
+    -----------------
+    output_midi : str | None
+        If set, export a MIDI file to this path before octave folding.
+    attach_player : bool
+        If True (default), build the player decoder into the same blueprint.
+    activation_threshold : float
+        STFT activation threshold (default 0.0).
+    midi_activation_threshold : float
+        MIDI extraction activation threshold (default 0.05).
+    condense_midi : bool
+        Condense contiguous MIDI notes (default True).
+    max_polyphony : int
+        Max simultaneous MIDI notes (0 = unlimited).
+    normalize_target : float
+        Target max loudness for encoding (default 100.0).
+    """
+    from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL  # pylint: disable=import-outside-toplevel
+    from .audio_analyzer import (
+        audio_file_to_loudness, fold_loudness_array,
+    )  # pylint: disable=import-outside-toplevel
+    from .loudness_to_midi import loudness_to_midi_file  # pylint: disable=import-outside-toplevel
+
+    attach_player = bool(kwargs.get("attach_player", True))
+    output_midi = kwargs.get("output_midi")
+    activation_threshold = float(kwargs.get("activation_threshold", 0.0))
+    midi_activation_threshold = float(kwargs.get("midi_activation_threshold", 0.05))
+    condense_midi = bool(kwargs.get("condense_midi", True))
+    max_polyphony = int(kwargs.get("max_polyphony", 0))
+    normalize_target = float(kwargs.get("normalize_target", 100.0))
+
+    # 1. Read audio → full-spectrum loudness (128 MIDI notes)
+    sys.stderr.write(f"Loading audio: {path}\n")
+    full_loudness = audio_file_to_loudness(
+        path, activation_threshold=activation_threshold,
+    )
+
+    if not full_loudness:
+        sys.stderr.write("No audio data extracted.\n")
+        return ""
+
+    total_ticks = len(full_loudness)
+    sys.stderr.write(
+        f"  {total_ticks} ticks ({total_ticks / 60:.1f}s) extracted.\n"
+    )
+
+    # 2. Export MIDI (before octave folding — full MIDI range)
+    if output_midi and isinstance(output_midi, str):
+        sys.stderr.write(f"Exporting MIDI to: {output_midi}\n")
+        loudness_to_midi_file(
+            full_loudness, output_midi,
+            activation_threshold=midi_activation_threshold,
+            condense=condense_midi,
+            max_polyphony=max_polyphony if max_polyphony > 0 else 0,
+        )
+
+    # 3. Fold to game range (F3–E7, 48 pitches)
+    game_loudness = fold_loudness_array(full_loudness)
+
+    # 4. Scale to 0–100 int for the encoder
+    # Normalize: find global max, scale to normalize_target
+    global_max = 0.0
+    for tick in game_loudness:
+        for v in tick:
+            if v > global_max:
+                global_max = v
+    scale = normalize_target / global_max if global_max > 0 else 1.0
+
+    int_data: list[list[int]] = []
+    for tick in game_loudness:
+        int_tick = [max(0, min(100, int(round(v * scale)))) for v in tick]
+        int_data.append(int_tick)
+
+    signal_pool = list(SIGNAL_POOL)
+    qualities = list(QUALITIES)
+
+    if not signal_pool:
+        sys.stderr.write("Warning: SIGNAL_POOL is empty, audio encoding may fail.\n")
+
+    # 5. Encode to blueprint
+    if not attach_player:
+        return encode_audio_memory(
+            int_data,
+            output_name=path,
+            signal_pool=signal_pool,
+            qualities=qualities,
+            clock_signal=CLOCK_SIGNAL,
+        )
+
+    # Combined blueprint: player + memory
+    from .player_blueprint import build_audio_decoder  # pylint: disable=import-outside-toplevel
+    from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
+
+    player_str = build_audio_decoder(
+        name=f"Audio Decoder: {path}",
+        instrument="piano",
+        clock_signal=CLOCK_SIGNAL,
+    )
+
+    mem_str = encode_audio_memory(
+        int_data,
+        output_name=path,
+        signal_pool=signal_pool,
+        qualities=qualities,
+        clock_signal=CLOCK_SIGNAL,
+    )
+
+    if not mem_str:
+        return player_str
+
+    return player_str + "\n" + mem_str
+
+
+# ── logical-blueprint encoder ─────────────────────────────────────────
+
+
+def encode_audio_to_logical(
+    tick_data: Sequence[Sequence[int]],
+    output_name: str,
+    signal_pool: list[str],
+    qualities: list[str],
+    clock_signal: str = "signal-clock",
+    id_prefix: str = "",
+) -> "LogicalBlueprint":  # noqa: F821
+    """Encode tick→loudness data into a :class:`LogicalBlueprint`.
+
+    This is the logical-format variant of :func:`encode_audio_memory`.
+    Instead of building a draftsman ``Blueprint`` with hard-coded
+    positions and pairwise wires, it returns a ``LogicalBlueprint``
+    where each DC page is a ``[[entity]]`` and the red / green buses
+    are ``[[network]]`` entries.  Positions are left unset — a separate
+    layout pass assigns them later.
+
+    Parameters
+    ----------
+    tick_data : sequence of sequence of int
+        ``tick_data[tick][speaker_idx] = loudness`` (0–100).
+    output_name : str
+        Label for the blueprint.
+    signal_pool : list[str]
+        Base signal names for the integer→signal encoding.
+    qualities : list[str]
+        Quality tiers.
+    clock_signal : str
+        Name of the clock signal.
+    id_prefix : str
+        Prefix for entity ids (e.g. ``"r0_"`` for rail 0).
+
+    Returns
+    -------
+    LogicalBlueprint
+        The logical blueprint with entities and networks, no positions.
+    """
+    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+
+    if not tick_data:
+        return LogicalBlueprint(label=f"Audio Memory: {output_name}")
+
+    num_base = len(signal_pool)
+    num_qual = len(qualities)
+
+    if num_base == 0:
+        raise ValueError("signal_pool must not be empty")
+
+    needed_base = math.ceil(CELLS_PER_PAGE / num_qual)
+    if num_base < needed_base:
+        raise ValueError(
+            f"signal_pool has {num_base} base signals × {num_qual} qualities = "
+            f"{num_base * num_qual} unique pairs, but {CELLS_PER_PAGE} are needed "
+            f"for a {TICKS_PER_PAGE}-tick page.  Need at least {needed_base} base signals."
+        )
+
+    # 1. Pack
+    packed = loudness_to_packed(list(tick_data))
+    total_ticks = len(packed)
+
+    # 2. Flatten
+    flat: list[int] = []
+    for tick_vals in packed:
+        flat.extend(tick_vals)
+    total_cells = len(flat)
+
+    # 3. Page layout
+    page_count = math.ceil(total_cells / CELLS_PER_PAGE)
+
+    sys.stderr.write(
+        f"Audio (logical): {total_ticks} ticks → {total_cells} cells → "
+        f"{page_count} page(s) "
+        f"({CELLS_PER_PAGE} cells/page = {needed_base} base × {num_qual} qual, "
+        f"{TICKS_PER_PAGE} ticks/page).\n"
+    )
+
+    lb = LogicalBlueprint(label=f"Audio Memory: {output_name}")
+
+    dc_ids: list[str] = []
+    created_count = 0
+
+    for page_idx in range(page_count):
+        dc_id = f"{id_prefix}ap{page_idx}"
+
+        page_start_cell = page_idx * CELLS_PER_PAGE
+        page_end_cell = page_start_cell + CELLS_PER_PAGE
+        tick_start = page_start_cell // CHANNELS_PER_TICK
+        tick_end = (min(page_end_cell, total_cells) - 1) // CHANNELS_PER_TICK
+
+        # Build conditions and outputs
+        conditions = [
+            {"first": clock_signal, "op": ">=", "constant": tick_start},
+            {"first": clock_signal, "op": "<=", "constant": tick_end},
+        ]
+
+        outputs: list[dict] = []
+        for cell_offset in range(CELLS_PER_PAGE):
+            flat_idx = page_start_cell + cell_offset
+            if flat_idx >= total_cells:
+                break
+
+            value = flat[flat_idx]
+            if value == 0:
+                continue
+
+            signal_idx = cell_offset // num_qual
+            quality_idx = cell_offset % num_qual
+            signal_name = signal_pool[signal_idx]
+            quality = qualities[quality_idx]
+
+            outputs.append({
+                "signal": f"{signal_name}@{quality}",
+                "copy_count": False,
+                "constant": value,
+            })
+
+        if not outputs:
+            continue  # skip silent pages
+
+        entity = LogicalEntity(
+            entity_id=dc_id,
+            type="decider-combinator",
+            properties={
+                "conditions": conditions,
+                "outputs": outputs,
+            },
+        )
+        lb.add_entity(entity)
+        dc_ids.append(dc_id)
+        created_count += 1
+
+    # Build networks: green bus (input→input) and red bus (output→output)
+    if len(dc_ids) >= 2:
+        for color, port in (("green", "input"), ("red", "output")):
+            for i in range(len(dc_ids) - 1):
+                ep_a = Endpoint(entity_id=dc_ids[i], port=port)
+                ep_b = Endpoint(entity_id=dc_ids[i + 1], port=port)
+                lb.connect(color, ep_a, ep_b)
+
+    sys.stderr.write(
+        f"Audio memory (logical): {created_count}/{page_count} DCs "
+        f"(skipped {page_count - created_count} silent), "
+        f"{total_cells} cells, {total_ticks} ticks.\n"
+    )
+
+    return lb

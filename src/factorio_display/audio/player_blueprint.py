@@ -90,7 +90,7 @@ TICKS_PER_PAGE = 60                      # decoder uses clock % 60
 PORT_X = 12         # page input port X (relative to rail origin)
 PORT_Y = 16         # page input port Y — same row as selectors
 MOD_X = 12          # modulo AC X (relative to rail origin, or absolute for shared)
-MOD_Y = 22          # modulo AC Y
+MOD_Y = 24          # modulo AC Y — separate row above LUT to avoid overlap
 LUT_Y = 22          # lookup CCs Y
 MATCH_Y = 20        # match DCs Y (each == sub_tick)
 MATCH0_Y = 18       # match0 DCs Y (sub_tick==0 ∧ each==60 — t=0 fallback)
@@ -574,3 +574,255 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
         return blueprint.to_string()
     # When embedded, return the first port id for cross-connection
     return endpoints[0].port_id
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Logical-blueprint builders
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def build_audio_decoder_logical(
+    name: str = "Audio Decoder",
+    instrument: str = "piano",
+    clock_signal: str = "signal-clock",
+    signal_pool: list[str] | None = None,
+    qualities: list[str] | None = None,
+) -> "LogicalBlueprint":  # noqa: F821
+    """Build a single-rail 48-speaker audio decoder as a
+    :class:`LogicalBlueprint` (no positions, networks instead of wires).
+
+    This is the logical-format counterpart of :func:`build_audio_decoder`.
+    Use :func:`to_draftsman` to materialise it into a draftsman
+    ``Blueprint`` with positions and physical wiring.
+
+    Parameters
+    ----------
+    name : str
+        Label for the blueprint.
+    instrument : str
+        Factorio instrument name (piano, bass, celesta, plucked, drum).
+    clock_signal : str
+        Name of the clock signal.
+    signal_pool : list[str] | None
+        Base signal names.  Defaults to the project pool.
+    qualities : list[str] | None
+        Quality tiers.  Defaults to the project qualities.
+
+    Returns
+    -------
+    LogicalBlueprint
+    """
+    from .. import SIGNAL_POOL, QUALITIES  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+
+    if signal_pool is None:
+        signal_pool = list(SIGNAL_POOL)
+    if qualities is None:
+        qualities = list(QUALITIES)
+
+    num_base = len(signal_pool)
+    num_qual = len(qualities)
+
+    instrument_proto = INSTRUMENT_MAP.get(
+        instrument.lower().replace("programmable-speaker-instrument-", ""),
+        instrument,
+    )
+
+    lb = LogicalBlueprint(label=name)
+
+    # ── Page input port ──────────────────────────────────────────
+    port_id = "page_port"
+    lb.add_entity(LogicalEntity(
+        entity_id=port_id,
+        type="constant-combinator",
+        properties={"signals": [{"name": "signal-info", "value": 1}]},
+    ))
+
+    # ── Modulo AC: clock % 60 → signal-M ─────────────────────────
+    mod_id = "mod"
+    lb.add_entity(LogicalEntity(
+        entity_id=mod_id,
+        type="arithmetic-combinator",
+        properties={
+            "first_operand": clock_signal,
+            "operation": "%",
+            "second_operand": TICKS_PER_PAGE,
+            "output_signal": "signal-M",
+        },
+    ))
+
+    # ── Speakers (48) ────────────────────────────────────────────
+    speaker_ids: dict[int, str] = {}
+    col_speakers: dict[int, list[str]] = {c: [] for c in range(12)}
+
+    for pitch_idx, sig in iter_speaker_signals():
+        col = pitch_idx % 12
+        spk_id = f"spk_{pitch_idx}"
+        lb.add_entity(LogicalEntity(
+            entity_id=spk_id,
+            type="programmable-speaker",
+            properties={
+                "instrument": instrument_proto,
+                "note": _pitch_index_to_factorio_note(pitch_idx),
+                "vol_signal": sig["name"],
+                "vol_quality": sig["quality"],
+                "polyphony": True,
+                "circuit_enabled": True,
+            },
+        ))
+        speaker_ids[pitch_idx] = spk_id
+        col_speakers[col].append(spk_id)
+
+    # ── Per-channel pipeline (12 channels) ───────────────────────
+    for ch in range(12):
+        base_id = f"ch{ch}"
+
+        # Lookup CC
+        cc_id = f"{base_id}_lut"
+        cc_signals: list[dict] = []
+        for t in range(TICKS_PER_PAGE):
+            cell_offset = t * 12 + ch
+            sig_idx = cell_offset // num_qual
+            qual_idx = cell_offset % num_qual
+            value = 60 if t == 0 else t
+            cc_signals.append({
+                "name": signal_pool[sig_idx],
+                "value": value,
+                "quality": qualities[qual_idx],
+            })
+        lb.add_entity(LogicalEntity(
+            entity_id=cc_id,
+            type="constant-combinator",
+            properties={"signals": cc_signals},
+        ))
+
+        # Match DC (handles sub_tick 1..59)
+        match_id = f"{base_id}_match"
+        lb.add_entity(LogicalEntity(
+            entity_id=match_id,
+            type="decider-combinator",
+            properties={
+                "conditions": [
+                    {"first": "signal-each", "op": "=", "second_signal": "signal-M"},
+                ],
+                "outputs": [
+                    {"signal": "signal-each", "copy_count": False, "constant": 1},
+                ],
+            },
+        ))
+
+        # Match0 DC (handles sub_tick 0 — value-0 fallback)
+        match0_id = f"{base_id}_match0"
+        lb.add_entity(LogicalEntity(
+            entity_id=match0_id,
+            type="decider-combinator",
+            properties={
+                "conditions": [
+                    {"first": "signal-M", "op": "=", "constant": 0},
+                    {"first": "signal-each", "op": "=", "constant": 60},
+                ],
+                "outputs": [
+                    {"signal": "signal-each", "copy_count": False, "constant": 1},
+                ],
+            },
+        ))
+
+        # Selector AC: each(red) * each(green) → bell
+        sel_id = f"{base_id}_sel"
+        lb.add_entity(LogicalEntity(
+            entity_id=sel_id,
+            type="arithmetic-combinator",
+            properties={
+                "first_operand": "signal-each",
+                "first_operand_wires": ["red"],
+                "operation": "*",
+                "second_operand": "signal-each",
+                "second_operand_wires": ["green"],
+                "output_signal": "signal-bell",
+            },
+        ))
+
+        # Unpacker chain (6 ACs per channel)
+        spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(4)]
+
+        def _add_ac(uid: str, first_op: str, op: str, second_op: int | str, out: str) -> str:
+            ac_id = f"{base_id}_{uid}"
+            lb.add_entity(LogicalEntity(
+                entity_id=ac_id,
+                type="arithmetic-combinator",
+                properties={
+                    "first_operand": first_op,
+                    "operation": op,
+                    "second_operand": second_op,
+                    "output_signal": out,
+                },
+            ))
+            return ac_id
+
+        uid_l1 = _add_ac("l1", "signal-bell", ">>", 21, spk_sigs[0]["name"])
+        uid_s2 = _add_ac("s2", "signal-bell", ">>", 14, "signal-5")
+        uid_l2 = _add_ac("l2", "signal-5", "AND", 127, spk_sigs[1]["name"])
+        uid_s3 = _add_ac("s3", "signal-bell", ">>", 7, "signal-6")
+        uid_l3 = _add_ac("l3", "signal-6", "AND", 127, spk_sigs[2]["name"])
+        uid_l4 = _add_ac("l4", "signal-bell", "AND", 127, spk_sigs[3]["name"])
+
+        out_order = [uid_l1, uid_l2, uid_l3, uid_l4]
+
+        # ── Per-channel networks ──────────────────────────────
+        # CC → match DCs (green)
+        lb.connect("green", Endpoint(cc_id, "output"), Endpoint(match_id, "input"))
+        lb.connect("green", Endpoint(cc_id, "output"), Endpoint(match0_id, "input"))
+
+        # Match DCs → selector AC (green)
+        lb.connect("green", Endpoint(match_id, "output"), Endpoint(sel_id, "input"))
+        lb.connect("green", Endpoint(match0_id, "output"), Endpoint(sel_id, "input"))
+
+        # Selector → first unpacker (green, bell signal)
+        lb.connect("green", Endpoint(sel_id, "output"), Endpoint(uid_l1, "input"))
+
+        # Unpacker green chain: l1→s2→s3→l4 (bell passthrough on input side)
+        lb.connect("green", Endpoint(uid_l1, "input"), Endpoint(uid_s2, "input"))
+        lb.connect("green", Endpoint(uid_s2, "input"), Endpoint(uid_s3, "input"))
+        lb.connect("green", Endpoint(uid_s3, "input"), Endpoint(uid_l4, "input"))
+        # Unpacker green: s2 output → l2 input, s3 output → l3 input
+        lb.connect("green", Endpoint(uid_s2, "output"), Endpoint(uid_l2, "input"))
+        lb.connect("green", Endpoint(uid_s3, "output"), Endpoint(uid_l3, "input"))
+
+        # Red output chain: l1→l2→l3→l4 (output side) → first speaker
+        for i in range(len(out_order) - 1):
+            lb.connect("red", Endpoint(out_order[i], "output"), Endpoint(out_order[i + 1], "output"))
+        first_spk = col_speakers[ch][0]
+        lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(first_spk, "input"))
+
+    # ── Cross-channel networks ─────────────────────────────────
+    # Sub-tick red bus: ch11_match → ch10_match → … → ch0_match
+    for ch in range(11, 0, -1):
+        lb.connect("red", Endpoint(f"ch{ch}_match", "input"), Endpoint(f"ch{ch-1}_match", "input"))
+        lb.connect("red", Endpoint(f"ch{ch}_match0", "input"), Endpoint(f"ch{ch-1}_match0", "input"))
+
+    # Page data red bus: port → ch11_sel → … → ch0_sel
+    lb.connect("red", Endpoint(port_id, "output"), Endpoint("ch11_sel", "input"))
+    for ch in range(11, 0, -1):
+        lb.connect("red", Endpoint(f"ch{ch}_sel", "input"), Endpoint(f"ch{ch-1}_sel", "input"))
+
+    # Speaker grid: daisy-chain red horizontally + vertically
+    for row_off in range(4):
+        for c in range(11):
+            curr = speaker_ids.get(c + row_off * 12)
+            nxt = speaker_ids.get((c + 1) + row_off * 12)
+            if curr and nxt:
+                lb.connect("red", Endpoint(curr, "input"), Endpoint(nxt, "input"))
+    for row_off in range(3):
+        curr = speaker_ids.get(11 + row_off * 12)
+        nxt = speaker_ids.get(11 + (row_off + 1) * 12)
+        if curr and nxt:
+            lb.connect("red", Endpoint(curr, "input"), Endpoint(nxt, "input"))
+
+    # Mod → last match (red, sub_tick injection)
+    lb.connect("red", Endpoint(mod_id, "output"), Endpoint("ch11_match", "input"))
+    lb.connect("red", Endpoint(mod_id, "output"), Endpoint("ch11_match0", "input"))
+
+    # Clock green bus: all ports → mod
+    lb.connect("green", Endpoint(port_id, "input"), Endpoint(mod_id, "input"))
+
+    return lb

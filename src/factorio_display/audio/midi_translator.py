@@ -163,9 +163,9 @@ def process_timing(mid, min_note_gap_sec=0.06, chord_tolerance_sec=0.01, boost_m
 
     return new_mid
 
-# --- 5. MIDI �?TICK_DATA ENGINE (float-based) ---
+# --- 5. MIDI -> TICK_DATA ENGINE (float-based) ---
 
-REFERENCE_TEMPO = 500_000  # 120 BPM �?baseline for ticks_per_beat calibration
+REFERENCE_TEMPO = 500_000  # 120 BPM -> baseline for ticks_per_beat calibration
 
 
 def _midi_tick_to_game_tick(
@@ -452,7 +452,7 @@ def midi_to_tick_data(
         is_melody = (track_idx == melody_track_idx)
 
         absolute_midi_tick = 0
-        active_notes: dict[int, tuple[float, float]] = {}  # note �?(start_game_tick, loudness)
+        active_notes: dict[int, tuple[float, float]] = {}  # note -> (start_game_tick, loudness)
 
         for msg in track:
             absolute_midi_tick += int(msg.time)

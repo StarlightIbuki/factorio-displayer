@@ -1,6 +1,12 @@
 *.pyc
 __pycache__/
 *.egg-info
+
 *.pkl
-.encode_chunks*
 dist
+_diagnose
+
+
+.encode_chunks*
+.encode_vchunks*
+.blueprint_cache

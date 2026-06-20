@@ -34,8 +34,6 @@ def small_mapping_params() -> dict:
     return {
         "width": 4,
         "height": 4,
-        "hole_tl": (-1, -1),  # no hole
-        "hole_br": (-2, -2),
         "qualities": ["normal", "uncommon", "rare", "epic", "legendary"],
         "signal_pool": [f"test-signal-{i:04d}" for i in range(30)],
     }
@@ -86,9 +84,6 @@ class TestEncodeFramesCore:
             output_name="Test",
             deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4,
-            unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock",
             current_tick=4,
         )
@@ -106,9 +101,6 @@ class TestEncodeFramesCore:
             output_name="Test",
             deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4,
-            unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock",
             current_tick=4,
         )
@@ -123,8 +115,6 @@ class TestEncodeFramesCore:
             kept_frames=frames, tick_ranges=tick_ranges,
             output_name="Test", deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=13,
         )
         dcs_no = len([e for e in Blueprint.from_string(bp_no).entities
@@ -136,8 +126,6 @@ class TestEncodeFramesCore:
             kept_frames=frames, tick_ranges=tick_ranges,
             output_name="Test", deduplicate=True,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=13,
         )
         dcs_yes = len([e for e in Blueprint.from_string(bp_yes).entities
@@ -149,28 +137,14 @@ class TestEncodeFramesCore:
             kept_frames=[], tick_ranges=[],
             output_name="Test", deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=1,
         )
         assert bp_str == ""
 
-    def test_multi_unit_produces_blueprint(self, sample_frames_3, small_mapping_params):
-        frames, tick_ranges = sample_frames_3
-        bp_str = _encode_frames_core(
-            kept_frames=frames, tick_ranges=tick_ranges,
-            output_name="Test", deduplicate=False,
-            mapping_params=small_mapping_params,
-            total_w=8, total_h=4,  # 2 units wide
-            unit_w=4, unit_h=4,
-            unit_cols=2, unit_rows=1,
-            clock="signal-clock", current_tick=4,
-        )
-        bp = Blueprint.from_string(bp_str)
-        assert bp is not None
-        dcs = [e for e in bp.entities if "decider-combinator" in e.name]
-        # 3 frames × 2 units = 6 DCs (before padding)
-        assert len(dcs) >= 6
+    def test_multi_unit_no_longer_supported(self):
+        """Multi-unit tiling has been removed. Vertical chunk splitting
+        handles pool overflow instead."""
+        pass  # Legacy test — multi-unit path was removed in display rework
 
     def test_snake_wiring_has_green_and_red(self, sample_frames_3, small_mapping_params):
         frames, tick_ranges = sample_frames_3
@@ -178,8 +152,6 @@ class TestEncodeFramesCore:
             kept_frames=frames, tick_ranges=tick_ranges,
             output_name="Test", deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=4,
         )
         bp = Blueprint.from_string(bp_str)
@@ -404,16 +376,12 @@ class TestMergeChunkBlueprints:
             kept_frames=frames[:mid], tick_ranges=tick_ranges[:mid],
             output_name="Chunk1", deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=mid + 1,
         )
         bp2 = _encode_frames_core(
             kept_frames=frames[mid:], tick_ranges=tick_ranges[mid:],
             output_name="Chunk2", deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=len(frames) + 1,
         )
         merged = _merge_chunk_blueprints(
@@ -434,8 +402,6 @@ class TestMergeChunkBlueprints:
             kept_frames=frames, tick_ranges=tick_ranges,
             output_name="Single", deduplicate=False,
             mapping_params=small_mapping_params,
-            total_w=4, total_h=4, unit_w=4, unit_h=4,
-            unit_cols=1, unit_rows=1,
             clock="signal-clock", current_tick=4,
         )
         result = _merge_chunk_blueprints([bp_str], "Single")
@@ -580,62 +546,115 @@ class TestEdgeCases:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# resolve_dimensions
+# Smoke test — full encode_frames pipeline with --height style args
 # ═══════════════════════════════════════════════════════════════════════
 
-class TestResolveDimensions:
-    """Tests for the dimension auto-calculation and unit-rounding helper."""
+class TestSmokeEncodeFrames:
+    """End-to-end smoke tests that mirror the CLI `encode` subcommand path."""
 
-    UNIT_W = 28
-    UNIT_H = 28
+    def test_encode_with_height_only(self):
+        """Mirrors: factorio-display encode video.mp4 --height 20
+        Uses synthetic frames to avoid needing a real video file."""
+        # 16:9 source, height=20 → width auto-computed, fits in default pool
+        source_w, source_h = 1920, 1080
+        user_h = 20
+        total_w, total_h = resolve_dimensions(source_w, source_h, height=user_h)
+        assert total_h == 20
 
-    # ── both specified ────────────────────────────────────────────────
+        # Build a few synthetic frames
+        frames = [
+            np.full((total_h, total_w, 3), (255, 0, 0), dtype=np.uint8),
+            np.full((total_h, total_w, 3), (0, 255, 0), dtype=np.uint8),
+            np.full((total_h, total_w, 3), (0, 0, 255), dtype=np.uint8),
+        ]
 
-    def test_both_specified_no_rounding(self):
-        w, h = resolve_dimensions(1920, 1080, user_w=56, user_h=84, round_units=False)
+        bp_str = encode_frames(
+            iter(frames),
+            output_name="Smoke Test",
+            fps=30,
+            total_height=user_h,
+            source_id="smoke_height",
+        )
+        assert bp_str
+        assert bp_str.startswith("0e")
+        bp = Blueprint.from_string(bp_str)
+        dcs = [e for e in bp.entities if "decider-combinator" in e.name]
+        assert len(dcs) == 3
+
+    def test_encode_with_width_only(self):
+        """Mirrors: factorio-display encode video.mp4 --width 56"""
+        total_w, total_h = resolve_dimensions(1920, 1080, width=56)
+        frames = [
+            np.full((total_h, total_w, 3), (128, 128, 128), dtype=np.uint8),
+        ]
+        bp_str = encode_frames(
+            iter(frames), "Smoke Width", fps=60,
+            total_width=56, source_id="smoke_width",
+        )
+        assert bp_str
+        bp = Blueprint.from_string(bp_str)
+        assert len(bp.entities) >= 1
+
+    def test_encode_triggers_vertical_chunk_split(self):
+        """Large display (many pixels) triggers vertical chunk splitting."""
+        # 28×70 = 1960 px, default pool ~780 signals → should split into ~3 chunks
+        frames = [
+            np.full((70, 28, 3), (255, 0, 0), dtype=np.uint8),
+        ]
+        bp_str = encode_frames(
+            iter(frames), "Smoke Chunked", fps=60,
+            total_width=28, total_height=70, source_id="smoke_chunked",
+        )
+        assert bp_str
+        bp = Blueprint.from_string(bp_str)
+        # Should have entities from multiple chunks (more than 1 DC)
+        dcs = [e for e in bp.entities if "decider-combinator" in e.name]
+        assert len(dcs) > 1  # multiple chunks → multiple DCs
+        assert bp is not None
+
+    def test_encode_with_both_dimensions(self):
+        """Mirrors: factorio-display encode video.mp4 --width 56 --height 84"""
+        frames = [
+            np.full((84, 56, 3), (255, 255, 255), dtype=np.uint8),
+        ]
+        bp_str = encode_frames(
+            iter(frames), "Smoke Both", fps=60,
+            total_width=56, total_height=84, source_id="smoke_both",
+        )
+        assert bp_str
+        bp = Blueprint.from_string(bp_str)
+        assert len(bp.entities) >= 1
+
+    def test_both_specified(self):
+        w, h = resolve_dimensions(1920, 1080, width=56, height=84)
         assert w == 56
         assert h == 84
 
-    def test_both_specified_with_rounding_already_aligned(self):
-        """When both are already multiples of unit size, rounding is a no-op."""
-        w, h = resolve_dimensions(1920, 1080, user_w=56, user_h=84, round_units=True)
-        assert w == 56
-        assert h == 84
-
-    def test_both_specified_with_rounding_partial_units(self):
-        """Rounding snaps each dimension up to the next unit boundary."""
-        w, h = resolve_dimensions(1920, 1080, user_w=30, user_h=30, round_units=True,
-                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
-        assert w == 56   # ceil(30/28)*28 = 2*28
-        assert h == 56
+    def test_both_specified_no_rounding_applied(self):
+        """User values are used exactly — no unit rounding."""
+        w, h = resolve_dimensions(1920, 1080, width=30, height=30)
+        assert w == 30
+        assert h == 30
 
     # ── only width specified ──────────────────────────────────────────
 
     def test_width_only_preserves_ratio_16_9(self):
         """Source 1920×1080 (16:9), user specifies width=56."""
-        w, h = resolve_dimensions(1920, 1080, user_w=56, round_units=False)
+        w, h = resolve_dimensions(1920, 1080, width=56)
         assert w == 56
         # 56 * 1080 / 1920 = 31.5 → round → 32
         assert h == 32
 
     def test_width_only_preserves_ratio_4_3(self):
         """Source 640×480 (4:3), user specifies width=84."""
-        w, h = resolve_dimensions(640, 480, user_w=84, round_units=False)
+        w, h = resolve_dimensions(640, 480, width=84)
         assert w == 84
         # 84 * 480 / 640 = 63.0 → 63
         assert h == 63
 
-    def test_width_only_with_rounding(self):
-        """Width-only with rounding snaps height to unit boundary."""
-        w, h = resolve_dimensions(1920, 1080, user_w=56, round_units=True,
-                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
-        assert w == 56   # already a multiple of 28
-        # h = ceil(32/28)*28 = 2*28 = 56
-        assert h == 56
-
     def test_width_only_very_narrow_source(self):
         """Extreme aspect ratio: 100×1000 source, width=28."""
-        w, h = resolve_dimensions(100, 1000, user_w=28, round_units=False)
+        w, h = resolve_dimensions(100, 1000, width=28)
         assert w == 28
         assert h == 280  # 28 * 1000 / 100
 
@@ -643,53 +662,23 @@ class TestResolveDimensions:
 
     def test_height_only_preserves_ratio(self):
         """Source 1920×1080, user specifies height=84."""
-        w, h = resolve_dimensions(1920, 1080, user_h=84, round_units=False)
+        w, h = resolve_dimensions(1920, 1080, height=84)
         assert h == 84
         # 84 * 1920 / 1080 = 149.33... → round → 149
         assert w == 149
 
-    def test_height_only_with_rounding(self):
-        """Height-only with rounding snaps width to unit boundary."""
-        w, h = resolve_dimensions(1920, 1080, user_h=84, round_units=True,
-                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
-        assert h == 84   # already a multiple of 28
-        # w = ceil(149/28)*28 = 6*28 = 168
-        assert w == 168
-
     # ── neither specified ─────────────────────────────────────────────
 
-    def test_neither_specified_returns_unit_default(self):
-        w, h = resolve_dimensions(1920, 1080, round_units=False)
-        assert w == self.UNIT_W
-        assert h == self.UNIT_H
-
-    def test_neither_specified_with_rounding_still_unit_default(self):
-        """Unit default is already aligned, rounding is a no-op."""
-        w, h = resolve_dimensions(1920, 1080, round_units=True)
-        assert w == self.UNIT_W
-        assert h == self.UNIT_H
+    def test_neither_specified_returns_default(self):
+        from factorio_display import DISPLAY_WIDTH, DISPLAY_HEIGHT
+        w, h = resolve_dimensions(1920, 1080)
+        assert w == DISPLAY_WIDTH
+        assert h == DISPLAY_HEIGHT
 
     # ── edge cases ────────────────────────────────────────────────────
 
     def test_minimum_dimension_one(self):
         """Very small source, width=1 → height ≥ 1."""
-        w, h = resolve_dimensions(1, 1, user_w=1, round_units=False,
-                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
+        w, h = resolve_dimensions(1, 1, width=1)
         assert w == 1
         assert h == 1
-
-    def test_custom_unit_sizes(self):
-        """Custom unit_w/unit_h are respected."""
-        w, h = resolve_dimensions(100, 50, user_w=10, round_units=True,
-                                  unit_w=5, unit_h=5)
-        assert w == 10   # already multiple of 5
-        # h = round(10 * 50 / 100) = 5, ceil(5/5)*5 = 5
-        assert h == 5
-
-    def test_rounding_ceil_not_floor(self):
-        """Partial units round UP, not down."""
-        # 29 is just over one unit (28)
-        w, h = resolve_dimensions(100, 100, user_w=29, round_units=True,
-                                  unit_w=self.UNIT_W, unit_h=self.UNIT_H)
-        assert w == 56   # ceil(29/28)*28 = 2*28, not 1*28
-        assert h == 56   # same since square source

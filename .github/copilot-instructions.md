@@ -15,21 +15,23 @@ This project builds Factorio blueprints for audio/video display using combinator
 ## Rules
 
 Before implementation:
-1. confirm design with me by repharsing in your own words
-1. make sure the plan is feasible and sound
-1. write unit tests
+1. Confirm design with me by rephrasing in your own words
+1. Make sure the plan is feasible and sound
+1. Write unit tests
+1. Add proper debug logs that benefit debugging
+1. Think! Think if anything is odd and ask! Do not proceed until you are crystal clear on the design and implementation plan.
 
-When iterating/writting code, always stop and ask for help from me if:
-1. you tried a solution and it does not work;
-1. something you are not sure about;
-1. any assumption is broken
+When in trouble, including multiple times of failure, assumption broken, reflect:
+1. What's the original purpose? Does it make sense?
+1. Debug with logs, and add more logs if needed.
+1. And when fail to come up with a reasonable answer, ask me for help.
 
 When a non-trivial iteration finishes, before claiming a feature/bug is done:
-1. always run tests
+1. Always run tests
 
 When fixed a bug:
-1. if not covered by tests, add a test to cover it
+1. If not covered by tests, add a test to cover it
 
 ## Architecture Reference
 
-Before making any changes, read **`architecture.md`** for the full architecture: audio pipeline (pitch_mapping → encoder → player_blueprint), combinator conventions (AC/DC/CC/SPK wiring), wire colors (red=page data bus, green=CC lookup/bell bus), entity layout coordinates, and test structure.
+Before making any changes, read **`architecture.md`** for the full architecture: audio pipeline , combinator conventions, wiring, entity layout coordinates, and test structure.

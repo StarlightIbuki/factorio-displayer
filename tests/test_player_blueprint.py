@@ -59,6 +59,14 @@ class TestBuildAudioDecoder:
         assert len(ccs) == 13        # 1perCh lookup + 1 port
         assert len(bp.entities) == 170
 
+        # ── logical-blueprint validation ──────────────────────────
+        from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
+        result = validate_blueprint_via_logical(bp_str)
+        assert result["errors"] == [], (
+            f"Logical-blueprint validation failed: {result['errors']}"
+        )
+        assert result["entity_count"] == 170
+
     def test_unpacker_positions_compact(self):
         """Unpackers should be directly below match DCs at y>=4."""
         bp_str = build_audio_decoder()
@@ -174,6 +182,12 @@ class TestBuildAudioDecoder:
         bp = _parse_bp(bp_str)
         # Draftsman stores wires as a list of wire connection tuples
         assert len(bp.wires) > 0, "Expected at least one wire connection"
+
+        # ── logical-blueprint validation ──────────────────────────
+        from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
+        result = validate_blueprint_via_logical(bp_str)
+        assert result["errors"] == [], f"Validation errors: {result['errors']}"
+        assert result["network_count"] > 0
 
     def test_lut_cc_values_are_nonzero(self):
         """All lookup CC entries must have non-zero values.
@@ -313,20 +327,33 @@ class TestMultiRailDecoder:
 
     def test_two_rails_double_speakers(self):
         """Two rails → 96 speakers."""
-        bp = _parse_bp(build_multi_rail_decoder(
+        bp_str = build_multi_rail_decoder(
             name="Dual", instruments=["piano", "bass"],
-        ))
+        )
+        bp = _parse_bp(bp_str)
         speakers = _get_entities_by_type(bp, "programmable-speaker")
         assert len(speakers) == 96
 
+        # ── logical-blueprint validation ──────────────────────────
+        from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
+        result = validate_blueprint_via_logical(bp_str)
+        assert result["errors"] == [], f"Validation errors: {result['errors']}"
+        assert result["entity_count"] == len(bp.entities)
+
     def test_two_rails_share_one_mod_ac(self):
         """Two rails share exactly one modulo AC (not one per rail)."""
-        bp = _parse_bp(build_multi_rail_decoder(
+        bp_str = build_multi_rail_decoder(
             name="Dual", instruments=["piano", "bass"],
-        ))
+        )
+        bp = _parse_bp(bp_str)
         acs = _get_entities_by_type(bp, "arithmetic-combinator")
         # 7perCh×12×2 rails + 1 shared mod = 169
         assert len(acs) == 7 * 12 * 2 + 1
+
+        # ── logical-blueprint validation ──────────────────────────
+        from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
+        result = validate_blueprint_via_logical(bp_str)
+        assert result["errors"] == [], f"Validation errors: {result['errors']}"
 
     def test_rail_speaker_x_positions(self):
         """Rail 0 speakers at cols 0..11, rail 1 at cols 13..24."""
@@ -381,3 +408,23 @@ class TestMultiRailDecoder:
         ))
         lamps = _get_entities_by_type(bp, "small-lamp")
         assert len(lamps) == 96
+
+    def test_no_unexpected_warnings_single_rail(self):
+        """Single-rail decoder generation should not produce unexpected warnings."""
+        import warnings
+        from conftest import assert_no_unexpected_warnings  # pylint: disable=import-outside-toplevel
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_audio_decoder()
+        assert_no_unexpected_warnings(w)
+
+    def test_no_unexpected_warnings_multi_rail(self):
+        """Multi-rail decoder generation should not produce unexpected warnings."""
+        import warnings
+        from conftest import assert_no_unexpected_warnings  # pylint: disable=import-outside-toplevel
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_multi_rail_decoder(instruments=["piano"])
+        assert_no_unexpected_warnings(w)
