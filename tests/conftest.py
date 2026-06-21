@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line(
+        "markers", "perf: performance regression test (can be skipped with -m 'not perf')"
+    )
+
 from factorio_display.integer2signal.pool import get_filtered_pool
 
 
@@ -390,3 +397,35 @@ def full_volume_tick() -> list[int]:
 def ramp_tick() -> list[int]:
     """One tick with linearly increasing loudness 0..47."""
     return list(range(48))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Session-scoped blueprint fixtures — built once, reused across tests
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.fixture(scope="session")
+def audio_decoder_bp_str() -> str:
+    """Audio decoder blueprint string — built once per session."""
+    from factorio_display.audio.player_blueprint import build_audio_decoder
+    return build_audio_decoder(name="TestSession")
+
+
+@pytest.fixture(scope="session")
+def audio_decoder_bp(audio_decoder_bp_str: str):
+    """Parsed audio decoder Blueprint — built once per session."""
+    from draftsman.blueprintable import Blueprint
+    return Blueprint.from_string(audio_decoder_bp_str)
+
+
+@pytest.fixture(scope="session")
+def audio_decoder_debug_bp_str() -> str:
+    """Audio decoder with debug lamps — built once per session."""
+    from factorio_display.audio.player_blueprint import build_audio_decoder
+    return build_audio_decoder(name="TestDebug", debug_lamps=True)
+
+
+@pytest.fixture(scope="session")
+def audio_decoder_debug_bp(audio_decoder_debug_bp_str: str):
+    """Parsed audio decoder with debug lamps — built once per session."""
+    from draftsman.blueprintable import Blueprint
+    return Blueprint.from_string(audio_decoder_debug_bp_str)

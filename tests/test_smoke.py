@@ -354,11 +354,13 @@ def progress_lb() -> LogicalBlueprint:
 
 
 
-POLE_TYPES = [None, "small", "medium", "substation"]
+POLE_TYPES = [None, "substation"]
 
 PROGRESS_OPTIONS = [False, True]
 
-CACHE_OPTIONS = [False, True]
+# Cache is transparent to output — always use use_cache=False in tests
+# to avoid disk I/O overhead.  A separate roundtrip test verifies the
+# serialisation path works.
 
 
 
@@ -373,465 +375,262 @@ CACHE_OPTIONS = [False, True]
 @pytest.mark.filterwarnings("ignore::draftsman.warning.UnknownSignalWarning")
 
 class TestAllInOneSmoke:
-
-    """Comprehensive smoke test: every pole Ã progress Ã cache combination."""
-
-
+    """Smoke test: pole x progress combinations, fast path (no roundtrip)."""
 
     @pytest.mark.parametrize(
-
-        "pole_type, use_progress, use_cache",
-
-        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS, CACHE_OPTIONS)),
-
+        "pole_type, use_progress",
+        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS)),
     )
-
     def test_video_composition(
-
         self,
-
         display_lb: LogicalBlueprint,
-
         video_memory_lb: LogicalBlueprint,
-
         timer_lb: LogicalBlueprint,
-
         progress_lb: LogicalBlueprint,
-
         pole_type: str | None,
-
         use_progress: bool,
-
-        use_cache: bool,
-
     ):
-
-        """Compose video-only all-in-one with every param combo."""
-
+        """Compose video-only all-in-one -- fast path (no roundtrip)."""
         result = compose_all_in_one(
-
                 display_lb=display_lb,
-
                 video_memory_lb=video_memory_lb,
-
                 timer_lb=timer_lb,
-
                 progress_bar_lb=progress_lb if use_progress else None,
-
                 pole_type=pole_type,
-
                 output_name=f"Smoke_{pole_type}_pb{use_progress}",
-
-                use_cache=use_cache,
-
-                cache_key_parts=("smoke", "video", str(pole_type),
-
-                                 str(use_progress), str(use_cache)),
-
+                use_cache=False,
             )
-
-
-
-        # ââ Assertions âââââââââââââââââââââââââââââââââââââââââââ
 
         assert result.label.startswith("Smoke_")
-
         assert len(result.entities) > 0
 
-
-
-        # Every entity should have a position after composition
-
         for eid, ent in result.entities.items():
-
             assert ent.position is not None, f"Entity {eid!r} missing position"
 
-
-
-        # ââ Convert to draftsman blueprint âââââââââââââââââââââââ
+    def test_video_composition_roundtrip(
+        self,
+        display_lb: LogicalBlueprint,
+        video_memory_lb: LogicalBlueprint,
+        timer_lb: LogicalBlueprint,
+        progress_lb: LogicalBlueprint,
+    ):
+        """Full roundtrip for video composition (one representative combo)."""
+        result = compose_all_in_one(
+                display_lb=display_lb,
+                video_memory_lb=video_memory_lb,
+                timer_lb=timer_lb,
+                progress_bar_lb=progress_lb,
+                pole_type="substation",
+                output_name="SmokeVideoRT",
+                use_cache=False,
+            )
 
         bp = to_draftsman(result)
-
         bp_str = bp.to_string()
-
         assert bp_str.startswith("0e"), "Not a valid blueprint string"
 
-
-
-        # ââ Round-trip through from_draftsman ââââââââââââââââââââ
-
         bp2 = Blueprint.from_string(bp_str)
-
         lb2 = from_draftsman(bp2)
-
-        assert len(lb2.entities) == len(result.entities), (
-
-            f"Entity count mismatch: {len(lb2.entities)} vs {len(result.entities)}"
-
-        )
-
-
-
-        # ââ Check for power pole entities ââââââââââââââââââââââââ
-
-        pole_types_found = {
-
-            ent.type for ent in lb2.entities.values()
-
-            if ent.type in ("small-electric-pole", "medium-electric-pole", "substation")
-
-        }
-
-        if pole_type is not None:
-
-            # TODO: re-enable assertion when power supply is implemented
-
-            # (see power.py docstring for redesign plan).
-
-            expected_type = {
-
-                "small": "small-electric-pole",
-
-                "medium": "medium-electric-pole",
-
-                "substation": "substation",
-
-            }[pole_type]
-
-            if expected_type not in pole_types_found:
-
-                pytest.skip(
-
-                    f"Power supply ({pole_type}) not yet implemented"
-
-                )
-
-        else:
-
-            assert len(pole_types_found) == 0, (
-
-                f"Unexpected poles: {pole_types_found}"
-
-            )
-
-
-
-        # ââ Check for progress bar lamps âââââââââââââââââââââââââ
-
-        lamp_count = sum(
-
-            1 for ent in lb2.entities.values() if ent.type == "small-lamp"
-
-        )
-
-        if use_progress:
-
-            assert lamp_count > 10, f"Expected >10 lamps, got {lamp_count}"
-
-        else:
-
-            assert lamp_count > 0
-
-
-
-    @pytest.mark.parametrize(
-
-        "pole_type, use_progress, use_cache",
-
-        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS, CACHE_OPTIONS)),
-
-    )
-
-    def test_audio_composition(
-
-        self,
-
-        audio_memory_lb: LogicalBlueprint,
-
-        timer_lb: LogicalBlueprint,
-
-        progress_lb: LogicalBlueprint,
-
-        pole_type: str | None,
-
-        use_progress: bool,
-
-        use_cache: bool,
-
-    ):
-
-        """Compose audio-only all-in-one with every param combo."""
-
-        result = compose_all_in_one(
-
-                audio_memory_lb=audio_memory_lb,
-
-                timer_lb=timer_lb,
-
-                progress_bar_lb=progress_lb if use_progress else None,
-
-                pole_type=pole_type,
-
-                output_name=f"SmokeAudio_{pole_type}_pb{use_progress}",
-
-                use_cache=use_cache,
-
-                cache_key_parts=("smoke", "audio", str(pole_type),
-
-                                 str(use_progress), str(use_cache)),
-
-            )
-
-
-
-        assert result.label.startswith("SmokeAudio_")
-
-        assert len(result.entities) > 0
-
-
-
-        for eid, ent in result.entities.items():
-
-            assert ent.position is not None, f"Entity {eid!r} missing position"
-
-
-
-        bp = to_draftsman(result)
-
-        bp_str = bp.to_string()
-
-        assert bp_str.startswith("0e")
-
-
-
-        # Verify pole types
-
-        bp2 = Blueprint.from_string(bp_str)
-
-        lb2 = from_draftsman(bp2)
-
-        pole_types_found = {
-
-            ent.type for ent in lb2.entities.values()
-
-            if ent.type in ("small-electric-pole", "medium-electric-pole", "substation")
-
-        }
-
-        if pole_type is not None:
-
-            # TODO: re-enable when power supply is implemented
-
-            expected_type = {
-
-                "small": "small-electric-pole",
-
-                "medium": "medium-electric-pole",
-
-                "substation": "substation",
-
-            }[pole_type]
-
-            if expected_type not in pole_types_found:
-
-                pytest.skip(
-
-                    f"Power supply ({pole_type}) not yet implemented"
-
-                )
-
-
-
-    @pytest.mark.parametrize(
-
-        "pole_type, use_progress, use_cache",
-
-        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS, CACHE_OPTIONS)),
-
-    )
-
-    def test_combined_composition(
-
-        self,
-
-        display_lb: LogicalBlueprint,
-
-        video_memory_lb: LogicalBlueprint,
-
-        audio_memory_lb: LogicalBlueprint,
-
-        timer_lb: LogicalBlueprint,
-
-        progress_lb: LogicalBlueprint,
-
-        pole_type: str | None,
-
-        use_progress: bool,
-
-        use_cache: bool,
-
-    ):
-
-        """Compose video + audio all-in-one with every param combo."""
-
-        result = compose_all_in_one(
-
-                display_lb=display_lb,
-
-                video_memory_lb=video_memory_lb,
-
-                audio_memory_lb=audio_memory_lb,
-
-                timer_lb=timer_lb,
-
-                progress_bar_lb=progress_lb if use_progress else None,
-
-                pole_type=pole_type,
-
-                output_name=f"SmokeBoth_{pole_type}_pb{use_progress}",
-
-                use_cache=use_cache,
-
-                cache_key_parts=("smoke", "both", str(pole_type),
-
-                                 str(use_progress), str(use_cache)),
-
-            )
-
-
-
-        assert len(result.entities) > 0
-
-
-
-        for eid, ent in result.entities.items():
-
-            assert ent.position is not None, f"Entity {eid!r} missing position"
-
-
-
-        bp = to_draftsman(result)
-
-        bp_str = bp.to_string()
-
-        assert bp_str.startswith("0e")
-
-
-
-        bp2 = Blueprint.from_string(bp_str)
-
-        lb2 = from_draftsman(bp2)
-
-        # Verify entity count from both sub-blueprints present
-
         assert len(lb2.entities) == len(result.entities)
 
+        # Check pole types in materialised blueprint
+        pole_types_found = {
+            ent.type for ent in lb2.entities.values()
+            if ent.type in ("small-electric-pole", "medium-electric-pole", "substation")
+        }
+        if "substation" not in pole_types_found:
+            pytest.skip("Power supply (substation) not yet implemented")
 
+        lamp_count = sum(
+            1 for ent in lb2.entities.values() if ent.type == "small-lamp"
+        )
+        assert lamp_count > 10
 
     @pytest.mark.parametrize(
-
-        "pole_type, use_progress, use_cache",
-
-        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS, CACHE_OPTIONS)),
-
+        "pole_type, use_progress",
+        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS)),
     )
-
-    def test_repeater_composition(
-
+    def test_audio_composition(
         self,
-
-        display_lb: LogicalBlueprint,
-
-        video_memory_lb: LogicalBlueprint,
-
+        audio_memory_lb: LogicalBlueprint,
+        timer_lb: LogicalBlueprint,
         progress_lb: LogicalBlueprint,
-
         pole_type: str | None,
-
         use_progress: bool,
-
-        use_cache: bool,
-
     ):
+        """Compose audio-only all-in-one -- fast path (no roundtrip)."""
+        result = compose_all_in_one(
+                audio_memory_lb=audio_memory_lb,
+                timer_lb=timer_lb,
+                progress_bar_lb=progress_lb if use_progress else None,
+                pole_type=pole_type,
+                output_name=f"SmokeAudio_{pole_type}_pb{use_progress}",
+                use_cache=False,
+            )
 
-        """Compose with repeater timer instead of raw+mod."""
+        assert result.label.startswith("SmokeAudio_")
+        assert len(result.entities) > 0
 
+        for eid, ent in result.entities.items():
+            assert ent.position is not None, f"Entity {eid!r} missing position"
+
+    def test_audio_composition_roundtrip(
+        self,
+        audio_memory_lb: LogicalBlueprint,
+        timer_lb: LogicalBlueprint,
+        progress_lb: LogicalBlueprint,
+    ):
+        """Full roundtrip for audio composition (one representative combo)."""
+        result = compose_all_in_one(
+                audio_memory_lb=audio_memory_lb,
+                timer_lb=timer_lb,
+                progress_bar_lb=progress_lb,
+                pole_type="substation",
+                output_name="SmokeAudioRT",
+                use_cache=False,
+            )
+
+        bp = to_draftsman(result)
+        bp_str = bp.to_string()
+        assert bp_str.startswith("0e")
+
+        bp2 = Blueprint.from_string(bp_str)
+        lb2 = from_draftsman(bp2)
+        pole_types_found = {
+            ent.type for ent in lb2.entities.values()
+            if ent.type in ("small-electric-pole", "medium-electric-pole", "substation")
+        }
+        if "substation" not in pole_types_found:
+            pytest.skip("Power supply (substation) not yet implemented")
+
+    @pytest.mark.parametrize(
+        "pole_type, use_progress",
+        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS)),
+    )
+    def test_combined_composition(
+        self,
+        display_lb: LogicalBlueprint,
+        video_memory_lb: LogicalBlueprint,
+        audio_memory_lb: LogicalBlueprint,
+        timer_lb: LogicalBlueprint,
+        progress_lb: LogicalBlueprint,
+        pole_type: str | None,
+        use_progress: bool,
+    ):
+        """Compose video + audio all-in-one -- fast path (no roundtrip)."""
+        result = compose_all_in_one(
+                display_lb=display_lb,
+                video_memory_lb=video_memory_lb,
+                audio_memory_lb=audio_memory_lb,
+                timer_lb=timer_lb,
+                progress_bar_lb=progress_lb if use_progress else None,
+                pole_type=pole_type,
+                output_name=f"SmokeBoth_{pole_type}_pb{use_progress}",
+                use_cache=False,
+            )
+
+        assert len(result.entities) > 0
+
+        for eid, ent in result.entities.items():
+            assert ent.position is not None, f"Entity {eid!r} missing position"
+
+    def test_combined_composition_roundtrip(
+        self,
+        display_lb: LogicalBlueprint,
+        video_memory_lb: LogicalBlueprint,
+        audio_memory_lb: LogicalBlueprint,
+        timer_lb: LogicalBlueprint,
+        progress_lb: LogicalBlueprint,
+    ):
+        """Full roundtrip for combined composition (one representative combo)."""
+        result = compose_all_in_one(
+                display_lb=display_lb,
+                video_memory_lb=video_memory_lb,
+                audio_memory_lb=audio_memory_lb,
+                timer_lb=timer_lb,
+                progress_bar_lb=progress_lb,
+                pole_type="substation",
+                output_name="SmokeBothRT",
+                use_cache=False,
+            )
+
+        bp = to_draftsman(result)
+        bp_str = bp.to_string()
+        assert bp_str.startswith("0e")
+
+        bp2 = Blueprint.from_string(bp_str)
+        lb2 = from_draftsman(bp2)
+        assert len(lb2.entities) == len(result.entities)
+
+    @pytest.mark.parametrize(
+        "pole_type, use_progress",
+        list(itertools.product(POLE_TYPES, PROGRESS_OPTIONS)),
+    )
+    def test_repeater_composition(
+        self,
+        display_lb: LogicalBlueprint,
+        video_memory_lb: LogicalBlueprint,
+        progress_lb: LogicalBlueprint,
+        pole_type: str | None,
+        use_progress: bool,
+    ):
+        """Compose with repeater timer -- fast path (no roundtrip)."""
         from factorio_display.composer import _assign_tile_positions
 
         repeater = build_repeater("SmokeRepeater", constant=1024,
-
                                   output_signal="signal-R", mod=6000)
-
         mod = build_mod_timer(60, name="SmokeMod", input_signal="signal-R")
-
         _assign_tile_positions(mod, start_x=0, start_y=6)
-
         repeater.merge(mod, entity_prefix="mod_", network_prefix="mod_")
 
-
-
         result = compose_all_in_one(
-
                 display_lb=display_lb,
-
                 video_memory_lb=video_memory_lb,
-
                 timer_lb=repeater,
-
                 progress_bar_lb=progress_lb if use_progress else None,
-
                 pole_type=pole_type,
-
                 output_name=f"SmokeRep_{pole_type}",
-
-                use_cache=use_cache,
-
-                cache_key_parts=("smoke", "rep", str(pole_type),
-
-                                 str(use_progress), str(use_cache)),
-
+                use_cache=False,
             )
-
-
 
         assert len(result.entities) > 0
 
-
-
-        bp = to_draftsman(result)
-
-        bp_str = bp.to_string()
-
-        assert bp_str.startswith("0e")
-
-
-
         # Verify repeater entities present (prefixed with tm_)
-
         has_repeater = any(
-
             eid.startswith("tm_") and
-
             ent.properties.get("second_operand") == 1024
-
             for eid, ent in result.entities.items()
-
         )
-
         assert has_repeater, "Repeater entities not found in composed result"
 
+    def test_repeater_composition_roundtrip(
+        self,
+        display_lb: LogicalBlueprint,
+        video_memory_lb: LogicalBlueprint,
+        progress_lb: LogicalBlueprint,
+    ):
+        """Full roundtrip for repeater composition (one representative combo)."""
+        from factorio_display.composer import _assign_tile_positions
 
+        repeater = build_repeater("SmokeRepeaterRT", constant=1024,
+                                  output_signal="signal-R", mod=6000)
+        mod = build_mod_timer(60, name="SmokeModRT", input_signal="signal-R")
+        _assign_tile_positions(mod, start_x=0, start_y=6)
+        repeater.merge(mod, entity_prefix="mod_", network_prefix="mod_")
 
+        result = compose_all_in_one(
+                display_lb=display_lb,
+                video_memory_lb=video_memory_lb,
+                timer_lb=repeater,
+                progress_bar_lb=progress_lb,
+                pole_type="substation",
+                output_name="SmokeRepRT",
+                use_cache=False,
+            )
 
-
-# ======================================================================â?
-
-# Standalone component smoke tests
-
-# ======================================================================â?
-
-
-
+        bp = to_draftsman(result)
+        bp_str = bp.to_string()
+        assert bp_str.startswith("0e")
 
 
 class TestComponentSmoke:

@@ -45,10 +45,9 @@ class TestBuildAudioDecoder:
         bp = _parse_bp(bp_str)
         assert bp.label == "My Piano"
 
-    def test_entity_counts(self):
+    def test_entity_counts(self, audio_decoder_bp_str, audio_decoder_bp):
         """48 speakers + 85 ACs + 24 DCs + 13 CCs = 170 entities."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
         ariths = _get_entities_by_type(bp, "arithmetic-combinator")
         dcs = _get_entities_by_type(bp, "decider-combinator")
@@ -61,16 +60,15 @@ class TestBuildAudioDecoder:
 
         # ── logical-blueprint validation ──────────────────────────
         from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
-        result = validate_blueprint_via_logical(bp_str)
+        result = validate_blueprint_via_logical(audio_decoder_bp_str)
         assert result["errors"] == [], (
             f"Logical-blueprint validation failed: {result['errors']}"
         )
         assert result["entity_count"] == 170
 
-    def test_unpacker_positions_compact(self):
+    def test_unpacker_positions_compact(self, audio_decoder_bp):
         """Unpackers should be directly below match DCs at y>=4."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         acs = _get_entities_by_type(bp, "arithmetic-combinator")
         xs = {ac.tile_position[0] for ac in acs}
         ys = {ac.tile_position[1] for ac in acs}
@@ -78,10 +76,9 @@ class TestBuildAudioDecoder:
         assert max(xs) >= 12  # mod AC somewhere to the right
         assert min(ys) >= 4   # speakers end at y=3
 
-    def test_all_speaker_signals_unique(self):
+    def test_all_speaker_signals_unique(self, audio_decoder_bp):
         """Each speaker must have a unique (signal_name, quality) pair."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
 
         seen: set[tuple[str, str]] = set()
@@ -93,14 +90,13 @@ class TestBuildAudioDecoder:
             seen.add(pair)
         assert len(seen) == 48
 
-    def test_speaker_signals_match_pitch_mapping(self):
+    def test_speaker_signals_match_pitch_mapping(self, audio_decoder_bp):
         """The volume_signal names on speakers must match pitch_index_to_signal names.
 
         Since entity IDs are not preserved through blueprint serialization,
         we compare the set of (name, quality) pairs.
         """
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
 
         expected_signals = {
@@ -119,26 +115,23 @@ class TestBuildAudioDecoder:
             f"Extra: {found_signals - expected_signals}"
         )
 
-    def test_speakers_have_polyphony(self):
+    def test_speakers_have_polyphony(self, audio_decoder_bp):
         """All speakers should have polyphony disabled (single-note per speaker)."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
         for spk in speakers:
             assert spk.allow_polyphony is True
 
-    def test_speakers_use_volume_mode(self):
+    def test_speakers_use_volume_mode(self, audio_decoder_bp):
         """Circuit mode should be 'volume' (volume controlled by signal)."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
         for spk in speakers:
             assert spk.volume_controlled_by_signal is True
 
-    def test_speaker_grid_dimensions(self):
+    def test_speaker_grid_dimensions(self, audio_decoder_bp):
         """Speakers should span 12 columns × 4 rows."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
 
         xs = {spk.tile_position[0] for spk in speakers}
@@ -176,20 +169,19 @@ class TestBuildAudioDecoder:
         for spk in speakers:
             assert spk.instrument_name == "piano"
 
-    def test_circuit_wiring_exists(self):
+    def test_circuit_wiring_exists(self, audio_decoder_bp_str, audio_decoder_bp):
         """The speaker grid should have red-wire connections."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         # Draftsman stores wires as a list of wire connection tuples
         assert len(bp.wires) > 0, "Expected at least one wire connection"
 
         # ── logical-blueprint validation ──────────────────────────
         from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
-        result = validate_blueprint_via_logical(bp_str)
+        result = validate_blueprint_via_logical(audio_decoder_bp_str)
         assert result["errors"] == [], f"Validation errors: {result['errors']}"
         assert result["network_count"] > 0
 
-    def test_lut_cc_values_are_nonzero(self):
+    def test_lut_cc_values_are_nonzero(self, audio_decoder_bp):
         """All lookup CC entries must have non-zero values.
 
         Factorio drops signals with value 0 from the circuit network,
@@ -197,8 +189,7 @@ class TestBuildAudioDecoder:
         The t=0 entry uses value 60 (non-zero) and is matched by the
         match0 DC (sub_tick==0 AND each==60).
         """
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         ccs = _get_entities_by_type(bp, "constant-combinator")
         # LUT CCs are at y=22, cols 0..11; page_port is at (12, 16).
         from factorio_display.audio.player_blueprint import LUT_Y, TICKS_PER_PAGE
@@ -230,30 +221,27 @@ class TestBuildAudioDecoder:
 
     # ── debug lamps ──────────────────────────────────────────────────
 
-    def test_debug_lamps_off_by_default(self):
+    def test_debug_lamps_off_by_default(self, audio_decoder_bp):
         """No debug lamps when debug_lamps=False (default)."""
-        bp_str = build_audio_decoder()
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_bp
         lamps = _get_entities_by_type(bp, "small-lamp")
         assert len(lamps) == 0
 
-    def test_debug_lamps_count(self):
+    def test_debug_lamps_count(self, audio_decoder_debug_bp):
         """48 debug lamps when debug_lamps=True."""
-        bp_str = build_audio_decoder(debug_lamps=True)
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_debug_bp
         lamps = _get_entities_by_type(bp, "small-lamp")
         assert len(lamps) == 48
 
-    def test_debug_lamps_entity_count_includes_lamps(self):
+    def test_debug_lamps_entity_count_includes_lamps(self, audio_decoder_bp, audio_decoder_debug_bp):
         """Total entity count increases by 48 with debug lamps."""
-        bp_no = _parse_bp(build_audio_decoder(debug_lamps=False))
-        bp_yes = _parse_bp(build_audio_decoder(debug_lamps=True))
+        bp_no = audio_decoder_bp
+        bp_yes = audio_decoder_debug_bp
         assert len(bp_yes.entities) == len(bp_no.entities) + 48
 
-    def test_debug_lamps_positions(self):
+    def test_debug_lamps_positions(self, audio_decoder_debug_bp):
         """Debug lamps sit at DEBUG_Y below the speaker grid, same columns."""
-        bp_str = build_audio_decoder(debug_lamps=True)
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_debug_bp
         lamps = _get_entities_by_type(bp, "small-lamp")
 
         xs = {lamp.tile_position[0] for lamp in lamps}
@@ -263,20 +251,18 @@ class TestBuildAudioDecoder:
         assert min(ys) == DEBUG_Y + 0       # lowest debug row
         assert max(ys) == DEBUG_Y + 3       # highest debug row
 
-    def test_debug_lamps_color_mode(self):
+    def test_debug_lamps_color_mode(self, audio_decoder_debug_bp):
         """Debug lamps use color_mode=2 (packed RGB from signal)."""
-        bp_str = build_audio_decoder(debug_lamps=True)
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_debug_bp
         lamps = _get_entities_by_type(bp, "small-lamp")
         for lamp in lamps:
             assert lamp.use_colors is True
             assert lamp.color_mode == 2
             assert lamp.always_on is True
 
-    def test_debug_lamps_signals_match_speakers(self):
+    def test_debug_lamps_signals_match_speakers(self, audio_decoder_debug_bp):
         """Debug lamp rgb_signals match speaker volume_signals (name, quality)."""
-        bp_str = build_audio_decoder(debug_lamps=True)
-        bp = _parse_bp(bp_str)
+        bp = audio_decoder_debug_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
         lamps = _get_entities_by_type(bp, "small-lamp")
 
@@ -293,10 +279,10 @@ class TestBuildAudioDecoder:
         assert lamp_signals == spk_signals
         assert len(lamp_signals) == 48
 
-    def test_debug_lamps_on_red_wire(self):
+    def test_debug_lamps_on_red_wire(self, audio_decoder_bp, audio_decoder_debug_bp):
         """Debug lamps increase red-wire connection count vs no-debug baseline."""
-        bp_no = _parse_bp(build_audio_decoder(debug_lamps=False))
-        bp_yes = _parse_bp(build_audio_decoder(debug_lamps=True))
+        bp_no = audio_decoder_bp
+        bp_yes = audio_decoder_debug_bp
 
         def _count_red_wires(bp: Blueprint) -> int:
             # wires are [entity, color_int, entity, side_int]; color 1 = red
@@ -315,9 +301,9 @@ class TestBuildAudioDecoder:
 class TestMultiRailDecoder:
     """Tests for ``build_multi_rail_decoder``."""
 
-    def test_single_rail_equivalent_to_legacy(self):
+    def test_single_rail_equivalent_to_legacy(self, audio_decoder_bp):
         """Single-rail multi builder produces same entity counts as build_audio_decoder."""
-        bp_legacy = _parse_bp(build_audio_decoder(name="Test"))
+        bp_legacy = audio_decoder_bp
         bp_multi = _parse_bp(build_multi_rail_decoder(
             name="Test", instruments=["piano"],
         ))
@@ -386,9 +372,9 @@ class TestMultiRailDecoder:
         for s in rail1:
             assert s.instrument_name == "drum-kit", f"Rail 1 expected drum-kit, got {s.instrument_name}"
 
-    def test_multi_rail_has_cross_rail_wiring(self):
+    def test_multi_rail_has_cross_rail_wiring(self, audio_decoder_bp):
         """Multi-rail blueprint has more wires than single-rail (cross-rail connections)."""
-        bp_single = _parse_bp(build_audio_decoder())
+        bp_single = audio_decoder_bp
         bp_dual = _parse_bp(build_multi_rail_decoder(
             name="Dual", instruments=["piano", "piano"],
         ))

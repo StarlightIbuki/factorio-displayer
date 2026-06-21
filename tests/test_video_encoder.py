@@ -272,6 +272,7 @@ class TestEncodeFramesChunked:
 # Chunk caching
 # ═══════════════════════════════════════════════════════════════════════
 
+@pytest.mark.xdist_group("chunk-cache")
 class TestChunkCache:
     def test_cache_dir_created(self, sample_frames_12, small_mapping, tmp_path):
         frames, _ = sample_frames_12
