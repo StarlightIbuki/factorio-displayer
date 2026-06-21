@@ -298,17 +298,18 @@ class LogicalBlueprint:
         other: LogicalBlueprint,
         entity_prefix: str = "",
         network_prefix: str = "",
+        port_prefix: str = "",
     ) -> None:
         """Merge *other* into this logical blueprint in-place.
 
-        Entities, networks, and ports from *other* are added.  Entity ids
-        and network ids are prefixed with *entity_prefix* / *network_prefix*
-        respectively (empty string = no prefix).  Duplicate ids after
-        prefixing raise ``ValueError``.
+        Entities, networks, and ports from *other* are added.  Entity ids,
+        network ids, and port names are prefixed with *entity_prefix* /
+        *network_prefix* / *port_prefix* respectively (empty string = no
+        prefix).  Duplicate ids after prefixing raise ``ValueError``.
 
         Ports from *other* are preserved with their (now-prefixed) network
-        ids, and added to this blueprint's ports.  If a port name already
-        exists, it is overwritten.
+        ids and port names, and added to this blueprint's ports.  If a
+        port name already exists, it is overwritten.
         """
         # ── Entities ────────────────────────────────────────────
         for eid, ent in other.entities.items():
@@ -341,9 +342,9 @@ class LogicalBlueprint:
 
         # ── Ports ───────────────────────────────────────────────
         for port_name, net_id in other.input_ports.items():
-            self.input_ports[port_name] = network_prefix + net_id
+            self.input_ports[port_prefix + port_name] = network_prefix + net_id
         for port_name, net_id in other.output_ports.items():
-            self.output_ports[port_name] = network_prefix + net_id
+            self.output_ports[port_prefix + port_name] = network_prefix + net_id
 
     def connect_ports(
         self,

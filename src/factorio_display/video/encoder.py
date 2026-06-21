@@ -270,6 +270,157 @@ def _encode_frames_core(
     return blueprint.to_string()
 
 
+def _encode_frames_logical(
+    kept_frames: list[np.ndarray],
+    tick_ranges: list[tuple[int, int]],
+    output_name: str,
+    deduplicate: bool,
+    mapping_params: dict,
+    clock: str,
+    current_tick: int,
+    label_suffix: str = "",
+) -> "LogicalBlueprint":
+    """Build a LogicalBlueprint from pre-processed frame data.
+
+    Same as :func:`_encode_frames_core` but returns a
+    :class:`~factorio_display.logical_blueprint.LogicalBlueprint`
+    with ``input_ports={"clock": ...}`` and ``output_ports={"data": ...}``.
+    """
+    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity
+
+    mapping = SignalMapping(**mapping_params)
+
+    total_input = len(kept_frames)
+    if total_input == 0:
+        sys.stderr.write("No frames to encode.\n")
+        return LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
+
+    frame_entries = [(f, s, e) for f, (s, e) in zip(kept_frames, tick_ranges)]
+
+    if deduplicate:
+        seen: dict[str, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[str] = []
+        for resized, start, end in frame_entries:
+            h = hashlib.sha256(resized.tobytes()).hexdigest()
+            if h not in seen:
+                seen[h] = (resized, [])
+                order.append(h)
+            seen[h][1].append((start, end))
+        unique_frames = [seen[h] for h in order]
+    else:
+        unique_frames = [(resized, [(start, end)]) for resized, start, end in frame_entries]
+
+    lb = LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
+
+    total = len(unique_frames)
+    cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
+    cols = min(cols, 26)
+    rows = (total + cols - 1) // cols
+
+    dc_grid: dict[tuple[int, int], str] = {}
+    first_dc_id: str | None = None
+    for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
+        idx = gate_num - 1
+        col = idx % cols
+        row = idx // cols
+        dc_id = f"gate_{gate_num}"
+
+        conditions: list[dict] = []
+        for start, end in ranges:
+            if start == end:
+                conditions.append({
+                    "first": clock,
+                    "op": "=",
+                    "constant": start,
+                })
+            else:
+                conditions.append({
+                    "first": clock,
+                    "op": ">=",
+                    "constant": start,
+                })
+                conditions.append({
+                    "first": clock,
+                    "op": "<=",
+                    "constant": end,
+                    "compare_type": "and",
+                })
+
+        outputs: list[dict] = []
+        for (x, y), sig in mapping.iter_pixels():
+            r, g, b = resized[y, x]
+            color_int = (int(r) << 16) | (int(g) << 8) | int(b)
+            if color_int > 0:
+                sig_str = sig["name"]
+                if sig.get("quality") and sig["quality"] != "normal":
+                    sig_str = f"{sig['name']}@{sig['quality']}"
+                outputs.append({
+                    "signal": sig_str,
+                    "copy_count": False,
+                    "constant": color_int,
+                })
+
+        dc = LogicalEntity(
+            dc_id,
+            "decider-combinator",
+            properties={
+                "conditions": conditions,
+                "outputs": outputs,
+            },
+            position=(col, row * 2),
+            direction=2,  # SOUTH
+        )
+        lb.add_entity(dc)
+        dc_grid[(row, col)] = dc_id
+        if first_dc_id is None:
+            first_dc_id = dc_id
+
+    # Snake-grid wiring — all on red (unified signal bus)
+    prev_id: str | None = None
+    first_input_ep: Endpoint | None = None
+    last_output_ep: Endpoint | None = None
+    for r in range(rows):
+        col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+        for c in col_iter:
+            dc_id = dc_grid.get((r, c))
+            if dc_id is None:
+                continue
+            if prev_id is not None:
+                lb.connect("red", Endpoint(prev_id, "input"), Endpoint(dc_id, "input"))
+                lb.connect("red", Endpoint(prev_id, "output"), Endpoint(dc_id, "output"))
+            else:
+                first_input_ep = Endpoint(dc_id, "input")
+            prev_id = dc_id
+            last_output_ep = Endpoint(dc_id, "output")
+
+    # Declare ports
+    if first_input_ep is not None:
+        for net in lb.networks:
+            if net.color == "red" and first_input_ep in net.endpoints:
+                lb.set_input_port("clock", net.network_id)
+                break
+    if last_output_ep is not None:
+        for net in lb.networks:
+            if net.color == "red" and last_output_ep in net.endpoints:
+                lb.set_output_port("data", net.network_id)
+                break
+
+    total_ticks = current_tick - 1
+    total_combinators = len(unique_frames)
+    if deduplicate and total_combinators < total_input:
+        sys.stderr.write(
+            f"\nEncoded {total_combinators} combinators for {total_input} frames "
+            f"({total_input - total_combinators} deduplicated) "
+            f"over {total_ticks} ticks.\n"
+        )
+    else:
+        sys.stderr.write(
+            f"\nEncoded {total_input} frames over {total_ticks} ticks "
+            f"(~{total_ticks / max(1, total_input):.1f} tick(s)/frame).\n"
+        )
+    return lb
+
+
 # ══════════════════════════════════════════════════════════════════════�?
 # Chunk-cache helpers
 # ══════════════════════════════════════════════════════════════════════�?

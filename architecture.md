@@ -25,12 +25,12 @@ speaker window (48 speakers cover `base .. base+47`):
 Active when `--map-drums` is on; drum notes use explicit sound names on a
 dedicated drum rail instead of pitch→signal mapping.
 
-**Global pitch shifting** (`find_optimal_octave_shift`) — per-instrument
-octave shift computed from source MIDI pitches to minimise folding.
-Controlled by `--pitch-shift` / `use_global_shift=True`.
+**Global pitch shifting** (`find_optimal_octave_shift` in `midi_translator.py`) —
+per-instrument octave shift computed from source MIDI pitches to minimise folding.
+Controlled by `--no-global-shift` / `use_global_shift=True`.
 
-**`_pitch_index_to_factorio_note(pitch_idx, midi_base)`** — converts pitch
-index to note name (e.g. `"F3"`, `"C#4"`) using the rail's MIDI base.
+**`_pitch_index_to_factorio_note(pitch_idx, midi_base)`** (in `player_blueprint.py`) —
+converts pitch index to note name (e.g. `"F3"`, `"C#4"`) using the rail's MIDI base.
 
 ### encoder.py
 tick→[48 loudness] → [12 packed] per tick → flat index→value → DC pages
@@ -47,8 +47,8 @@ tick→[48 loudness] → [12 packed] per tick → flat index→value → DC page
 |----------|---------|
 | `encode_audio_memory(tick_data, …)` | Core encoder — tick data → DC pages → blueprint string |
 | `encode_audio_to_logical(tick_data, …)` | Tick data → LogicalBlueprint (no positions) |
-| `encode_audio(midi_file, **kwargs)` | MIDI file → combined player+memory blueprint |
-| `encode_audio_file(path, **kwargs)` | Non-MIDI audio (WAV/FLAC/OGG/MP3) → blueprint |
+| `encode_audio_auto(path, **kwargs)` | Auto-detect format (MIDI/audio) → combined player+memory blueprint |
+| `_encode_audio_file(path, **kwargs)` | Non-MIDI audio (WAV/FLAC/OGG/MP3) → blueprint (private helper) |
 
 #### Embedding API
 
@@ -78,10 +78,9 @@ audio file (WAV/FLAC/OGG/MP3)
 
 CLI parameters:
 - `--activation-threshold` — STFT activation threshold
-- `--midi-activation-threshold` — MIDI extraction threshold
-- `--condense-midi` — condense contiguous MIDI notes
-- `--max-polyphony N` — cap simultaneous notes
-- `--normalize-target N` — target max loudness (default 100)
+- `--midi-threshold` — MIDI extraction threshold
+- `--no-condense` — disable MIDI note condensation
+- `--max-polyphony N` — cap simultaneous notes (0 = unlimited)
 
 #### Encoder input format
 
@@ -121,7 +120,7 @@ Convenience wrapper around `build_multi_rail_decoder(instruments=[instrument])`.
 
 | Y      | Entity           | Purpose                        |
 |--------|------------------|--------------------------------|
-| 22     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
+| 24     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
 | 22     | Lookup CCs       | sub-tick entries (t=0→60)      |
 | 20     | Match DCs        | `each==signal-M → signal=1`    |
 | 18     | Match0 DCs       | `signal-M==0 ∧ each==60 → 1`   |
@@ -645,6 +644,6 @@ mapped — there are no holes or cutouts.
 ### resolve_dimensions
 `resolve_dimensions(source_w, source_h, width=None, height=None)` returns
 `(total_w, total_h)`.  If both are specified, uses them exactly.  If neither
-is specified, returns `(DISPLAY_WIDTH, DISPLAY_HEIGHT)` — the fixed 28×26
-display grid.  If only one is specified, computes the other from the source
-aspect ratio.
+is specified, returns the largest size that fits within
+``DISPLAY_WIDTH × DISPLAY_HEIGHT`` while preserving the source aspect ratio.
+If only one is specified, computes the other from the source aspect ratio.

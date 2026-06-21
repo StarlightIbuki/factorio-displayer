@@ -4,33 +4,23 @@ Provides subcommands to encode media, export the physical display grid,
 export the audio decoder circuitry, and encode MIDI audio files.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
+from pathlib import Path
 
 from .audio.player_blueprint import build_audio_decoder, build_multi_rail_decoder
 from .video.encoder import encode_auto
-# Assuming you have a builder.py containing the logic to build the physical screen
-from .video.player_blueprint import build_display
+from .video.player_blueprint import build_display, build_display_logical
+from .logical_blueprint import LogicalBlueprint, to_draftsman
+from .composer import compose, PortConnection
 
 
 # ── UTF-8 path support on Windows ────────────────────────────────────────
-# Python on Windows decodes sys.argv from the ANSI codepage, which
-# corrupts characters outside the system locale (CJK, emoji, etc.).
-# We recover the original UTF-16 command line via the Windows API.
 
 def _fix_argv_encoding() -> None:
-    """On Windows, replace sys.argv with the true Unicode command line.
-
-    Python on Windows decodes ``sys.argv`` from the ANSI codepage, which
-    corrupts characters that fall outside the system locale (CJK, emoji,
-    etc.).  We use the Windows API to get the original UTF-16 arguments.
-
-    For pip-installed wrapper scripts the Windows command line includes
-    the Python interpreter and the wrapper exe *before* the user args
-    (e.g. ``python.exe script.exe encode path``), while ``sys.argv``
-    starts at the script.  We detect the offset by matching
-    ``sys.argv[0]`` in the API result.
-    """
+    """On Windows, replace sys.argv with the true Unicode command line."""
     if sys.platform != "win32":
         return
     try:
@@ -55,8 +45,6 @@ def _fix_argv_encoding() -> None:
             api_argv = [argv_ptr[i] for i in range(argc.value)]
             kernel32.LocalFree(argv_ptr)
 
-            # ── Align with sys.argv ──────────────────────────────────
-            # sys.argv[0] is the script path; find it in the API result.
             script = sys.argv[0]
             offset = 0
             script_base = _os.path.basename(script)
@@ -65,13 +53,12 @@ def _fix_argv_encoding() -> None:
                     offset = i
                     break
             else:
-                # Fallback: assume leading elements are interpreter + wrapper.
                 offset = len(api_argv) - len(sys.argv)
 
             if offset >= 0:
                 sys.argv = api_argv[offset:]
     except Exception:
-        pass  # Fall back to potentially corrupted sys.argv
+        pass
 
 
 def _is_midi_file(path: str) -> bool:
@@ -83,7 +70,6 @@ _AUDIO_EXTENSIONS = {"wav", "flac", "ogg", "aiff", "aif", "au", "caf", "mp3", "m
 
 
 def _is_audio_file(path: str) -> bool:
-    """Check if a path has a non-MIDI audio file extension."""
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return ext in _AUDIO_EXTENSIONS
 
@@ -93,28 +79,18 @@ def _resolve_display_dims(
     width: int | None = None,
     height: int | None = None,
 ) -> tuple[int, int]:
-    """Probe source dimensions and call :func:`resolve_dimensions` once.
-
-    This is the **single source of truth** for the display size used by
-    the memory bank, lamp grid, and all other sub-blueprints.  Call this
-    before encoding so that every downstream component gets the same
-    ``(resolved_w, resolved_h)``.
-
-    Returns ``(resolved_w, resolved_h)``.
-    """
+    """Probe source dimensions and call resolve_dimensions once."""
     from pathlib import Path
 
     from . import DISPLAY_HEIGHT, DISPLAY_WIDTH
     from .video.encoder import resolve_dimensions
 
-    # Both specified — no probing needed; trust the user
     if width is not None and height is not None:
         return width, height
 
     path = Path(input_path)
     ext = path.suffix.lower()
 
-    # ── Video ──────────────────────────────────────────────────────
     if ext in {".mp4", ".avi", ".mov", ".mkv", ".webm"}:
         import cv2
         from .video.encoder import _videocap_utf8
@@ -125,8 +101,6 @@ def _resolve_display_dims(
             cap.release()
             return resolve_dimensions(source_w, source_h, width=width, height=height)
         cap.release()
-
-    # ── GIF ────────────────────────────────────────────────────────
     elif ext == ".gif":
         try:
             from PIL import Image
@@ -135,8 +109,6 @@ def _resolve_display_dims(
             return resolve_dimensions(source_w, source_h, width=width, height=height)
         except Exception:
             pass
-
-    # ── Still image ────────────────────────────────────────────────
     elif ext in {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}:
         import cv2
         from .video.encoder import _imread_utf8
@@ -144,24 +116,19 @@ def _resolve_display_dims(
         if img is not None:
             source_h, source_w = img.shape[:2]
             return resolve_dimensions(source_w, source_h, width=width, height=height)
-
-    # ── Directory / glob — probe the first match ───────────────────
     elif path.is_dir():
         pngs = sorted(path.glob("*.png"))
         if pngs:
             return _resolve_display_dims(str(pngs[0]), width=width, height=height)
-
     elif "*" in input_path or "?" in input_path:
         matches = sorted(Path().glob(input_path))
         if matches:
             return _resolve_display_dims(str(matches[0]), width=width, height=height)
 
-    # ── Fallback — can't probe, use display defaults ───────────────
     return DISPLAY_WIDTH, DISPLAY_HEIGHT
 
 
 def _add_power_option(parser: argparse.ArgumentParser) -> None:
-    """Add --power option to a subparser."""
     parser.add_argument(
         "--power", type=str, default="substation",
         choices=["small", "medium", "substation", "none"],
@@ -170,7 +137,6 @@ def _add_power_option(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_progress_bar_option(parser: argparse.ArgumentParser) -> None:
-    """Add --progress-bar option to a subparser."""
     parser.add_argument(
         "--progress-bar", action="store_true", default=False,
         help="Attach a progress bar to the all-in-one blueprint.",
@@ -178,7 +144,6 @@ def _add_progress_bar_option(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_cache_option(parser: argparse.ArgumentParser) -> None:
-    """Add --cache / --no-cache option to a subparser."""
     parser.add_argument(
         "--cache", action=argparse.BooleanOptionalAction, default=True,
         help="Cache intermediate logical blueprints for resume support (default: on).",
@@ -186,20 +151,13 @@ def _add_cache_option(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_audio_midi_options(parser: argparse.ArgumentParser) -> None:
-    """Add MIDI→audio translation options to a subparser."""
     g = parser.add_argument_group("MIDI translation")
-    g.add_argument(
-        "--ticks-per-beat", type=int, default=30,
-        help="Game ticks per quarter note (default: 30)",
-    )
-    g.add_argument(
-        "--boost-melody", type=float, default=1.0,
-        help="Melody velocity multiplier (default: 1.0 = off, 1.5 = 50%% boost)",
-    )
-    g.add_argument(
-        "--velocity-scale", type=float, default=1.0,
-        help="Global velocity multiplier (default: 1.0)",
-    )
+    g.add_argument("--ticks-per-beat", type=int, default=30,
+                   help="Game ticks per quarter note (default: 30)")
+    g.add_argument("--boost-melody", type=float, default=1.0,
+                   help="Melody velocity multiplier (default: 1.0 = off, 1.5 = 50%% boost)")
+    g.add_argument("--velocity-scale", type=float, default=1.0,
+                   help="Global velocity multiplier (default: 1.0)")
     g2 = parser.add_argument_group("ADSR envelope")
     g2.add_argument("--attack-ticks", type=int, default=10,
                     help="ADSR attack duration in game ticks (default: 10, 0 = off)")
@@ -224,10 +182,199 @@ def _add_audio_midi_options(parser: argparse.ArgumentParser) -> None:
     g4.add_argument("-o", "--output", type=str, default=None,
                     help="Write blueprint to file instead of stdout")
 
+
+# ── Timer assembly helper ──────────────────────────────────────────────
+
+
+def _debug_dump_toml(lb: LogicalBlueprint, step: str, debug_dir: str) -> None:
+    """Save *lb* as a TOML file under *debug_dir* / ``{step}.toml``."""
+    from pathlib import Path
+    from .logical_blueprint import to_toml
+
+    out_dir = Path(debug_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{step}.toml"
+    path.write_text(to_toml(lb), encoding="utf-8")
+    sys.stderr.write(f"  [debug] wrote {step}.toml\n")
+
+
+def _extract_total_ticks(lb: LogicalBlueprint) -> int:
+    """Find the max tick end from DC conditions in a logical blueprint."""
+    _LE_OPS = frozenset({"<=", "\u2264"})
+    max_end = 0
+    for ent in lb.entities.values():
+        if ent.type != "decider-combinator":
+            continue
+        for cond in ent.properties.get("conditions", []):
+            if cond.get("op") in _LE_OPS and cond.get("first", "").startswith("signal-clock"):
+                val = cond.get("constant", 0)
+                if val > max_end:
+                    max_end = val
+    return max_end
+
+
+def _build_timer_for_memory(memory_lb: LogicalBlueprint) -> LogicalBlueprint:
+    """Build a combined raw+mod timer suitable for a memory blueprint.
+
+    The clock output colour is chosen to match the *memory_lb* clock
+    input port colour (detected by :func:`_declare_memory_ports`):
+
+    - **RED** (video memory): no bridge needed — the mod timer output
+      (wrapping ``clock % N``) is exposed as both ``"clock"`` and
+      ``"sub_tick"`` on RED.  The raw clock stays internal.
+    - **GREEN** (audio memory): a clock bridge AC
+      (``signal-clock + 0 → signal-clock``, RED→GREEN) copies the
+      raw clock to GREEN for the memory DCs.  The mod timer output
+      (sub_tick) stays on RED for the progress bar.
+
+    Exposes two output ports:
+    - ``"clock"`` — clock signal for memory DC gating
+    - ``"sub_tick"`` (red) — sub-tick for progress bar
+    """
+    from .timer import build_raw_timer, build_mod_timer, build_clock_bridge
+    from .composer import _assign_tile_positions, _connect_nets_by_color
+
+    total_ticks = _extract_total_ticks(memory_lb)
+    if total_ticks < 1:
+        total_ticks = 60
+
+    # Determine the clock port colour from the memory blueprint.
+    clock_net_id = memory_lb.input_ports.get("clock")
+    clock_color: str = "red"  # default (video memory)
+    if clock_net_id is not None:
+        for net in memory_lb.networks:
+            if net.network_id == clock_net_id:
+                clock_color = net.color
+                break
+
+    timer = build_raw_timer("Timer")
+    # Raw timer outputs on RED.  Rename "out" → "raw" to avoid collision
+    # with mod timer's "out" during the merge below.
+    timer.output_ports["raw"] = timer.output_ports.pop("out")
+
+    # Mod timer: reads RED clock, outputs sub_tick on RED.
+    mod = build_mod_timer(total_ticks + 1, name="SubTick")
+    _assign_tile_positions(mod, start_x=0, start_y=4)
+    timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
+    timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
+
+    if clock_color == "red":
+        # Video memory — the modded (wrapping) clock drives everything on RED.
+        # Wire raw timer (RED) → mod timer (RED input)
+        _connect_nets_by_color(
+            timer, "red",
+            entity_contains="_inc", port="output",
+            other_entity_contains="mod_sub", other_port="input",
+        )
+        # Both "clock" and "sub_tick" carry the modded (wrapping) clock.
+        # The raw clock stays internal — only the raw AC and kick CC use it.
+        timer.output_ports["clock"] = timer.output_ports["sub_tick"]
+        # Drop the now-unused "raw" port
+        del timer.output_ports["raw"]
+    else:
+        # Audio memory — need RED→GREEN clock bridge.
+        bridge = build_clock_bridge("Clock Bridge")
+        _assign_tile_positions(bridge, start_x=0, start_y=6)
+        timer.merge(bridge, entity_prefix="bridge_", network_prefix="bridge_")
+
+        # Wire raw timer (RED) → bridge (RED input)
+        _connect_nets_by_color(
+            timer, "red",
+            entity_contains="_inc", port="output",
+            other_entity_contains="bridge_clock", other_port="input",
+        )
+        # Wire raw timer (RED) → mod timer (RED input)
+        _connect_nets_by_color(
+            timer, "red",
+            entity_contains="_inc", port="output",
+            other_entity_contains="mod_sub", other_port="input",
+        )
+        # Bridge's "out" port is on GREEN — rename to "clock"
+        timer.output_ports["clock"] = timer.output_ports.pop("out")
+
+    timer.label = "Timer"
+    return timer
+
+
+def _declare_memory_ports(lb: LogicalBlueprint) -> None:
+    """Declare ``clock`` and ``data`` ports on a memory LogicalBlueprint
+    parsed from a draftsman string.
+
+    The clock port colour is determined by inspecting which network the
+    DCs' input side already belongs to (RED for video memory, GREEN for
+    audio memory).  The data port is always RED (DC outputs carry colour
+    data on the unified signal bus).
+
+    When there are no networks (single-frame video with one DC and no
+    wires), networks are created from the DC's endpoints directly.
+    """
+    from .logical_blueprint import Endpoint, Network
+
+    dcs = [(eid, ent) for eid, ent in lb.entities.items()
+           if ent.type == "decider-combinator"]
+    if not dcs:
+        return
+
+    # ── Clock input port — detect actual colour from DC inputs ────
+    clock_net_id: str | None = None
+    clock_color: str = "red"  # default for video memory (all-red bus)
+    for net in lb.networks:
+        for ep in net.endpoints:
+            if ep.port == "input":
+                ent = lb.entities.get(ep.entity_id)
+                if ent is not None and ent.type == "decider-combinator":
+                    clock_net_id = net.network_id
+                    clock_color = net.color
+                    break
+        if clock_net_id is not None:
+            break
+
+    if clock_net_id is None:
+        # No network at all — create a clock network on the default colour
+        dc_id = dcs[0][0]
+        clock_net = Network(
+            network_id=f"{clock_color}_clock",
+            color=clock_color,
+            endpoints=[Endpoint(dc_id, "input")],
+        )
+        lb.add_network(clock_net)
+        clock_net_id = clock_net.network_id
+
+    lb.set_input_port("clock", clock_net_id)
+
+    # ── Data output port (red) ────────────────────────────────────
+    data_net_id: str | None = None
+    for net in lb.networks:
+        if net.color != "red":
+            continue
+        for ep in net.endpoints:
+            if ep.port == "output":
+                ent = lb.entities.get(ep.entity_id)
+                if ent is not None and ent.type == "decider-combinator":
+                    data_net_id = net.network_id
+                    break
+        if data_net_id is not None:
+            break
+
+    if data_net_id is None:
+        # No red network — create one from the first DC's output side
+        dc_id = dcs[0][0]
+        data_net = Network(
+            network_id="red_data",
+            color="red",
+            endpoints=[Endpoint(dc_id, "output")],
+        )
+        lb.add_network(data_net)
+        data_net_id = data_net.network_id
+
+    lb.set_output_port("data", data_net_id)
+
+
+# ── Main CLI ───────────────────────────────────────────────────────────
+
 def main():  # pylint: disable=too-many-locals,too-many-statements
     """Parse CLI arguments and dispatch to the appropriate encoder/builder."""
     _fix_argv_encoding()
-    # Reconfigure stdio for UTF-8 so blueprint strings with Unicode print correctly.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
@@ -249,82 +396,51 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     encode_parser.add_argument("input_path", help="Path to input media file or directory")
     encode_parser.add_argument("--name", default="Animation Data", help="Base name of the blueprint")
     encode_parser.add_argument("--skip", type=int, default=1, help="Read every Nth frame")
-    encode_parser.add_argument(
-        "--fps", type=float, default=0.0,
-        help="Source frame rate (1-60). 0 = auto-detect.",
-    )
-    encode_parser.add_argument(
-        "--adaptive", action="store_true",
-        help="Drop near-duplicate frames.",
-    )
-    encode_parser.add_argument(
-        "--threshold", type=float, default=0.01,
-        help="Similarity cutoff for adaptive mode.",
-    )
-    encode_parser.add_argument(
-        "--deduplicate", action="store_true",
-        help="Share one combinator across identical frames.",
-    )
-    encode_parser.add_argument(
-        "--width", type=int, default=None,
-        help="Override display width (tiles).",
-    )
-    encode_parser.add_argument(
-        "--height", type=int, default=None,
-        help="Override display height (tiles).",
-    )
+    encode_parser.add_argument("--fps", type=float, default=0.0,
+                               help="Source frame rate (1-60). 0 = auto-detect.")
+    encode_parser.add_argument("--adaptive", action="store_true",
+                               help="Drop near-duplicate frames.")
+    encode_parser.add_argument("--threshold", type=float, default=0.01,
+                               help="Similarity cutoff for adaptive mode.")
+    encode_parser.add_argument("--deduplicate", action="store_true",
+                               help="Share one combinator across identical frames.")
+    encode_parser.add_argument("--width", type=int, default=None,
+                               help="Override display width (tiles).")
+    encode_parser.add_argument("--height", type=int, default=None,
+                               help="Override display height (tiles).")
     chunk_g = encode_parser.add_argument_group("Time-chunked generation")
-    chunk_g.add_argument(
-        "--time-chunks", type=int, default=1,
-        help="Split video into N time slices for parallel encoding (default: 1 = off).",
-    )
-    chunk_g.add_argument(
-        "--chunk-workers", type=int, default=None,
-        help="Max parallel worker processes (default: CPU count).",
-    )
-    chunk_g.add_argument(
-        "--output-chunks", type=str, default=None,
-        help="Write individual chunk blueprints to DIR for inspection.",
-    )
-    chunk_g.add_argument(
-        "--deduplicate-cross", action="store_true",
-        help="Deduplicate identical frames across time chunks during merge (slower).",
-    )
+    chunk_g.add_argument("--time-chunks", type=int, default=1,
+                         help="Split video into N time slices for parallel encoding (default: 1 = off).")
+    chunk_g.add_argument("--chunk-workers", type=int, default=None,
+                         help="Max parallel worker processes (default: CPU count).")
+    chunk_g.add_argument("--output-chunks", type=str, default=None,
+                         help="Write individual chunk blueprints to DIR for inspection.")
+    chunk_g.add_argument("--deduplicate-cross", action="store_true",
+                         help="Deduplicate identical frames across time chunks during merge (slower).")
 
-    # Audio-specific
-    encode_parser.add_argument(
-        "--no-audio", action="store_true",
-        help="Disable automatic audio track encoding.",
-    )
-    encode_parser.add_argument(
-        "--no-attach-player", action="store_true",
-        help="Output audio memory pages only, without the player decoder attached.",
-    )
-    encode_parser.add_argument(
-        "--rail-mode", type=str, default="piano",
-        help=(
-            "Multi-rail mode: 'piano' (default, single piano rail), "
-            "'all' (use all detected instruments), "
-            "'auto' or 'auto:0.05' (auto-detect, drop rails below threshold), "
-            "or comma-separated instruments like 'piano,bass,drum'."
-        ),
-    )
-    encode_parser.add_argument(
-        "--instruments", type=str, default=None,
-        help="Deprecated alias for --rail-mode.",
-    )
-    encode_parser.add_argument(
-        "--map-drums", action="store_true",
-        help="Map GM drum notes (24-81) to Factorio drum-kit sounds instead of octave folding.",
-    )
-    encode_parser.add_argument(
-        "--no-global-shift", action="store_true", default=False,
-        help="Disable optimal global octave shift; use only per-note octave folding.",
-    )
+    encode_parser.add_argument("--no-audio", action="store_true",
+                               help="Disable automatic audio track encoding.")
+    encode_parser.add_argument("--no-attach-player", action="store_true",
+                               help="Output audio memory pages only, without the player decoder attached.")
+    encode_parser.add_argument("--rail-mode", type=str, default="piano",
+                               help="Multi-rail mode: 'piano', 'all', 'auto[:threshold]', or comma-separated instruments.")
+    encode_parser.add_argument("--instruments", type=str, default=None,
+                               help="Deprecated alias for --rail-mode.")
+    encode_parser.add_argument("--map-drums", action="store_true",
+                               help="Map GM drum notes (24-81) to Factorio drum-kit sounds.")
+    encode_parser.add_argument("--no-global-shift", action="store_true", default=False,
+                               help="Disable optimal global octave shift.")
     _add_power_option(encode_parser)
     _add_progress_bar_option(encode_parser)
     _add_cache_option(encode_parser)
+    encode_parser.add_argument(
+        "--debug-toml", type=str, default=None, metavar="DIR",
+        help="Dump each intermediate LogicalBlueprint as TOML to DIR for debugging.",
+    )
 
+    # ==================================================================
+    # Subcommand: export-display
+    # ==================================================================
     display_parser = subparsers.add_parser(
         "export-display",
         help="Generate the physical video display grid blueprint."
@@ -334,91 +450,57 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     display_parser.add_argument("--height", type=int, default=None, help="Display height in tiles.")
     _add_power_option(display_parser)
 
+    # ==================================================================
+    # Subcommand: export-audio
+    # ==================================================================
     audio_parser = subparsers.add_parser(
         "export-audio",
         help="Generate the audio decoder blueprint."
     )
     audio_parser.add_argument("--name", default="Audio Decoder", help="Blueprint name")
-    audio_parser.add_argument(
-        "--instrument",
-        default="piano",
-        help="Factorio instrument name (piano, bass, celesta, plucked, drum)"
-    )
-    audio_parser.add_argument(
-        "--instruments", type=str, default=None,
-        help="Comma-separated instrument names for multi-rail (e.g. 'piano,bass').",
-    )
-    audio_parser.add_argument(
-        "--format", type=str, choices=["blueprint", "logical"], default="blueprint",
-        help="Output format: 'blueprint' (draftsman string) or 'logical' (LLM-friendly TOML).",
-    )
+    audio_parser.add_argument("--instrument", default="piano",
+                              help="Factorio instrument name (piano, bass, celesta, plucked, drum)")
+    audio_parser.add_argument("--instruments", type=str, default=None,
+                              help="Comma-separated instrument names for multi-rail (e.g. 'piano,bass').")
+    audio_parser.add_argument("--format", type=str, choices=["blueprint", "logical"], default="blueprint",
+                              help="Output format: 'blueprint' (draftsman string) or 'logical' (LLM-friendly TOML).")
     _add_power_option(audio_parser)
 
     # ==================================================================
-    # Subcommand: encode-audio (MIDI → audio memory blueprint)
+    # Subcommand: encode-audio
     # ==================================================================
     encode_audio_parser = subparsers.add_parser(
         "encode-audio",
         help="Encode audio (.mid/.wav/.flac/.ogg/.mp3) into a Factorio audio memory blueprint."
     )
-    encode_audio_parser.add_argument(
-        "input_path",
-        help="Path to audio file (.mid, .midi, .wav, .flac, .ogg, .mp3, etc.)",
-    )
+    encode_audio_parser.add_argument("input_path", help="Path to audio file")
     _add_audio_midi_options(encode_audio_parser)
-    encode_audio_parser.add_argument(
-        "--no-attach-player", action="store_true",
-        help="Output audio memory pages only, without the player decoder.",
-    )
-    encode_audio_parser.add_argument(
-        "--rail-mode", type=str, default="piano",
-        help=(
-            "Multi-rail mode: 'piano' (default), 'all', 'auto[:threshold]', "
-            "or comma-separated instruments."
-        ),
-    )
-    encode_audio_parser.add_argument(
-        "--instruments", type=str, default=None,
-        help="Deprecated alias for --rail-mode.",
-    )
-    encode_audio_parser.add_argument(
-        "--map-drums", action="store_true", default=True, # Filter drum notes by default to prevent excessive volume stacking
-        help="Map GM drum notes (24-81) to Factorio drum-kit sounds.",
-    )
-    encode_audio_parser.add_argument(
-        "--no-global-shift", action="store_true", default=False,
-        help="Disable optimal global octave shift; use only per-note octave folding.",
-    )
-    encode_audio_parser.add_argument(
-        "--format", type=str, choices=["blueprint", "logical"], default="blueprint",
-        help="Output format: 'blueprint' (draftsman string) or 'logical' (LLM-friendly TOML).",
-    )
+    encode_audio_parser.add_argument("--no-attach-player", action="store_true",
+                                     help="Output audio memory pages only, without the player decoder.")
+    encode_audio_parser.add_argument("--rail-mode", type=str, default="piano",
+                                     help="Multi-rail mode: 'piano', 'all', 'auto[:threshold]', or comma-separated instruments.")
+    encode_audio_parser.add_argument("--instruments", type=str, default=None,
+                                     help="Deprecated alias for --rail-mode.")
+    encode_audio_parser.add_argument("--map-drums", action="store_true", default=True,
+                                     help="Map GM drum notes (24-81) to Factorio drum-kit sounds.")
+    encode_audio_parser.add_argument("--no-global-shift", action="store_true", default=False,
+                                     help="Disable optimal global octave shift.")
+    encode_audio_parser.add_argument("--format", type=str, choices=["blueprint", "logical"], default="blueprint",
+                                     help="Output format: 'blueprint' (draftsman string) or 'logical' (LLM-friendly TOML).")
     _add_power_option(encode_audio_parser)
     _add_progress_bar_option(encode_audio_parser)
     _add_cache_option(encode_audio_parser)
+    encode_audio_parser.add_argument(
+        "--debug-toml", type=str, default=None, metavar="DIR",
+        help="Dump each intermediate LogicalBlueprint as TOML to DIR for debugging.",
+    )
 
-    # Audio-file-specific options (WAV/FLAC/OGG/MP3)
     g5 = encode_audio_parser.add_argument_group("Audio file encoding (non-MIDI)")
-    g5.add_argument(
-        "--output-midi", type=str, default=None,
-        help="Export a .mid file from the encoded audio (before octave folding).",
-    )
-    g5.add_argument(
-        "--activation-threshold", type=float, default=0.0,
-        help="STFT magnitude threshold 0.0–1.0 (default: 0.0 = off).",
-    )
-    g5.add_argument(
-        "--midi-threshold", type=float, default=0.05,
-        help="MIDI note activation threshold 0.0–1.0 (default: 0.05).",
-    )
-    g5.add_argument(
-        "--no-condense", action="store_true",
-        help="Don't condense contiguous MIDI notes.",
-    )
-    g5.add_argument(
-        "--max-polyphony", type=int, default=0,
-        help="Max simultaneous MIDI notes per tick (0 = unlimited).",
-    )
+    g5.add_argument("--output-midi", type=str, default=None)
+    g5.add_argument("--activation-threshold", type=float, default=0.0)
+    g5.add_argument("--midi-threshold", type=float, default=0.05)
+    g5.add_argument("--no-condense", action="store_true")
+    g5.add_argument("--max-polyphony", type=int, default=0)
 
     # ==================================================================
     # Subcommand: export-logical
@@ -428,14 +510,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         help="Export the audio decoder as a logical blueprint (LLM-friendly TOML).",
     )
     export_logical_parser.add_argument("--name", default="Audio Decoder", help="Blueprint name")
-    export_logical_parser.add_argument(
-        "--instrument", default="piano",
-        help="Factorio instrument name (piano, bass, celesta, plucked, drum)",
-    )
-    export_logical_parser.add_argument(
-        "-o", "--output", type=str, default=None,
-        help="Write logical blueprint TOML to file instead of stdout.",
-    )
+    export_logical_parser.add_argument("--instrument", default="piano",
+                                       help="Factorio instrument name")
+    export_logical_parser.add_argument("-o", "--output", type=str, default=None,
+                                       help="Write logical blueprint TOML to file instead of stdout.")
 
     args = parser.parse_args()
 
@@ -448,13 +526,13 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         use_progress = getattr(args, "progress_bar", False)
         use_cache = getattr(args, "cache", False)
 
-        # If input is an audio file, route to audio pipeline
+        # ── Audio file routing ──────────────────────────────────────
         if _is_midi_file(args.input_path) or _is_audio_file(args.input_path):
             sys.stderr.write(f"Detected audio file, routing to audio encoder: {args.input_path}\n")
             from .audio.encoder import encode_audio_auto
 
             rail_mode = args.rail_mode
-            if args.instruments:  # deprecated alias
+            if args.instruments:
                 rail_mode = args.instruments
 
             midi_kwargs: dict[str, object] = {
@@ -465,30 +543,75 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             }
 
             if power_type is not None:
-                # All-in-one audio mode: encode → compose with timer + progress + power.
-                # Don't attach player — composer handles layout separately.
                 midi_kwargs["attach_player"] = False
                 audio_bp_str = encode_audio_auto(args.input_path, **midi_kwargs)
                 if not audio_bp_str:
                     return
-                result_bp = _compose_audio_all_in_one(
-                    audio_bp_str, args.name, power_type, use_progress, use_cache,
+                # Convert to LogicalBlueprint for composition
+                from draftsman.blueprintable import Blueprint
+                from .logical_blueprint import from_draftsman
+
+                debug_dir = getattr(args, "debug_toml", None)
+
+                audio_lb = from_draftsman(Blueprint.from_string(audio_bp_str))
+                audio_lb.label = f"Audio Memory: {args.name}"
+                _declare_memory_ports(audio_lb)
+                if debug_dir:
+                    _debug_dump_toml(audio_lb, "01_audio_memory", debug_dir)
+
+                components: list[LogicalBlueprint] = []
+                connections: list[PortConnection] = []
+
+                # Timer
+                timer = _build_timer_for_memory(audio_lb)
+                components.append(timer)
+                if debug_dir:
+                    _debug_dump_toml(timer, "02_timer", debug_dir)
+                connections.append(PortConnection("Timer", "clock", audio_lb.label, "clock"))
+
+                # Progress bar
+                if use_progress:
+                    total_ticks = _extract_total_ticks(audio_lb)
+                    if total_ticks < 1:
+                        total_ticks = 60
+                    from .progress_bar import build_progress_bar
+                    pb = build_progress_bar("Progress", length=10,
+                                            signal_name="signal-clock", max_value=total_ticks)
+                    components.append(pb)
+                    if debug_dir:
+                        _debug_dump_toml(pb, "03_progress", debug_dir)
+                    connections.append(PortConnection("Timer", "sub_tick", "Progress", "in"))
+
+                # Audio memory
+                components.append(audio_lb)
+                # Audio memory needs clock input, provides data output
+                connections.append(PortConnection("Timer", "clock", audio_lb.label, "clock"))
+
+                result = compose(
+                    components=components,
+                    connections=connections,
+                    output_name=args.name,
+                    pole_type=power_type,
+                    use_cache=use_cache,
+                    cache_key_parts=("audio", args.name),
                 )
-                sys.stdout.write(result_bp + "\n")
+                if debug_dir:
+                    _debug_dump_toml(result, "04_merged", debug_dir)
+                sys.stdout.write(to_draftsman(result).to_string() + "\n")
             else:
                 audio_bp = encode_audio_auto(args.input_path, **midi_kwargs)
                 if audio_bp:
                     sys.stdout.write(audio_bp + "\n")
             return
 
+        # ── Video routing ───────────────────────────────────────────
         sys.stderr.write(f"Encoding video data from {args.input_path}...\n")
 
-        # ── Resolve display dimensions ONCE — single source of truth ──
         resolved_w, resolved_h = _resolve_display_dims(
             args.input_path, width=args.width, height=args.height,
         )
 
-        video_bp = encode_auto(
+        video_bp_str = encode_auto(
             args.input_path,
             output_name=args.name,
             fps_skip=args.skip,
@@ -505,20 +628,75 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         )
 
         if power_type is not None:
-            # All-in-one video mode
-            result_bp = _compose_video_all_in_one(
-                video_bp, args.name, power_type, use_progress, use_cache,
-                width=resolved_w, height=resolved_h,
+            # ── All-in-one video composition ────────────────────
+            from draftsman.blueprintable import Blueprint
+            from .logical_blueprint import from_draftsman
+
+            debug_dir = getattr(args, "debug_toml", None)
+
+            video_lb = from_draftsman(Blueprint.from_string(video_bp_str))
+            video_lb.label = f"Video Memory: {args.name}"
+            _declare_memory_ports(video_lb)
+            if debug_dir:
+                _debug_dump_toml(video_lb, "01_video_memory", debug_dir)
+
+            display_lb = build_display_logical(
+                name="Display", width=resolved_w, height=resolved_h,
             )
-            sys.stdout.write(result_bp + "\n")
+            if debug_dir:
+                _debug_dump_toml(display_lb, "02_display", debug_dir)
+
+            components: list[LogicalBlueprint] = []
+            connections: list[PortConnection] = []
+
+            # Timer
+            timer = _build_timer_for_memory(video_lb)
+            components.append(timer)
+            if debug_dir:
+                _debug_dump_toml(timer, "03_timer", debug_dir)
+
+            # Video memory
+            components.append(video_lb)
+
+            # Display
+            components.append(display_lb)
+
+            # Progress bar
+            if use_progress:
+                total_ticks = _extract_total_ticks(video_lb)
+                if total_ticks < 1:
+                    total_ticks = 60
+                from .progress_bar import build_progress_bar
+                pb = build_progress_bar("Progress", length=10,
+                                        signal_name="signal-clock", max_value=total_ticks)
+                components.append(pb)
+                if debug_dir:
+                    _debug_dump_toml(pb, "04_progress", debug_dir)
+
+            # Connections
+            connections.append(PortConnection("Timer", "clock", video_lb.label, "clock"))
+            connections.append(PortConnection(video_lb.label, "data", "Display", "data"))
+            if use_progress:
+                connections.append(PortConnection("Timer", "sub_tick", "Progress", "in"))
+
+            result = compose(
+                components=components,
+                connections=connections,
+                output_name=args.name,
+                pole_type=power_type,
+                use_cache=use_cache,
+                cache_key_parts=("video", args.name, f"{resolved_w}x{resolved_h}"),
+            )
+            if debug_dir:
+                _debug_dump_toml(result, "05_merged", debug_dir)
+            sys.stdout.write(to_draftsman(result).to_string() + "\n")
         else:
-            # Output ONLY the blueprint string
-            sys.stdout.write(video_bp + "\n")
+            sys.stdout.write(video_bp_str + "\n")
 
         # Hooked Audio Pipeline
         if not args.no_audio and _is_midi_file(args.input_path):
             sys.stderr.write("\n")
-            from .audio.encoder import encode_audio_auto  # pylint: disable=import-outside-toplevel
+            from .audio.encoder import encode_audio_auto
             audio_bp = encode_audio_auto(args.input_path)
             if audio_bp:
                 sys.stdout.write(audio_bp + "\n")
@@ -530,10 +708,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         use_progress = getattr(args, "progress_bar", False)
         use_cache = getattr(args, "cache", False)
 
-        from .audio.encoder import encode_audio_auto  # pylint: disable=import-outside-toplevel
+        from .audio.encoder import encode_audio_auto
 
         rail_mode = args.rail_mode
-        if args.instruments:  # deprecated alias
+        if args.instruments:
             rail_mode = args.instruments
 
         midi_kwargs: dict[str, object] = {
@@ -553,7 +731,6 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             "map_drums": args.map_drums,
             "rail_mode": rail_mode,
             "use_global_shift": not args.no_global_shift,
-            # Audio-file encoding kwargs
             "output_midi": getattr(args, "output_midi", None),
             "activation_threshold": getattr(args, "activation_threshold", 0.0),
             "midi_activation_threshold": getattr(args, "midi_threshold", 0.05),
@@ -562,13 +739,12 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         }
 
         if getattr(args, "format", "blueprint") == "logical" and _is_midi_file(args.input_path):
-            # Encode to logical TOML (MIDI only)
-            from . import SIGNAL_POOL, QUALITIES  # pylint: disable=import-outside-toplevel
-            from .logical_blueprint import to_toml  # pylint: disable=import-outside-toplevel
-            from .audio.midi_translator import midi_to_tick_data  # pylint: disable=import-outside-toplevel
-            from .audio.encoder import encode_audio_to_logical  # pylint: disable=import-outside-toplevel
-            from .audio.player_blueprint import build_audio_decoder_logical  # pylint: disable=import-outside-toplevel
-            import mido  # pylint: disable=import-outside-toplevel
+            from . import SIGNAL_POOL, QUALITIES
+            from .logical_blueprint import to_toml
+            from .audio.midi_translator import midi_to_tick_data
+            from .audio.encoder import encode_audio_to_logical
+            from .audio.player_blueprint import build_audio_decoder_logical
+            import mido
 
             mid = mido.MidiFile(args.input_path)
             td_kwargs = {k: v for k, v in midi_kwargs.items()
@@ -586,7 +762,6 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                     instrument=rail_mode.split(",")[0].strip(),
                     clock_signal=CLOCK_SIGNAL,
                 )
-                # Merge: add player entities and networks to the memory LB
                 for ent in player_lb.entities.values():
                     if ent.entity_id not in lb.entities:
                         lb.add_entity(ent)
@@ -598,9 +773,52 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             output = audio_bp + "\n"
 
             if power_type is not None and output.strip():
-                output = _compose_audio_all_in_one(
-                    audio_bp, args.name, power_type, use_progress, use_cache,
+                from draftsman.blueprintable import Blueprint
+                from .logical_blueprint import from_draftsman
+
+                debug_dir = getattr(args, "debug_toml", None)
+
+                audio_lb = from_draftsman(Blueprint.from_string(audio_bp))
+                audio_lb.label = f"Audio Memory: {args.name}"
+                _declare_memory_ports(audio_lb)
+                if debug_dir:
+                    _debug_dump_toml(audio_lb, "01_audio_memory", debug_dir)
+
+                components: list[LogicalBlueprint] = []
+                connections: list[PortConnection] = []
+
+                timer = _build_timer_for_memory(audio_lb)
+                components.append(timer)
+                if debug_dir:
+                    _debug_dump_toml(timer, "02_timer", debug_dir)
+                connections.append(PortConnection("Timer", "clock", audio_lb.label, "clock"))
+
+                if use_progress:
+                    total_ticks = _extract_total_ticks(audio_lb)
+                    if total_ticks < 1:
+                        total_ticks = 60
+                    from .progress_bar import build_progress_bar
+                    pb = build_progress_bar("Progress", length=10,
+                                            signal_name="signal-clock", max_value=total_ticks)
+                    components.append(pb)
+                    if debug_dir:
+                        _debug_dump_toml(pb, "03_progress", debug_dir)
+                    connections.append(PortConnection("Timer", "sub_tick", "Progress", "in"))
+
+                components.append(audio_lb)
+                connections.append(PortConnection("Timer", "clock", audio_lb.label, "clock"))
+
+                result = compose(
+                    components=components,
+                    connections=connections,
+                    output_name=args.name,
+                    pole_type=power_type,
+                    use_cache=use_cache,
+                    cache_key_parts=("audio", args.name),
                 )
+                if debug_dir:
+                    _debug_dump_toml(result, "04_merged", debug_dir)
+                output = to_draftsman(result).to_string() + "\n"
 
         if output:
             if args.output:
@@ -627,12 +845,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             instruments = [args.instrument]
 
         if getattr(args, "format", "blueprint") == "logical":
-            # Single-rail logical export
             from .audio.player_blueprint import build_audio_decoder_logical
             from .logical_blueprint import to_toml
             sys.stderr.write(
-                f"Building logical audio decoder "
-                f"(Instrument: {instruments[0]})...\n"
+                f"Building logical audio decoder (Instrument: {instruments[0]})...\n"
             )
             lb = build_audio_decoder_logical(
                 name=args.name,
@@ -642,8 +858,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             sys.stdout.write(to_toml(lb))
         else:
             sys.stderr.write(
-                f"Building audio decoder blueprint "
-                f"(Instruments: {', '.join(instruments)})...\n"
+                f"Building audio decoder blueprint (Instruments: {', '.join(instruments)})...\n"
             )
             audio_bp = build_multi_rail_decoder(
                 name=args.name,
@@ -656,8 +871,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         from .audio.player_blueprint import build_audio_decoder_logical
         from .logical_blueprint import to_toml
         sys.stderr.write(
-            f"Building logical audio decoder "
-            f"(Instrument: {args.instrument})...\n"
+            f"Building logical audio decoder (Instrument: {args.instrument})...\n"
         )
         lb = build_audio_decoder_logical(
             name=args.name,
@@ -671,152 +885,6 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             sys.stderr.write(f"Logical blueprint written to: {args.output}\n")
         else:
             sys.stdout.write(toml_str)
-
-
-# ── All-in-one composition helpers ──────────────────────────────────────
-
-
-def _extract_total_ticks(lb: "LogicalBlueprint") -> int:
-    """Find the max tick end from DC conditions in a logical blueprint.
-
-    Scans all decider combinators for ``clock >= start AND clock <= end``
-    conditions and returns the highest *end* value (or 0 if none found).
-
-    Handles both ASCII (``<=``) and Unicode (``≤``) comparators produced
-    by different draftsman versions / parse paths.
-    """
-    _LE_OPS = frozenset({"<=", "\u2264"})  # <= and ≤
-    max_end = 0
-    for ent in lb.entities.values():
-        if ent.type != "decider-combinator":
-            continue
-        for cond in ent.properties.get("conditions", []):
-            if cond.get("op") in _LE_OPS and cond.get("first", "").startswith("signal-clock"):
-                val = cond.get("constant", 0)
-                if val > max_end:
-                    max_end = val
-    return max_end
-
-
-def _compose_audio_all_in_one(
-    audio_bp_str: str,
-    name: str,
-    power_type: str,
-    use_progress: bool,
-    use_cache: bool,
-) -> str:
-    """Wrap an audio-only memory blueprint into an all-in-one."""
-    from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
-    from .logical_blueprint import from_draftsman, to_draftsman  # pylint: disable=import-outside-toplevel
-    from .composer import compose_all_in_one, _assign_tile_positions, _connect_nets_by_color  # pylint: disable=import-outside-toplevel
-    from .timer import build_raw_timer, build_mod_timer  # pylint: disable=import-outside-toplevel
-    from .progress_bar import build_progress_bar  # pylint: disable=import-outside-toplevel
-
-    sys.stderr.write("Composing all-in-one audio blueprint...\n")
-    bp = Blueprint.from_string(audio_bp_str)
-    audio_lb = from_draftsman(bp)
-
-    # Extract total tick count for mod interval
-    total_ticks = _extract_total_ticks(audio_lb)
-    if total_ticks < 1:
-        total_ticks = 60  # fallback
-
-    # Timer assembly: raw (RED self-loop) → mod (RED→RED signal-clock)
-    timer = build_raw_timer("Clock")
-    mod = build_mod_timer(total_ticks + 1, name="SubTick")
-    _assign_tile_positions(mod, start_x=0, start_y=4)
-    timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
-    _connect_nets_by_color(
-        timer, "red",
-        entity_contains="clock_", port="output",
-        other_entity_contains="mod_sub", other_port="input",
-    )
-
-    progress = None
-    if use_progress:
-        progress = build_progress_bar(
-            "Progress", length=10, signal_name="signal-clock",
-            max_value=total_ticks,
-        )
-
-    result = compose_all_in_one(
-        audio_memory_lb=audio_lb,
-        timer_lb=timer,
-        progress_bar_lb=progress,
-        pole_type=power_type,
-        output_name=name,
-        use_cache=use_cache,
-        cache_key_parts=("audio", name),
-    )
-    bp_out = to_draftsman(result)
-    return bp_out.to_string()
-
-
-def _compose_video_all_in_one(
-    video_bp_str: str,
-    name: str,
-    power_type: str,
-    use_progress: bool,
-    use_cache: bool,
-    width: int | None = None,
-    height: int | None = None,
-) -> str:
-    """Wrap a video memory blueprint into an all-in-one."""
-    from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
-    from . import DISPLAY_WIDTH, DISPLAY_HEIGHT  # pylint: disable=import-outside-toplevel
-    from .logical_blueprint import from_draftsman, to_draftsman  # pylint: disable=import-outside-toplevel
-    from .composer import compose_all_in_one, _assign_tile_positions, _connect_nets_by_color  # pylint: disable=import-outside-toplevel
-    from .timer import build_raw_timer, build_mod_timer  # pylint: disable=import-outside-toplevel
-    from .progress_bar import build_progress_bar  # pylint: disable=import-outside-toplevel
-    from .video.player_blueprint import build_display  # pylint: disable=import-outside-toplevel
-
-    sys.stderr.write("Composing all-in-one video blueprint...\n")
-    w = width if width is not None else DISPLAY_WIDTH
-    h = height if height is not None else DISPLAY_HEIGHT
-
-    bp = Blueprint.from_string(video_bp_str)
-    video_lb = from_draftsman(bp)
-
-    # Extract total tick count from the encoded DCs to use as mod interval
-    total_ticks = _extract_total_ticks(video_lb)
-    if total_ticks < 1:
-        total_ticks = 60  # fallback
-
-    display_bp_str = build_display(name="Display", width=w, height=h)
-    display_bp = Blueprint.from_string(display_bp_str)
-    display_lb = from_draftsman(display_bp)
-
-    # Timer assembly: raw (RED self-loop) → mod (RED→RED signal-clock)
-    timer = build_raw_timer("Clock")
-    mod = build_mod_timer(total_ticks + 1, name="SubTick")
-    _assign_tile_positions(mod, start_x=0, start_y=4)
-    timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
-    # Wire: raw output (RED) → mod input (RED)
-    _connect_nets_by_color(
-        timer, "red",
-        entity_contains="clock_", port="output",
-        other_entity_contains="mod_sub", other_port="input",
-    )
-
-    progress = None
-    if use_progress:
-        progress = build_progress_bar(
-            "Progress", length=10, signal_name="signal-clock",
-            max_value=total_ticks,
-        )
-
-    result = compose_all_in_one(
-        display_lb=display_lb,
-        video_memory_lb=video_lb,
-        timer_lb=timer,
-        progress_bar_lb=progress,
-        pole_type=power_type,
-        output_name=name,
-        use_cache=use_cache,
-        cache_key_parts=("video", name, f"{w}x{h}"),
-    )
-    bp_out = to_draftsman(result)
-    return bp_out.to_string()
 
 
 if __name__ == "__main__":

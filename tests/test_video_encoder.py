@@ -670,11 +670,16 @@ class TestSmokeEncodeFrames:
 
     # ── neither specified ─────────────────────────────────────────────
 
-    def test_neither_specified_returns_default(self):
+    def test_neither_specified_fits_display_bounds(self):
+        """When neither width nor height is given, the result fits within
+        DISPLAY_WIDTH × DISPLAY_HEIGHT while preserving the source aspect ratio."""
         from factorio_display import DISPLAY_WIDTH, DISPLAY_HEIGHT
         w, h = resolve_dimensions(1920, 1080)
         assert w == DISPLAY_WIDTH
-        assert h == DISPLAY_HEIGHT
+        # 28 * 1080 / 1920 = 15.75 → 16 (fits within DISPLAY_HEIGHT=26)
+        assert h == 16
+        assert w <= DISPLAY_WIDTH
+        assert h <= DISPLAY_HEIGHT
 
     # ── edge cases ────────────────────────────────────────────────────
 

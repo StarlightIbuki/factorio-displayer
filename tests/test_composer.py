@@ -17,8 +17,9 @@ from factorio_display.logical_blueprint import (
     _iter_connections,
 )
 from factorio_display.progress_bar import build_progress_bar
-from factorio_display.composer import compose_all_in_one, Composer
+from factorio_display.composer import compose_all_in_one, Composer, _layout_components, _validate_network_reachability
 from factorio_display.timer import build_raw_timer, build_mod_timer, build_clock_bridge
+from factorio_display.cli import _declare_memory_ports, _build_timer_for_memory, _extract_total_ticks
 
 
 class TestProgressBar:
@@ -532,3 +533,294 @@ class TestCircuitTopology:
                 f"entities: {len(reachable)}/{len(ep_entities)} reachable\n"
                 f"  unreachable: {ep_entities - reachable}"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Memory port detection & timer clock colour tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _make_memory_lb(clock_color: str = "red") -> LogicalBlueprint:
+    """Create a minimal LogicalBlueprint simulating a memory blueprint.
+
+    Contains one decider combinator whose input/output are on *clock_color*
+    networks (matching how video/audio encoders wire DCs).
+    """
+    lb = LogicalBlueprint(label="Test Memory")
+    dc = LogicalEntity(
+        "dc_0", "decider-combinator",
+        properties={
+            "conditions": [
+                {"first": "signal-clock", "op": ">=", "constant": 0},
+                {"first": "signal-clock", "op": "<=", "constant": 59},
+            ],
+            "outputs": [],
+        },
+        position=(0, 0),
+    )
+    lb.add_entity(dc)
+
+    # Both input and output on the same colour (video=red, audio=green)
+    lb.connect(clock_color, Endpoint("dc_0", "input"), Endpoint("dc_0", "output"))
+    return lb
+
+
+class TestDeclareMemoryPorts:
+    """Tests for _declare_memory_ports — clock port colour detection."""
+
+    def test_video_memory_clock_is_red(self):
+        """Video memory DCs are on RED → clock port should be RED."""
+        lb = _make_memory_lb("red")
+        _declare_memory_ports(lb)
+        assert "clock" in lb.input_ports
+        clock_net_id = lb.input_ports["clock"]
+        clock_net = next(n for n in lb.networks if n.network_id == clock_net_id)
+        assert clock_net.color == "red", (
+            f"Expected RED clock port for video memory, got {clock_net.color}"
+        )
+
+    def test_audio_memory_clock_is_green(self):
+        """Audio memory DCs are on GREEN → clock port should be GREEN."""
+        lb = _make_memory_lb("green")
+        _declare_memory_ports(lb)
+        assert "clock" in lb.input_ports
+        clock_net_id = lb.input_ports["clock"]
+        clock_net = next(n for n in lb.networks if n.network_id == clock_net_id)
+        assert clock_net.color == "green", (
+            f"Expected GREEN clock port for audio memory, got {clock_net.color}"
+        )
+
+    def test_data_port_is_red(self):
+        """Data output port is always RED regardless of clock colour."""
+        for color in ("red", "green"):
+            lb = _make_memory_lb(color)
+            _declare_memory_ports(lb)
+            assert "data" in lb.output_ports
+            data_net_id = lb.output_ports["data"]
+            data_net = next(n for n in lb.networks if n.network_id == data_net_id)
+            assert data_net.color == "red"
+
+
+class TestBuildTimerForMemory:
+    """Tests for _build_timer_for_memory — conditional clock bridge."""
+
+    def test_no_bridge_for_red_clock(self):
+        """When memory clock is RED, timer should NOT include a +0 bridge,
+        and the modded (wrapping) clock should drive the 'clock' port."""
+        mem_lb = _make_memory_lb("red")
+        _declare_memory_ports(mem_lb)
+        timer = _build_timer_for_memory(mem_lb)
+
+        # The timer should NOT have any entity with operation="+" and second_operand=0
+        bridge_entities = [
+            eid for eid, ent in timer.entities.items()
+            if (ent.type == "arithmetic-combinator"
+                and ent.properties.get("operation") == "+"
+                and ent.properties.get("second_operand") == 0)
+        ]
+        assert len(bridge_entities) == 0, (
+            f"RED clock should not need a +0 bridge, found: {bridge_entities}"
+        )
+
+        # Clock and sub_tick should point to the SAME network (modded clock)
+        assert "clock" in timer.output_ports
+        assert "sub_tick" in timer.output_ports
+        assert timer.output_ports["clock"] == timer.output_ports["sub_tick"], (
+            "Clock and sub_tick should share the same modded-clock network"
+        )
+
+        # "raw" port should be absent (raw clock is internal)
+        assert "raw" not in timer.output_ports, (
+            "Raw port should be dropped — raw clock stays internal"
+        )
+
+        # Clock output port should be RED
+        clock_net_id = timer.output_ports["clock"]
+        clock_net = next(n for n in timer.networks if n.network_id == clock_net_id)
+        assert clock_net.color == "red", (
+            f"Clock port should be RED for video, got {clock_net.color}"
+        )
+
+        # The clock network should contain the mod AC output (not raw AC output)
+        mod_out = [ep for ep in clock_net.endpoints
+                   if "mod_sub" in ep.entity_id and ep.port == "output"]
+        assert len(mod_out) >= 1, (
+            "Clock network should include mod AC output endpoint"
+        )
+
+    def test_bridge_for_green_clock(self):
+        """When memory clock is GREEN, timer MUST include a +0 bridge (RED→GREEN)."""
+        mem_lb = _make_memory_lb("green")
+        _declare_memory_ports(mem_lb)
+        timer = _build_timer_for_memory(mem_lb)
+
+        # The timer MUST have the bridge entity
+        bridge_entities = [
+            eid for eid, ent in timer.entities.items()
+            if (ent.type == "arithmetic-combinator"
+                and ent.properties.get("operation") == "+"
+                and ent.properties.get("second_operand") == 0)
+        ]
+        assert len(bridge_entities) == 1, (
+            f"GREEN clock needs exactly one +0 bridge, found: {bridge_entities}"
+        )
+
+        # Clock output port should be GREEN
+        assert "clock" in timer.output_ports
+        clock_net_id = timer.output_ports["clock"]
+        clock_net = next(n for n in timer.networks if n.network_id == clock_net_id)
+        assert clock_net.color == "green", (
+            f"Clock port should be GREEN for audio, got {clock_net.color}"
+        )
+
+    def test_sub_tick_port_always_red(self):
+        """Sub-tick output should always be RED regardless of clock colour."""
+        for color in ("red", "green"):
+            mem_lb = _make_memory_lb(color)
+            _declare_memory_ports(mem_lb)
+            timer = _build_timer_for_memory(mem_lb)
+
+            assert "sub_tick" in timer.output_ports
+            st_net_id = timer.output_ports["sub_tick"]
+            st_net = next(n for n in timer.networks if n.network_id == st_net_id)
+            assert st_net.color == "red", (
+                f"Sub-tick should be RED, got {st_net.color} for {color} clock"
+            )
+
+    def test_timer_has_raw_incrementer(self):
+        """Timer should always contain the raw clock incrementer AC."""
+        mem_lb = _make_memory_lb("red")
+        _declare_memory_ports(mem_lb)
+        timer = _build_timer_for_memory(mem_lb)
+
+        inc_ac = [
+            ent for ent in timer.entities.values()
+            if (ent.type == "arithmetic-combinator"
+                and ent.properties.get("operation") == "+"
+                and ent.properties.get("second_operand") == 1)
+        ]
+        assert len(inc_ac) >= 1, "Timer missing raw incrementer (signal+1→signal)"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Layout ordering & reachability warning tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _make_positioned_lb(label: str, prefix: str, y: int) -> LogicalBlueprint:
+    """Create a minimal positioned LogicalBlueprint for layout testing."""
+    lb = LogicalBlueprint(label=label)
+    ent = LogicalEntity(
+        f"{prefix}ent", "arithmetic-combinator",
+        properties={"first_operand": "signal-A", "operation": "+",
+                     "second_operand": 1, "output_signal": "signal-A"},
+        position=(0, y),
+    )
+    lb.add_entity(ent)
+    # Add an output port for connection testing
+    net = Network(network_id="red_0", color="red",
+                  endpoints=[Endpoint(ent.entity_id, "output")])
+    lb.add_network(net)
+    lb.set_output_port("out", "red_0")
+    return lb
+
+
+class TestLayoutOrdering:
+    """Tests for _layout_components — smart ordering via connections."""
+
+    def test_connected_components_placed_adjacent(self):
+        """Components sharing a port connection should be adjacent in layout."""
+        from factorio_display.composer import PortConnection
+        from factorio_display.logical_blueprint import LogicalBlueprint
+
+        merged = LogicalBlueprint(label="Test")
+
+        # Create three components with distinct prefixes
+        comp_a = _make_positioned_lb("CompA", "a_", 0)
+        comp_b = _make_positioned_lb("CompB", "b_", 0)
+        comp_c = _make_positioned_lb("CompC", "c_", 0)
+
+        prefixes = {"CompA": "a_", "CompB": "b_", "CompC": "c_"}
+
+        # Merge all into 'merged' (entity_prefix doubles the prefix)
+        merged.merge(comp_a, entity_prefix="a_", network_prefix="a_")
+        merged.merge(comp_b, entity_prefix="b_", network_prefix="b_")
+        merged.merge(comp_c, entity_prefix="c_", network_prefix="c_")
+
+        # Only connect A→B (C is isolated)
+        connections = [PortConnection("CompA", "out", "CompB", "out")]
+
+        _layout_components(merged, prefixes, connections)
+
+        # Get positions after layout (entity IDs are double-prefixed)
+        pos_a = merged.entities["a_a_ent"].position
+        pos_b = merged.entities["b_b_ent"].position
+        pos_c = merged.entities["c_c_ent"].position
+
+        # A and B should be adjacent (small y-difference), C further away
+        assert pos_a is not None and pos_b is not None and pos_c is not None
+        dist_ab = abs(pos_a[1] - pos_b[1])
+        dist_ac = abs(pos_a[1] - pos_c[1])
+        dist_bc = abs(pos_b[1] - pos_c[1])
+
+        assert dist_ab <= dist_ac, (
+            f"Connected A-B should be closer than A-C: AB={dist_ab}, AC={dist_ac}"
+        )
+        assert dist_ab <= dist_bc, (
+            f"Connected A-B should be closer than B-C: AB={dist_ab}, BC={dist_bc}"
+        )
+
+
+class TestReachabilityWarning:
+    """Tests for _validate_network_reachability — distance warnings."""
+
+    def test_no_warning_when_all_reachable(self, capsys):
+        """No warning when all endpoints are within max_distance."""
+        lb = LogicalBlueprint(label="Test")
+        e1 = LogicalEntity("e1", "arithmetic-combinator", position=(0, 0))
+        e2 = LogicalEntity("e2", "arithmetic-combinator", position=(1, 0))
+        lb.add_entity(e1)
+        lb.add_entity(e2)
+        lb.add_network(Network("red_0", "red", [
+            Endpoint("e1", "input"), Endpoint("e2", "input"),
+        ]))
+
+        count = _validate_network_reachability(lb, max_distance=64)
+        assert count == 0
+        captured = capsys.readouterr()
+        assert "disconnected" not in captured.err
+
+    def test_warning_when_unreachable(self, capsys):
+        """Warning emitted when endpoints are too far apart."""
+        lb = LogicalBlueprint(label="Test")
+        e1 = LogicalEntity("e1", "arithmetic-combinator", position=(0, 0))
+        e2 = LogicalEntity("e2", "arithmetic-combinator", position=(100, 0))
+        lb.add_entity(e1)
+        lb.add_entity(e2)
+        lb.add_network(Network("red_0", "red", [
+            Endpoint("e1", "input"), Endpoint("e2", "input"),
+        ]))
+
+        count = _validate_network_reachability(lb, max_distance=64)
+        assert count == 1
+        captured = capsys.readouterr()
+        assert "disconnected" in captured.err
+        assert "too far apart" in captured.err
+
+    def test_warning_includes_component_labels(self, capsys):
+        """Warning should name the affected components when prefixes are known."""
+        lb = LogicalBlueprint(label="Test")
+        e1 = LogicalEntity("timer_e1", "arithmetic-combinator", position=(0, 0))
+        e2 = LogicalEntity("progress_e2", "arithmetic-combinator", position=(100, 0))
+        lb.add_entity(e1)
+        lb.add_entity(e2)
+        lb.add_network(Network("red_0", "red", [
+            Endpoint("timer_e1", "output"), Endpoint("progress_e2", "input"),
+        ]))
+
+        prefixes = {"Timer": "timer_", "Progress": "progress_"}
+        count = _validate_network_reachability(lb, prefixes, max_distance=64)
+        assert count == 1
+        captured = capsys.readouterr()
+        assert "Timer" in captured.err
+        assert "Progress" in captured.err
