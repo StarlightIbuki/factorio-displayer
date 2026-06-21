@@ -1,6 +1,45 @@
 """Factorio Display — video encoder and audio decoder blueprint builders
 for in-game Factorio RGB displays and programmable-speaker audio playback."""
 
+# ═══════════════════════════════════════════════════════════════════════
+# Patch: suppress draftsman's debug ``print("add_section")``
+# ═══════════════════════════════════════════════════════════════════════
+# draftsman's ConstantCombinator.add_section() contains a bare
+# ``print("add_section")`` (constant_combinator.py:134) that fires on
+# every signal-slot creation.  With 13 CCs × 60 slots per audio decoder
+# that's ~780 syscalls per build_audio_decoder() call, wasting ~1.2s
+# per build on Windows due to console I/O overhead.
+#
+# We monkey-patch it at import time so the fix applies to both the
+# application and the test suite.
+
+
+def _patch_draftsman_leaking_debug_log() -> None:
+    """Silence the stray ``print("add_section")`` in draftsman."""
+    try:
+        from draftsman.prototypes.constant_combinator import ConstantCombinator
+
+        _original_add_section = ConstantCombinator.add_section
+
+        def _quiet_add_section(self, group=None, index=None, active=True):
+            # Capture the return value without letting print() reach stdout.
+            import io
+            import sys
+            old_stdout = sys.stdout
+            try:
+                sys.stdout = io.StringIO()
+                return _original_add_section(self, group=group, index=index, active=active)
+            finally:
+                sys.stdout = old_stdout
+
+        ConstantCombinator.add_section = _quiet_add_section
+    except Exception:
+        pass  # draftsman may not be installed; that's fine
+
+
+_patch_draftsman_leaking_debug_log()
+del _patch_draftsman_leaking_debug_log
+
 try:
     from .build._generated import (
         CLOCK_SIGNAL,
