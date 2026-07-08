@@ -326,13 +326,13 @@ def _debug_dump_toml(lb: LogicalBlueprint, step: str, debug_dir: str) -> None:
 
 def _extract_total_ticks(lb: LogicalBlueprint) -> int:
     """Find the max tick end from DC conditions in a logical blueprint."""
-    _LE_OPS = frozenset({"<=", "\u2264"})
+    _END_OPS = frozenset({"<=", "\u2264", "="})
     max_end = 0
     for ent in lb.entities.values():
         if ent.type != "decider-combinator":
             continue
         for cond in ent.properties.get("conditions", []):
-            if cond.get("op") in _LE_OPS and cond.get("first", "").startswith("signal-clock"):
+            if cond.get("op") in _END_OPS and cond.get("first", "").startswith("signal-clock"):
                 val = cond.get("constant", 0)
                 if val > max_end:
                     max_end = val
@@ -923,6 +923,7 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
         chunk_workers=args.chunk_workers,
         output_chunks_dir=args.output_chunks,
         deduplicate_cross=args.deduplicate_cross,
+        use_cache=use_cache,
     )
 
     if power_type is None:

@@ -779,7 +779,7 @@ def encode_frames(
     tick_ranges: list[tuple[int, int]] = []
     current_tick = 0
 
-    if frame_cache_file.exists():
+    if use_cache and frame_cache_file.exists():
         sys.stderr.write(f"Found cache {frame_cache_file}, loading intermediate results...\n")
         try:
             with open(frame_cache_file, "rb") as f:
@@ -832,15 +832,16 @@ def encode_frames(
             tick_ranges[-1] = (start, end + carry_ticks)
             current_tick += carry_ticks
 
-        try:
-            with open(frame_cache_file, "wb") as f:
-                pickle.dump({
-                    "frames": kept_frames,
-                    "ticks": tick_ranges,
-                    "current_tick": current_tick,
-                }, f)
-        except Exception as e:
-            sys.stderr.write(f"Failed to write cache: {e}\n")
+        if use_cache:
+            try:
+                with open(frame_cache_file, "wb") as f:
+                    pickle.dump({
+                        "frames": kept_frames,
+                        "ticks": tick_ranges,
+                        "current_tick": current_tick,
+                    }, f)
+            except Exception as e:
+                sys.stderr.write(f"Failed to write cache: {e}\n")
 
     if not kept_frames:
         sys.stderr.write("No frames to encode.\n")
@@ -1103,7 +1104,7 @@ def encode_frames_chunked(
     tick_ranges: list[tuple[int, int]] = []
     current_tick = 0
 
-    if frame_cache_file.exists():
+    if use_cache and frame_cache_file.exists():
         sys.stderr.write(f"Found cache {frame_cache_file}, loading intermediate results...\n")
         try:
             with open(frame_cache_file, "rb") as f:
@@ -1154,15 +1155,16 @@ def encode_frames_chunked(
             tick_ranges[-1] = (start, end + carry_ticks)
             current_tick += carry_ticks
 
-        try:
-            with open(frame_cache_file, "wb") as f:
-                pickle.dump({
-                    "frames": kept_frames,
-                    "ticks": tick_ranges,
-                    "current_tick": current_tick,
-                }, f)
-        except Exception as e:
-            sys.stderr.write(f"Failed to write cache: {e}\n")
+        if use_cache:
+            try:
+                with open(frame_cache_file, "wb") as f:
+                    pickle.dump({
+                        "frames": kept_frames,
+                        "ticks": tick_ranges,
+                        "current_tick": current_tick,
+                    }, f)
+            except Exception as e:
+                sys.stderr.write(f"Failed to write cache: {e}\n")
 
     total_input = len(kept_frames)
     if total_input == 0:
@@ -1352,6 +1354,7 @@ def encode_video(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
+    use_cache: bool = False,
 ) -> Blueprint:
     """Encode a video file (``.mp4``, ``.avi``, ``.mov``, etc.).
 
@@ -1408,11 +1411,13 @@ def encode_video(
                 time_chunks=time_chunks, chunk_workers=chunk_workers,
                 output_chunks_dir=output_chunks_dir,
                 deduplicate_cross=deduplicate_cross,
+                use_cache=use_cache,
             )
             return result["full"]
         return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
                               total_width=resolved_w, total_height=resolved_h,
-                              expected_frames=expected_frames, source_id=source_id)
+                              expected_frames=expected_frames, source_id=source_id,
+                              use_cache=use_cache)
     finally:
         cap.release()
 
@@ -1432,6 +1437,7 @@ def encode_gif(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
+    use_cache: bool = False,
 ) -> Blueprint:
     """Encode an animated GIF.
 
@@ -1491,11 +1497,13 @@ def encode_gif(
             time_chunks=time_chunks, chunk_workers=chunk_workers,
             output_chunks_dir=output_chunks_dir,
             deduplicate_cross=deduplicate_cross,
+            use_cache=use_cache,
         )
         return result["full"]
     return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
                           total_width=resolved_w, total_height=resolved_h,
-                          expected_frames=expected_frames, source_id=source_id)
+                          expected_frames=expected_frames, source_id=source_id,
+                          use_cache=use_cache)
 
 
 def encode_png_series(
@@ -1513,6 +1521,7 @@ def encode_png_series(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
+    use_cache: bool = False,
 ) -> Blueprint:
     """Encode a sequence of image files (PNG, JPEG, etc.).
 
@@ -1556,11 +1565,13 @@ def encode_png_series(
             time_chunks=time_chunks, chunk_workers=chunk_workers,
             output_chunks_dir=output_chunks_dir,
             deduplicate_cross=deduplicate_cross,
+            use_cache=use_cache,
         )
         return result["full"]
     return encode_frames(_iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
                           total_width=resolved_w, total_height=resolved_h,
-                          expected_frames=expected_frames, source_id=source_id)
+                          expected_frames=expected_frames, source_id=source_id,
+                          use_cache=use_cache)
 
 
 def encode_frame(
@@ -1577,6 +1588,7 @@ def encode_frame(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
+    use_cache: bool = False,
 ) -> Blueprint:
     """Encode a single still image as a one-frame blueprint.
 
@@ -1591,6 +1603,7 @@ def encode_frame(
         time_chunks=time_chunks, chunk_workers=chunk_workers,
         output_chunks_dir=output_chunks_dir,
         deduplicate_cross=deduplicate_cross,
+        use_cache=use_cache,
     )
 
 
@@ -1613,6 +1626,7 @@ def encode_auto(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
+    use_cache: bool = False,
 ) -> Blueprint:
     """Auto-detect input type and call the appropriate encoder.
 
@@ -1626,6 +1640,7 @@ def encode_auto(
         "time_chunks": time_chunks, "chunk_workers": chunk_workers,
         "output_chunks_dir": output_chunks_dir,
         "deduplicate_cross": deduplicate_cross,
+        "use_cache": use_cache,
     }
 
     if path.is_dir():
