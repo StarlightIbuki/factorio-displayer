@@ -20,6 +20,7 @@ def build_raw_timer(
     name: str = "Raw Timer",
     output_signal: str = "signal-clock",
     clock_signal: str = "signal-clock",
+    with_kick: bool = True,
 ) -> LogicalBlueprint:
     """Build a raw clock timer that increments *output_signal* by 1 each tick.
 
@@ -42,18 +43,21 @@ def build_raw_timer(
     """
     lb = LogicalBlueprint(label=name)
 
-    # ── Kick-start CC ──────────────────────────────────────────
-    cc = LogicalEntity(
-        f"{name.lower().replace(' ', '_')}_kick",
-        "constant-combinator",
-        properties={
-            "signals": [
-                {"name": output_signal, "value": 1},
-            ],
-        },
-        position=(0, 0),
-    )
-    lb.add_entity(cc)
+    cc: LogicalEntity | None = None
+    if with_kick:
+        # Optional kick-start. For composed timers we can omit this entity
+        # to reduce footprint; the AC self-loop still advances from zero.
+        cc = LogicalEntity(
+            f"{name.lower().replace(' ', '_')}_kick",
+            "constant-combinator",
+            properties={
+                "signals": [
+                    {"name": output_signal, "value": 1},
+                ],
+            },
+            position=(0, 0),
+        )
+        lb.add_entity(cc)
 
     # ── Incrementer AC ─────────────────────────────────────────
     ac = LogicalEntity(
@@ -65,18 +69,26 @@ def build_raw_timer(
             "second_operand": 1,
             "output_signal": output_signal,
         },
-        position=(0, 2),
+        position=(0, 2 if with_kick else 0),
     )
     lb.add_entity(ac)
 
-    # Wire: CC:output → AC:input (red, kick-start)
     # Wire: AC:output → AC:input (red, self-loop)
-    lb.connect("red", Endpoint(cc.entity_id, "output"), Endpoint(ac.entity_id, "input"))
+    if cc is not None:
+        # Wire: CC:output → AC:input (red, kick-start)
+        lb.connect("red", Endpoint(cc.entity_id, "output"), Endpoint(ac.entity_id, "input"))
     lb.connect("red", Endpoint(ac.entity_id, "output"), Endpoint(ac.entity_id, "input"))
 
     # ── Output port ────────────────────────────────────────────
-    out_net = lb.connect("red", Endpoint(ac.entity_id, "output"), Endpoint(cc.entity_id, "output"))
-    lb.set_output_port("out", out_net.network_id)
+    if cc is not None:
+        out_net = lb.connect("red", Endpoint(ac.entity_id, "output"), Endpoint(cc.entity_id, "output"))
+        lb.set_output_port("out", out_net.network_id)
+    else:
+        # Self-loop network already exists and carries the raw timer output.
+        for net in lb.networks:
+            if net.color == "red" and Endpoint(ac.entity_id, "output") in net.endpoints:
+                lb.set_output_port("out", net.network_id)
+                break
 
     return lb
 
@@ -135,11 +147,11 @@ def build_mod_timer(
     # ── Input / output ports (both red) ────────────────────────
     in_net = Network(
         network_id="red_0", color="red",
-        endpoints=[Endpoint(ac.entity_id, "input")],
+        endpoints={Endpoint(ac.entity_id, "input")},
     )
     out_net = Network(
         network_id="red_1", color="red",
-        endpoints=[Endpoint(ac.entity_id, "output")],
+        endpoints={Endpoint(ac.entity_id, "output")},
     )
     lb.add_network(in_net)
     lb.add_network(out_net)
@@ -190,11 +202,11 @@ def build_clock_bridge(
 
     in_net = Network(
         network_id="red_0", color="red",
-        endpoints=[Endpoint(ac.entity_id, "input")],
+        endpoints={Endpoint(ac.entity_id, "input")},
     )
     out_net = Network(
         network_id="green_0", color="green",
-        endpoints=[Endpoint(ac.entity_id, "output")],
+        endpoints={Endpoint(ac.entity_id, "output")},
     )
     lb.add_network(in_net)
     lb.add_network(out_net)
@@ -292,7 +304,7 @@ def build_repeater(
     out_net = Network(
         network_id="red_out",
         color="red",
-        endpoints=[Endpoint(out_entity.entity_id, "output")],
+        endpoints={Endpoint(out_entity.entity_id, "output")},
     )
     lb.add_network(out_net)
     lb.set_output_port("out", "red_out")

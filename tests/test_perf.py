@@ -34,8 +34,17 @@ AUDIO_DECODER_VALIDATE_MAX = 1.5
 # _encode_frames_core with 3 tiny 4×4 frames.
 VIDEO_ENCODE_3_FRAMES_MAX = 1.5
 
+# _encode_frames_core with 10 frames of 16×12 (Phase 2 optimisation target).
+# Exercises the numpy non-zero fast path; Draftsman construction is the
+# real bottleneck (addressed in Phase 4).  Threshold will be lowered after
+# Phase 4 lands.
+VIDEO_ENCODE_10_FRAMES_16X12_MAX = 30.0
+
 # compose_all_in_one (video-only, simplest path) — cached result expected.
 COMPOSE_VIDEO_CACHED_MAX = 0.05
+
+# build_display_logical(32, 24) + to_draftsman (768 lamps) — grid wiring.
+DISPLAY_GRID_768_MAX = 2.0
 
 # ═══════════════════════════════════════════════════════════════════════
 # Helpers
@@ -136,6 +145,41 @@ class TestVideoEncoderPerf:
         assert elapsed < VIDEO_ENCODE_3_FRAMES_MAX, (
             f"_encode_frames_core took {elapsed:.3f}s, "
             f"threshold={VIDEO_ENCODE_3_FRAMES_MAX}s"
+        )
+
+    def test_encode_frames_core_10_frames_16x12(self):
+        """_encode_frames_core with 10 frames at 16×12 must complete
+        within threshold (Phase 2 optimisation target)."""
+        import numpy as np
+        from factorio_display.video.encoder import _encode_frames_core
+
+        w, h = 16, 12
+        rng = np.random.default_rng(42)
+        frames = [
+            (rng.integers(0, 256, (h, w, 3), dtype=np.uint8))
+            for _ in range(10)
+        ]
+        tick_ranges = [(i, i) for i in range(10)]
+        mapping_params = {
+            "width": w, "height": h,
+            "qualities": ["normal", "uncommon", "rare", "epic", "legendary"],
+            "signal_pool": [f"enc-perf-{i:04d}" for i in range(50)],
+        }
+
+        elapsed, bp_str = _time_it(
+            _encode_frames_core,
+            kept_frames=frames,
+            tick_ranges=tick_ranges,
+            output_name="Perf10Frames",
+            deduplicate=False,
+            mapping_params=mapping_params,
+            clock="signal-clock",
+            current_tick=10,
+        )
+        assert bp_str, "Blueprint string must not be empty"
+        assert elapsed < VIDEO_ENCODE_10_FRAMES_16X12_MAX, (
+            f"_encode_frames_core(10×16×12) took {elapsed:.3f}s, "
+            f"threshold={VIDEO_ENCODE_10_FRAMES_16X12_MAX}s"
         )
 
 
@@ -247,6 +291,47 @@ class TestComposerPerf:
             f"Cached compose_all_in_one took {elapsed:.3f}s, "
             f"threshold={COMPOSE_VIDEO_CACHED_MAX}s"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Display grid performance (Phase 1 optimisation target)
+# ═══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.perf
+class TestDisplayGridPerf:
+    """Performance of ``build_display_logical`` → ``to_draftsman`` for
+    moderate-sized lamp grids."""
+
+    def test_build_display_grid_768(self):
+        """build_display_logical(32, 24) → to_draftsman must complete
+        within threshold (768 lamps)."""
+        from factorio_display.video.player_blueprint import build_display_logical
+        from factorio_display.logical_blueprint import to_draftsman
+
+        elapsed, lb = _time_it(build_display_logical, "PerfGrid", width=32, height=24)
+        assert len(lb.entities) == 32 * 24, (
+            f"Expected 768 lamps, got {len(lb.entities)}"
+        )
+        # Verify pre-wired network exists
+        data_net = next(
+            (n for n in lb.networks
+             if n.color == "red" and n.prewired_pairs is not None),
+            None,
+        )
+        assert data_net is not None, "Lamp grid network must have prewired_pairs"
+        expected_pairs = 24 * 31 + 23  # h*(w-1) horizontal + (h-1) vertical
+        assert len(data_net.prewired_pairs) == expected_pairs, (
+            f"Expected {expected_pairs} pre-wired pairs, got {len(data_net.prewired_pairs)}"
+        )
+
+        elapsed2, bp = _time_it(to_draftsman, lb)
+        total = elapsed + elapsed2
+        assert total < DISPLAY_GRID_768_MAX, (
+            f"build_display_logical(32,24) + to_draftsman took {total:.3f}s "
+            f"(build={elapsed:.3f}s, draftsman={elapsed2:.3f}s), "
+            f"threshold={DISPLAY_GRID_768_MAX}s"
+        )
+        assert bp is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════

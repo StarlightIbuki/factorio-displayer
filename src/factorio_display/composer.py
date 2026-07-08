@@ -39,6 +39,7 @@ from .logical_blueprint import (
     from_toml,
 )
 from .timer import build_raw_timer, build_mod_timer
+from .cache_paths import cache_namespace_dir, version_prefix
 
 try:
     from tqdm import tqdm
@@ -105,7 +106,7 @@ class PortConnection:
 # Cache
 # ═══════════════════════════════════════════════════════════════════════
 
-_CACHE_DIR = Path(".blueprint_cache")
+_CACHE_DIR = cache_namespace_dir("compose")
 
 
 def _cache_key(*parts: str) -> str:
@@ -115,7 +116,7 @@ def _cache_key(*parts: str) -> str:
 
 
 def _cache_path(key: str) -> Path:
-    return _CACHE_DIR / f"{key}.toml"
+    return _CACHE_DIR / f"{version_prefix()}_{key}.toml"
 
 
 def cache_put(lb: LogicalBlueprint, *key_parts: str) -> None:
@@ -334,7 +335,25 @@ def _apply_connections(
             )
             continue
 
-        merged.connect(src_net.color, src_net.endpoints[0], dst_net.endpoints[0])
+        src_ep = next(iter(src_net.endpoints))
+        dst_ep = next(iter(dst_net.endpoints))
+        merged.connect(src_net.color, src_ep, dst_ep)
+        # After merging, one of the two networks was popped.
+        # Update port registries so they point to the surviving network.
+        _survivor = next(
+            (n for n in merged.networks
+             if n.color == src_net.color and src_ep in n.endpoints),
+            None,
+        )
+        if _survivor is not None:
+            _survivor_id = _survivor.network_id
+            for dead_id in (src_net_id, dst_net_id):
+                if dead_id == _survivor_id:
+                    continue
+                for port_map_entry in (merged.input_ports, merged.output_ports):
+                    for pname, pnet in list(port_map_entry.items()):
+                        if pnet == dead_id:
+                            port_map_entry[pname] = _survivor_id
         connected += 1
 
     return connected
@@ -376,16 +395,6 @@ def _layout_components(
     if len(groups) <= 1:
         return
 
-    # Find root group bounds
-    root_ents = groups.get("__root__", [])
-    root_max_x = max((ent.position[0] for _, ent in root_ents if ent.position is not None),
-                     default=0)
-    root_min_y = min((ent.position[1] for _, ent in root_ents if ent.position is not None),
-                     default=0)
-
-    col_x = root_max_x + 4
-
-    # ── Determine optimal group ordering from connections ─────────
     # Build label→prefix and prefix→label maps
     label_to_prefix: dict[str, str] = {}
     prefix_to_label: dict[str, str] = {}
@@ -394,30 +403,60 @@ def _layout_components(
             label_to_prefix[label] = pfx
             prefix_to_label[pfx] = label
 
-    # Build adjacency: which prefixes are connected
+    # Build adjacency: which prefixes are connected, and the
+    # directed dependency graph (from → to) for topological sort.
     adj: dict[str, set[str]] = {pfx: set() for pfx in groups if pfx != "__root__"}
+    # Directed edges: src_pfx → set of dst_pfx (data flows this way)
+    deps: dict[str, set[str]] = {pfx: set() for pfx in groups if pfx != "__root__"}
+    # In-degree for Kahn's algorithm
+    indeg: dict[str, int] = {pfx: 0 for pfx in groups if pfx != "__root__"}
     if connections:
         for conn in connections:
             src_pfx = label_to_prefix.get(conn.from_component)
             dst_pfx = label_to_prefix.get(conn.to_component)
             if src_pfx and dst_pfx and src_pfx != dst_pfx:
+                # Undirected adjacency (for tie-breaking)
                 if src_pfx in adj:
                     adj[src_pfx].add(dst_pfx)
                 if dst_pfx in adj:
                     adj[dst_pfx].add(src_pfx)
+                # Directed: source → destination
+                if src_pfx in deps and dst_pfx in deps and dst_pfx not in deps.get(src_pfx, set()):
+                    deps[src_pfx].add(dst_pfx)
+                    indeg[dst_pfx] = indeg.get(dst_pfx, 0) + 1
 
-    # Greedy ordering: place the component with the most connections
-    # to already-placed components next.
-    remaining = set(adj.keys())
+    # ── Topological sort (Kahn's algorithm) ───────────────────────
+    # Prefer sources (out-degree > 0, in-degree = 0) first, then
+    # use greedy adjacency for the rest.
     ordered: list[str] = []
-    if remaining:
-        # Start with the component that has the most connections overall
-        first = max(remaining, key=lambda pfx: len(adj[pfx]))
-        ordered.append(first)
-        remaining.discard(first)
+    remaining = set(adj.keys())
 
+    if remaining:
+        # Collect sources (in-degree 0) and sort by total degree
+        # (most connected first) as a tie-break.
+        queue = sorted(
+            [pfx for pfx in remaining if indeg.get(pfx, 0) == 0],
+            key=lambda pfx: len(adj[pfx]),
+            reverse=True,
+        )
+        while queue:
+            pfx = queue.pop(0)
+            if pfx not in remaining:
+                continue
+            ordered.append(pfx)
+            remaining.discard(pfx)
+            # Reduce in-degree of successors
+            for dst in deps.get(pfx, set()):
+                if dst in indeg:
+                    indeg[dst] -= 1
+                    if indeg[dst] == 0 and dst in remaining:
+                        queue.append(dst)
+                        # Keep queue sorted by adjacency for stability
+                        queue.sort(key=lambda p: len(adj[p]), reverse=True)
+
+        # Any remaining components (cycles or unconnected) — use
+        # greedy adjacency to place them next to already-placed ones.
         while remaining:
-            # Pick the unplaced component with the most connections to ordered
             best_pfx = max(
                 remaining,
                 key=lambda pfx: len(adj[pfx] & set(ordered)),
@@ -430,10 +469,57 @@ def _layout_components(
         if pfx != "__root__" and pfx not in ordered:
             ordered.append(pfx)
 
-    # ── Place groups in the computed order ────────────────────────
-    next_y = root_min_y
+    # ── Place groups: sink at origin, dependencies to its right ───
+    # The last group in topological order is the sink (e.g. the display).
+    # Place it at its original position.  Everything else goes to the
+    # right of the sink, stacked vertically from the sink's top edge.
+    # This keeps the display and its data sources close (same Y band),
+    # minimising wire distance for the bridge connection.
+    if not ordered:
+        return
+    if len(ordered) <= 1:
+        # Single group — just shift it to the origin
+        prefix = ordered[0]
+        items = groups.get(prefix, [])
+        xs = [ent.position[0] for _, ent in items if ent.position is not None]
+        ys = [ent.position[1] for _, ent in items if ent.position is not None]
+        if xs:
+            dx = -min(xs)
+            dy = -min(ys)
+            for _, ent in items:
+                if ent.position is not None:
+                    x, y = ent.position
+                    ent.position = (x + dx, y + dy)
+        return
 
-    for prefix in ordered:
+    sink_prefix = ordered[-1]
+    source_prefixes = ordered[:-1]
+
+    # ── Place sink at origin ─────────────────────────────────────
+    sink_items = groups.get(sink_prefix, [])
+    sink_xs = [ent.position[0] for _, ent in sink_items if ent.position is not None]
+    sink_ys = [ent.position[1] for _, ent in sink_items if ent.position is not None]
+    if not sink_xs:
+        return
+
+    sink_dx = -min(sink_xs)
+    sink_dy = -min(sink_ys)
+    sink_max_x = max(sink_xs) + sink_dx
+    sink_min_y = min(sink_ys) + sink_dy
+
+    for _, ent in sink_items:
+        if ent.position is not None:
+            x, y = ent.position
+            ent.position = (x + sink_dx, y + sink_dy)
+
+    # ── Place sources to the left of the sink ────────────────────
+    # Display lamp buses often expose spare degree near the left edge;
+    # placing memory/timer groups on that side keeps bridge wires short.
+    sink_min_x = min(sink_xs) + sink_dx
+    col_x = sink_min_x - 4
+    next_y = sink_min_y
+
+    for prefix in source_prefixes:
         items = groups.get(prefix, [])
         xs = [ent.position[0] for _, ent in items if ent.position is not None]
         ys = [ent.position[1] for _, ent in items if ent.position is not None]
@@ -442,7 +528,9 @@ def _layout_components(
 
         min_x, min_y = min(xs), min(ys)
         max_y = max(ys)
-        dx = col_x - min_x
+        # Align the group's right edge at col_x so each source stays compact
+        # and as close to the sink as possible.
+        dx = col_x - max(xs)
         dy = next_y - min_y
 
         for _, ent in items:
@@ -528,7 +616,20 @@ def compose(
         sys.stderr.write(f"  Connected {connected} port pair(s).\n")
 
     # ── Validate wiring distances ────────────────────────────────
-    _validate_network_reachability(merged, prefixes)
+    unreachable = _validate_network_reachability(merged, prefixes)
+    if unreachable > 0:
+        raise ValueError(
+            f"Composition failed: {unreachable} network(s) have endpoints "
+            f"that are too far apart (> 64 tiles). "
+            f"Components cannot be wired together. "
+            f"Consider reducing display size or adding more signals to the pool."
+        )
+
+    # ── Sort entities by position ────────────────────────────────
+    # Ensures iteration order matches spatial layout so the fast path
+    # in _to_draftsman_impl (sorted-position chain) produces correct
+    # results for large networks.
+    merged.sort_entities_by_position()
 
     # ── Power ─────────────────────────────────────────────────────
     if pole_type is not None:
@@ -728,7 +829,7 @@ def _validate_network_reachability(
             best_i: int = -1
             best_j: int = -1
             best_dist = max_distance + 1
-            best_x: int = -1
+            best_x: int = -(1 << 30)
             best_y: int = -1
 
             for i in range(n):
@@ -922,6 +1023,13 @@ class Composer:
             sys.stderr.write(
                 "Warning: --power is not yet implemented; "
                 "power poles will not be added.\n"
+            )
+
+        unreachable = _validate_network_reachability(merged)
+        if unreachable > 0:
+            raise ValueError(
+                f"Legacy composition failed: {unreachable} network(s) have "
+                f"endpoints that are too far apart (> 64 tiles)."
             )
 
         return merged

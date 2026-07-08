@@ -16,6 +16,32 @@ def _signal_key(name: str, quality: str) -> str:
     return f"{name}|{quality}"
 
 
+def compute_chunking(
+    width: int,
+    height: int,
+    pool: list[str],
+    qualities: list[str],
+) -> tuple[int, int]:
+    """Compute vertical chunk splitting parameters.
+
+    When a display has more pixels than the signal pool can address,
+    it must be split into disconnected vertical chunks (full-width strips).
+    Each chunk gets its own :class:`SignalMapping` with a subset of the pool.
+
+    Returns ``(chunk_height, num_chunks)``.  If no chunking is needed
+    (display fits within pool), returns ``(height, 1)``.
+    """
+    available = len(pool) * len(qualities)
+    total_pixels = width * height
+    if total_pixels > available and available >= width:
+        chunk_height = available // width
+        num_chunks = math.ceil(height / chunk_height)
+    else:
+        chunk_height = height
+        num_chunks = 1
+    return chunk_height, num_chunks
+
+
 class SignalMapping:  # pylint: disable=too-many-instance-attributes
     """Maps every display pixel to a Factorio signal and back.
 

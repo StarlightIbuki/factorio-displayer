@@ -105,17 +105,28 @@ class Network:
         Unique identifier for this network within the logical blueprint.
     color : str
         ``"red"`` or ``"green"``.
-    endpoints : list[Endpoint]
+    endpoints : set[Endpoint]
         All endpoints that participate in this network.
+        Uses a set to automatically deduplicate by (entity_id, port).
+    prewired_pairs : list[tuple[Endpoint, Endpoint]] | None
+        Pre-computed pairwise wire connections.  When set, ``to_draftsman``
+        uses these directly instead of running the materialisation algorithm.
+        Used for grid-structured networks (e.g. lamp displays) where the
+        wiring pattern is known at build time.
     """
 
     network_id: str
     color: str
-    endpoints: list[Endpoint] = field(default_factory=list)
+    endpoints: set[Endpoint] = field(default_factory=set)
+    prewired_pairs: list[tuple[Endpoint, Endpoint]] | None = None
 
     def __post_init__(self) -> None:
         if self.color not in _VALID_COLORS:
             raise ValueError(f"Invalid color {self.color!r}, must be one of {_VALID_COLORS}")
+        # Auto-convert list endpoints to set (backward-compat with callers
+        # that pass lists and with TOML deserialization via _parse_network).
+        if isinstance(self.endpoints, list):
+            object.__setattr__(self, "endpoints", set(self.endpoints))
 
 
 @dataclass
@@ -173,6 +184,10 @@ class LogicalBlueprint:
     networks: list[Network] = field(default_factory=list)
     input_ports: dict[str, str] = field(default_factory=dict)
     output_ports: dict[str, str] = field(default_factory=dict)
+    # ── cached derived data ──────────────────────────────────────
+    _network_bounds_cache: dict[str, tuple[int, int, int, int]] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
 
     # ── entity helpers ──────────────────────────────────────────────
 
@@ -211,34 +226,50 @@ class LogicalBlueprint:
 
         idx_a = self._find_network(color, ep_a)
         idx_b = self._find_network(color, ep_b)
+        result: Network
 
         if idx_a is not None and idx_b is not None:
             if idx_a == idx_b:
                 # Already in the same network
-                return self.networks[idx_a]
-            # Merge network B into network A
-            net_a = self.networks[idx_a]
-            net_b = self.networks.pop(idx_b)
-            for ep in net_b.endpoints:
-                if ep not in net_a.endpoints:
-                    net_a.endpoints.append(ep)
-            return net_a
+                result = self.networks[idx_a]
+            else:
+                # Merge network B into network A
+                net_a = self.networks[idx_a]
+                net_b = self.networks.pop(idx_b)
+                # Since endpoints is a set, just update (auto-dedup)
+                net_a.endpoints.update(net_b.endpoints)
+                # Merging two networks invalidates pre-wired pairs
+                # because the combined endpoint set is no longer
+                # covered by the original pre-wired layouts.
+                # _wire_horizontal_first in to_draftsman will re-wire
+                # the combined set correctly (layout now ensures
+                # endpoints are close enough).
+                net_a.prewired_pairs = None
+                result = net_a
         elif idx_a is not None:
             net = self.networks[idx_a]
             if ep_b not in net.endpoints:
-                net.endpoints.append(ep_b)
-            return net
+                net.endpoints.add(ep_b)
+                # A new endpoint joined a pre-wired network —
+                # the pre-wired pairs are no longer complete.
+                net.prewired_pairs = None
+            result = net
         elif idx_b is not None:
             net = self.networks[idx_b]
             if ep_a not in net.endpoints:
-                net.endpoints.append(ep_a)
-            return net
+                net.endpoints.add(ep_a)
+                net.prewired_pairs = None
+            result = net
         else:
             # Neither endpoint is in a network yet — create a new one
             net_id = self._next_network_id(color)
-            net = Network(network_id=net_id, color=color, endpoints=[ep_a, ep_b])
+            net = Network(network_id=net_id, color=color, endpoints={ep_a, ep_b})
             self.networks.append(net)
-            return net
+            result = net
+
+        self._network_bounds_cache.clear()
+        self._debug_assert_invariants()
+        return result
 
     def _next_network_id(self, color: str) -> str:
         """Generate a unique network id like ``"red_0"``, ``"green_3"``."""
@@ -249,7 +280,56 @@ class LogicalBlueprint:
                 return candidate
         return f"{color}_0"  # unreachable
 
+    def get_network_bounds(self, network_id: str) -> tuple[int, int, int, int]:
+        """Return ``(min_x, min_y, max_x, max_y)`` for all positioned
+        endpoints in *network_id*.
+
+        Result is cached until the next mutation (``connect``, ``merge``).
+        Returns ``(0, 0, 0, 0)`` if the network is not found or has no
+        positioned entities.
+        """
+        if network_id in self._network_bounds_cache:
+            return self._network_bounds_cache[network_id]
+
+        net = next((n for n in self.networks if n.network_id == network_id), None)
+        if net is None:
+            return (0, 0, 0, 0)
+
+        xs: list[int] = []
+        ys: list[int] = []
+        for ep in net.endpoints:
+            ent = self.entities.get(ep.entity_id)
+            if ent is not None and ent.position is not None:
+                xs.append(ent.position[0])
+                ys.append(ent.position[1])
+
+        if not xs:
+            result: tuple[int, int, int, int] = (0, 0, 0, 0)
+        else:
+            result = (min(xs), min(ys), max(xs), max(ys))
+
+        self._network_bounds_cache[network_id] = result
+        return result
+
     # ── introspection ───────────────────────────────────────────────
+
+    def sort_entities_by_position(self) -> None:
+        """Reorder ``entities`` dict so iteration follows spatial position:
+        top-to-bottom (y), then left-to-right (x).
+
+        Entities without a position sort to the end.  This makes the
+        fast path in ``_to_draftsman_impl`` (sorted-position chain)
+        produce correct results after layout.
+        """
+        items = sorted(
+            self.entities.items(),
+            key=lambda kv: (
+                1 if kv[1].position is None else 0,
+                kv[1].position[1] if kv[1].position is not None else 0,
+                kv[1].position[0] if kv[1].position is not None else 0,
+            )
+        )
+        self.entities = dict(items)
 
     def endpoints_of(self, entity_id: str, port: str) -> set[str]:
         """Return the set of network ids the given endpoint belongs to."""
@@ -259,6 +339,104 @@ class LogicalBlueprint:
                 if ep.entity_id == entity_id and ep.port == port:
                     result.add(net.network_id)
         return result
+
+    # ── topology invariants (debug only) ────────────────────────────
+
+    def check_topology(self) -> list[str]:
+        """Check structural invariants on the logical blueprint.
+
+        Returns a list of error strings.  An empty list means all checks pass.
+        These checks are cheap enough to run after every mutation during
+        development and testing.
+
+        Invariants checked
+        ------------------
+        * Every endpoint references a known entity.
+        * No duplicate endpoint (entity_id, port) within a single network.
+        * No endpoint belongs to multiple networks of the same colour.
+        * Every network has a valid colour and at least one endpoint.
+        * Network IDs are unique.
+        * Port networks reference existing networks.
+        """
+        errors: list[str] = []
+        entity_ids = set(self.entities.keys())
+
+        # ── Network-level checks ─────────────────────────────────
+        seen_net_ids: set[str] = set()
+        for net in self.networks:
+            if net.network_id in seen_net_ids:
+                errors.append(
+                    f"Duplicate network_id {net.network_id!r}"
+                )
+            seen_net_ids.add(net.network_id)
+
+            if net.color not in _VALID_COLORS:
+                errors.append(
+                    f"Network {net.network_id!r}: invalid color {net.color!r}"
+                )
+
+            if not net.endpoints:
+                errors.append(
+                    f"Network {net.network_id!r} ({net.color}): no endpoints"
+                )
+
+            seen_in_net: set[tuple[str, str]] = set()
+            for ep in net.endpoints:
+                # Must reference a known entity
+                if ep.entity_id not in entity_ids:
+                    errors.append(
+                        f"Network {net.network_id!r}: endpoint "
+                        f"{ep.to_string()!r} references unknown entity "
+                        f"{ep.entity_id!r}"
+                    )
+                # No duplicate within same network
+                key = (ep.entity_id, ep.port)
+                if key in seen_in_net:
+                    errors.append(
+                        f"Network {net.network_id!r}: duplicate endpoint "
+                        f"{ep.to_string()!r}"
+                    )
+                seen_in_net.add(key)
+
+        # ── Cross-network: endpoint can be in multiple networks ────
+        # of the same colour — this models multiple wires to the same
+        # entity port.  The real Factorio limit (≤2 connections per
+        # port per colour) is enforced by check_wire_topology() on the
+        # materialised blueprint.  We only warn if an endpoint appears
+        # in more than 2 networks of the same colour.
+        colour_ep_count: dict[tuple[str, str, str], int] = {}
+        for net in self.networks:
+            for ep in net.endpoints:
+                key = (ep.entity_id, ep.port, net.color)
+                colour_ep_count[key] = colour_ep_count.get(key, 0) + 1
+        for (eid, port, colour), count in colour_ep_count.items():
+            if count > 2:
+                errors.append(
+                    f"Endpoint {eid!r}:{port} appears in {count} "
+                    f"{colour} networks (max 2 in Factorio)"
+                )
+
+        # Note: port→network reference checks are intentionally NOT
+        # done here.  Ports can reference networks from sub-blueprints
+        # that haven't been merged yet (valid intermediate state).
+        # Validation happens at connect_ports() time.
+
+        return errors
+
+    def _debug_assert_invariants(self) -> None:
+        """Assert all topology invariants hold (no-op when ``__debug__`` is False).
+
+        Call this after any mutation to the logical blueprint
+        (``connect``, ``merge``, etc.).
+        """
+        if not __debug__:
+            return
+        errs = self.check_topology()
+        if errs:
+            raise AssertionError(
+                f"LogicalBlueprint topology violation(s) in "
+                f"{self.label!r}:\n" + "\n".join(f"  - {e}" for e in errs)
+            )
 
     # ── port helpers ───────────────────────────────────────────────
 
@@ -334,10 +512,19 @@ class LogicalBlueprint:
                 Endpoint(entity_id=entity_prefix + ep.entity_id, port=ep.port)
                 for ep in net.endpoints
             ]
+            # Preserve prewired_pairs with prefixed entity IDs
+            new_prewired = None
+            if net.prewired_pairs is not None:
+                new_prewired = [
+                    (Endpoint(entity_id=entity_prefix + a.entity_id, port=a.port),
+                     Endpoint(entity_id=entity_prefix + b.entity_id, port=b.port))
+                    for a, b in net.prewired_pairs
+                ]
             self.add_network(Network(
                 network_id=new_net_id,
                 color=net.color,
                 endpoints=new_endpoints,
+                prewired_pairs=new_prewired,
             ))
 
         # ── Ports ───────────────────────────────────────────────
@@ -345,6 +532,8 @@ class LogicalBlueprint:
             self.input_ports[port_prefix + port_name] = network_prefix + net_id
         for port_name, net_id in other.output_ports.items():
             self.output_ports[port_prefix + port_name] = network_prefix + net_id
+
+        self._debug_assert_invariants()
 
     def connect_ports(
         self,
@@ -511,6 +700,9 @@ def _network_to_toml(net: Network) -> str:
     lines.append(_emit_key_val("color", net.color))
     ep_strings = [ep.to_string() for ep in net.endpoints]
     lines.append(_emit_key_val("endpoints", ep_strings))
+    if net.prewired_pairs is not None:
+        pw_strings = [f"{a.to_string()}->{b.to_string()}" for a, b in net.prewired_pairs]
+        lines.append(_emit_key_val("prewired_pairs", pw_strings))
     return "\n".join(lines)
 
 
@@ -588,6 +780,7 @@ def _from_parsed(data: dict[str, Any]) -> LogicalBlueprint:
     for raw in data.get("output_port", []):
         lb.output_ports[raw["name"]] = raw["network"]
 
+    lb._debug_assert_invariants()
     return lb
 
 
@@ -701,7 +894,13 @@ def _parse_network(raw: dict[str, Any]) -> Network:
     endpoints: list[Endpoint] = []
     for ep_str in raw.get("endpoints", []):
         endpoints.append(Endpoint.from_string(ep_str))
-    return Network(network_id=net_id, color=color, endpoints=endpoints)
+    prewired_pairs: list[tuple[Endpoint, Endpoint]] | None = None
+    if "prewired_pairs" in raw:
+        prewired_pairs = []
+        for pw_str in raw["prewired_pairs"]:
+            a_str, b_str = pw_str.split("->", 1)
+            prewired_pairs.append((Endpoint.from_string(a_str), Endpoint.from_string(b_str)))
+    return Network(network_id=net_id, color=color, endpoints=endpoints, prewired_pairs=prewired_pairs)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -905,6 +1104,7 @@ def _from_draftsman_impl(bp: Any) -> LogicalBlueprint:
         ep_b = Endpoint(entity_id=conn["id2"], port=port_b)
         lb.connect(color, ep_a, ep_b)
 
+    lb._debug_assert_invariants()
     return lb
 
 
@@ -951,9 +1151,6 @@ def _iter_connections(bp: Any, ent_map: dict[int, str] | None = None) -> list[di
         eid1 = _resolve(ent1)
         eid2 = _resolve(ent2)
 
-        # WireConnectorID from live draftsman has .value; parsed blueprints use plain int
-        wire_type_1 = conn1.value if hasattr(conn1, "value") else int(conn1)
-        wire_type_2 = conn2.value if hasattr(conn2, "value") else int(conn2)
         # WireConnectorID from live draftsman has .value; parsed blueprints use plain int
         wire_type_1 = conn1.value if hasattr(conn1, "value") else int(conn1)
         wire_type_2 = conn2.value if hasattr(conn2, "value") else int(conn2)
@@ -1109,6 +1306,17 @@ def _wire_horizontal_first(
                 union(a_idx, b_idx)
 
     # ── Step 2: Rightmost bridge merging ─────────────────────────
+    # Track degree per endpoint (Factorio limit: ≤ 2 per port per colour).
+    degree: list[int] = [0] * n
+    # Build O(1) lookup for endpoint → index
+    ep_to_idx: dict[Endpoint, int] = {ep: i for i, ep in enumerate(sorted_eps)}
+    # Apply degree from horizontal connections already made
+    for a, b in connections:
+        a_idx = ep_to_idx[a]
+        b_idx = ep_to_idx[b]
+        degree[a_idx] += 1
+        degree[b_idx] += 1
+
     while True:
         # Collect distinct subset roots
         roots = {find(i) for i in range(n)}
@@ -1118,13 +1326,17 @@ def _wire_horizontal_first(
         best_i: int = -1
         best_j: int = -1
         best_dist = max_distance + 1
-        best_x: int = -1
+        best_x: int = -(1 << 30)
         best_y: int = -1
 
         for i in range(n):
+            if degree[i] >= 2:
+                continue  # Factorio: max 2 connections per port
             ri = find(i)
             pi = pos[id(sorted_eps[i])]
             for j in range(i + 1, n):
+                if degree[j] >= 2:
+                    continue
                 rj = find(j)
                 if ri == rj:
                     continue
@@ -1162,6 +1374,8 @@ def _wire_horizontal_first(
             break  # no bridge possible within max_distance
 
         connections.append((sorted_eps[best_i], sorted_eps[best_j]))
+        degree[best_i] += 1
+        degree[best_j] += 1
         union(best_i, best_j)
 
     return connections
@@ -1199,7 +1413,7 @@ def _find_closest_pair(
     return best_pair
 
 
-def to_draftsman(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
+def to_draftsman(lb: LogicalBlueprint, bp: Any | None = None, *, _validate: bool = True) -> Any:
     """Convert a :class:`LogicalBlueprint` into a draftsman
     :class:`~draftsman.blueprintable.Blueprint`.
 
@@ -1210,6 +1424,11 @@ def to_draftsman(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
     bp : Blueprint | None
         If given, entities and connections are appended to this existing
         blueprint.  Otherwise a new one is created.
+    _validate : bool
+        When True (default), Draftsman's attrs validators run on every
+        entity property assignment.  When False, ``object.__setattr__``
+        is used to bypass validators for a significant speedup.  Tests
+        should always use ``_validate=True`` (the default).
 
     Returns
     -------
@@ -1235,11 +1454,16 @@ def to_draftsman(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
             UnknownSignalWarning,
         ):
             warnings.filterwarnings("ignore", category=cat)
-        return _to_draftsman_impl(lb, bp)
+        return _to_draftsman_impl(lb, bp, _validate=_validate)
 
 
-def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
-    """Internal implementation — see :func:`to_draftsman`."""
+def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate: bool = True) -> Any:
+    """Internal implementation — see :func:`to_draftsman`.
+
+    When *_validate* is False, uses ``object.__setattr__`` to bypass
+    Draftsman's attrs validators/converters, significantly reducing
+    per-entity construction overhead for large blueprints.
+    """
     from draftsman.blueprintable import Blueprint
     from draftsman.constants import Direction
     from draftsman.entity import new_entity
@@ -1248,8 +1472,33 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
         bp = Blueprint()
         bp.label = lb.label
 
+    # Pre-build the common circuit condition for speakers when skipping
+    # validation (every speaker uses signal-no-entry = 0).
+    _cached_speaker_condition: Any = None
+    if not _validate:
+        from draftsman.signatures import Condition, SignalID
+        from draftsman.constants import LampColorMode
+
+        # Helper to convert _str_to_signal_ref output → proper SignalID
+        def _to_signal_id(value: Any) -> Any:
+            if isinstance(value, (str, dict)):
+                return SignalID.converter(value)
+            return value
+
+        _cached_speaker_condition = Condition.__new__(Condition)
+        object.__setattr__(_cached_speaker_condition, "first_signal",
+                           _to_signal_id("signal-no-entry"))
+        object.__setattr__(_cached_speaker_condition, "comparator", "=")
+        object.__setattr__(_cached_speaker_condition, "constant", 0)
+
     # ── 1. Create entities ─────────────────────────────────────────
+    # Stack unpositioned entities vertically so Draftsman doesn't warn
+    # about overlap.  This is NOT layout — the composer does real layout.
+    _fallback_y = 0
     for entity in lb.entities.values():
+        if entity.position is None:
+            entity.position = (0, _fallback_y)
+            _fallback_y += 2  # combinators are 2 tiles tall
         pos = entity.position or (0, 0)
         direction = entity.direction if entity.direction is not None else Direction.NORTH
         quality_val = entity.properties.get("quality")
@@ -1278,102 +1527,262 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
         if entity.type == "arithmetic-combinator":
             fow = props.get("first_operand_wires")
             sow = props.get("second_operand_wires")
-            kwargs: dict[str, Any] = {
-                "first_operand": _str_to_signal_ref(props.get("first_operand", "")),
-                "operation": props.get("operation", "*"),
-                "second_operand": _str_to_signal_ref(props.get("second_operand", 0)),
-                "output_signal": _str_to_signal_ref(props.get("output_signal", "")),
-            }
-            if fow:
-                kwargs["first_operand_wires"] = set(fow)
-            if sow:
-                kwargs["second_operand_wires"] = set(sow)
-            de.set_arithmetic_condition(**kwargs)
+            if _validate:
+                kwargs: dict[str, Any] = {
+                    "first_operand": _str_to_signal_ref(props.get("first_operand", "")),
+                    "operation": props.get("operation", "*"),
+                    "second_operand": _str_to_signal_ref(props.get("second_operand", 0)),
+                    "output_signal": _str_to_signal_ref(props.get("output_signal", "")),
+                }
+                if fow:
+                    kwargs["first_operand_wires"] = set(fow)
+                if sow:
+                    kwargs["second_operand_wires"] = set(sow)
+                de.set_arithmetic_condition(**kwargs)
+            else:
+                # Fast path: bypass attrs validators
+                object.__setattr__(
+                    de, "first_operand",
+                    _to_signal_id(_str_to_signal_ref(props.get("first_operand", ""))),
+                )
+                object.__setattr__(
+                    de, "arithmetic_operation", props.get("operation", "*"),
+                )
+                object.__setattr__(
+                    de, "second_operand",
+                    _to_signal_id(_str_to_signal_ref(props.get("second_operand", 0))),
+                )
+                object.__setattr__(
+                    de, "output_signal",
+                    _to_signal_id(_str_to_signal_ref(props.get("output_signal", ""))),
+                )
+                if fow:
+                    object.__setattr__(de, "first_operand_wires", set(fow))
+                if sow:
+                    object.__setattr__(de, "second_operand_wires", set(sow))
 
         elif entity.type == "decider-combinator":
-            conditions: list[Any] = []
-            for c in props.get("conditions", []):
-                cond_kwargs: dict[str, Any] = {
-                    "first_signal": _str_to_signal_ref(c["first"]),
-                    "comparator": c["op"],
-                }
-                if "second_signal" in c:
-                    cond_kwargs["second_signal"] = _str_to_signal_ref(c["second_signal"])
-                elif "constant" in c:
-                    cond_kwargs["constant"] = c["constant"]
-                if "compare_type" in c:
-                    cond_kwargs["compare_type"] = c["compare_type"]
-                conditions.append(de.Condition(**cond_kwargs))
-            de.conditions = conditions
+            if _validate:
+                conditions: list[Any] = []
+                for c in props.get("conditions", []):
+                    cond_kwargs: dict[str, Any] = {
+                        "first_signal": _str_to_signal_ref(c["first"]),
+                        "comparator": c["op"],
+                    }
+                    if "second_signal" in c:
+                        cond_kwargs["second_signal"] = _str_to_signal_ref(c["second_signal"])
+                    elif "constant" in c:
+                        cond_kwargs["constant"] = c["constant"]
+                    if "compare_type" in c:
+                        cond_kwargs["compare_type"] = c["compare_type"]
+                    conditions.append(de.Condition(**cond_kwargs))
+                de.conditions = conditions
 
-            outputs: list[Any] = []
-            for o in props.get("outputs", []):
-                sig_str = o.get("signal", "")
-                if "@" in sig_str:
-                    name, quality = sig_str.split("@", 1)
-                    sig_ref = {"name": name, "quality": quality}
-                else:
-                    sig_ref = sig_str
-                outputs.append(
-                    de.Output(
-                        signal=sig_ref,
-                        copy_count_from_input=o.get("copy_count", False),
-                        constant=o.get("constant", 0),
+                outputs: list[Any] = []
+                for o in props.get("outputs", []):
+                    sig_str = o.get("signal", "")
+                    if "@" in sig_str:
+                        name, quality = sig_str.split("@", 1)
+                        sig_ref = {"name": name, "quality": quality}
+                    else:
+                        sig_ref = sig_str
+                    outputs.append(
+                        de.Output(
+                            signal=sig_ref,
+                            copy_count_from_input=o.get("copy_count", False),
+                            constant=o.get("constant", 0),
+                        )
                     )
-                )
-            de.outputs = outputs
+                de.outputs = outputs
+            else:
+                # Fast path: build conditions/outputs with object.__setattr__
+                conds: list[Any] = []
+                for c in props.get("conditions", []):
+                    cond = Condition.__new__(Condition)
+                    object.__setattr__(
+                        cond, "first_signal",
+                        _to_signal_id(_str_to_signal_ref(c["first"])),
+                    )
+                    object.__setattr__(cond, "comparator", c["op"])
+                    if "second_signal" in c:
+                        object.__setattr__(
+                            cond, "second_signal",
+                            _to_signal_id(_str_to_signal_ref(c["second_signal"])),
+                        )
+                    elif "constant" in c:
+                        object.__setattr__(cond, "constant", c["constant"])
+                    if "compare_type" in c:
+                        object.__setattr__(cond, "compare_type", c["compare_type"])
+                    conds.append(cond)
+                object.__setattr__(de, "conditions", conds)
+
+                outs: list[Any] = []
+                for o in props.get("outputs", []):
+                    sig_str = o.get("signal", "")
+                    if "@" in sig_str:
+                        name, quality = sig_str.split("@", 1)
+                        sig_ref = {"name": name, "quality": quality}
+                    else:
+                        sig_ref = sig_str
+                    sig_ref = _to_signal_id(sig_ref)
+                    out_obj = de.Output.__new__(de.Output)
+                    object.__setattr__(out_obj, "signal", sig_ref)
+                    object.__setattr__(
+                        out_obj, "copy_count_from_input",
+                        o.get("copy_count", False),
+                    )
+                    object.__setattr__(out_obj, "constant", o.get("constant", 0))
+                    outs.append(out_obj)
+                object.__setattr__(de, "outputs", outs)
 
         elif entity.type == "constant-combinator":
             for slot, sig in enumerate(props.get("signals", [])):
                 quality = sig.get("quality")
-                de.set_signal(
-                    slot,
-                    sig["name"],
-                    sig.get("value", 0),
-                    quality if quality else None,
-                )
+                if _validate:
+                    de.set_signal(
+                        slot,
+                        sig["name"],
+                        sig.get("value", 0),
+                        quality if quality else None,
+                    )
+                else:
+                    # Fast path: manipulate the signals dict directly
+                    signal_dict = {"name": sig["name"], "value": sig.get("value", 0)}
+                    if quality:
+                        signal_dict["quality"] = quality
+                    cbn = getattr(de, "control_behavior", None)
+                    if cbn is not None:
+                        sigs = getattr(cbn, "signals", None)
+                        if sigs is not None and slot < len(sigs):
+                            # Replace in place
+                            for k, v in signal_dict.items():
+                                sigs[slot][k] = v
+                        else:
+                            de.set_signal(
+                                slot,
+                                sig["name"],
+                                sig.get("value", 0),
+                                quality if quality else None,
+                            )
+                    else:
+                        de.set_signal(
+                            slot,
+                            sig["name"],
+                            sig.get("value", 0),
+                            quality if quality else None,
+                        )
 
         elif entity.type == "programmable-speaker":
-            de.instrument_name = props.get("instrument", "piano")
-            de.note_name = props.get("note", "")
-            de.volume_signal = {
-                "name": props.get("vol_signal", ""),
-                "quality": props.get("vol_quality", "normal"),
-            }
-            de.volume_controlled_by_signal = True
-            de.allow_polyphony = props.get("polyphony", True)
-            de.circuit_enabled = props.get("circuit_enabled", True)
-            de.set_circuit_condition(
-                first_operand="signal-no-entry", comparator="=", second_operand=0,
-            )
+            if _validate:
+                de.instrument_name = props.get("instrument", "piano")
+                de.note_name = props.get("note", "")
+                de.volume_signal = {
+                    "name": props.get("vol_signal", ""),
+                    "quality": props.get("vol_quality", "normal"),
+                }
+                de.volume_controlled_by_signal = True
+                de.allow_polyphony = props.get("polyphony", True)
+                de.circuit_enabled = props.get("circuit_enabled", True)
+                de.set_circuit_condition(
+                    first_operand="signal-no-entry", comparator="=", second_operand=0,
+                )
+            else:
+                # Fast path: object.__setattr__ + cached condition.
+                # Simple attributes bypass attrs validators; volume_signal
+                # uses the normal setter (needs converter for SignalID).
+                object.__setattr__(
+                    de, "instrument_name", props.get("instrument", "piano"),
+                )
+                object.__setattr__(de, "note_name", props.get("note", ""))
+                de.volume_signal = {
+                    "name": props.get("vol_signal", ""),
+                    "quality": props.get("vol_quality", "normal"),
+                }
+                object.__setattr__(de, "volume_controlled_by_signal", True)
+                object.__setattr__(
+                    de, "allow_polyphony", props.get("polyphony", True),
+                )
+                object.__setattr__(
+                    de, "circuit_enabled", props.get("circuit_enabled", True),
+                )
+                object.__setattr__(
+                    de, "circuit_condition", _cached_speaker_condition,
+                )
 
         elif entity.type == "small-lamp":
-            de.always_on = props.get("always_on", False)
-            de.use_colors = props.get("use_colors", False)
-            if de.use_colors:
-                de.color_mode = 2
-                color_sig = props.get("color_signal")
-                if color_sig:
-                    # Handle dict or string
-                    if isinstance(color_sig, dict):
-                        de.rgb_signal = color_sig
-                    else:
-                        de.rgb_signal = _str_to_signal_ref(str(color_sig))
+            if _validate:
+                de.always_on = props.get("always_on", False)
+                de.use_colors = props.get("use_colors", False)
+                if de.use_colors:
+                    de.color_mode = 2
+                    color_sig = props.get("color_signal")
+                    if color_sig:
+                        # Handle dict or string
+                        if isinstance(color_sig, dict):
+                            de.rgb_signal = color_sig
+                        else:
+                            de.rgb_signal = _str_to_signal_ref(str(color_sig))
 
-            ce = props.get("circuit_enabled", False)
-            de.circuit_enabled = ce
-            if ce:
-                cond = props.get("condition")
-                if cond:
-                    kwargs_set: dict[str, Any] = {
-                        "first_operand": _str_to_signal_ref(cond["first"]),
-                        "comparator": cond["op"],
-                    }
-                    if "second_signal" in cond:
-                        kwargs_set["second_operand"] = _str_to_signal_ref(cond["second_signal"])
-                    elif "constant" in cond:
-                        kwargs_set["second_operand"] = cond["constant"]
-                    de.set_circuit_condition(**kwargs_set)
+                ce = props.get("circuit_enabled", False)
+                de.circuit_enabled = ce
+                if ce:
+                    cond = props.get("condition")
+                    if cond:
+                        kwargs_set: dict[str, Any] = {
+                            "first_operand": _str_to_signal_ref(cond["first"]),
+                            "comparator": cond["op"],
+                        }
+                        if "second_signal" in cond:
+                            kwargs_set["second_operand"] = _str_to_signal_ref(
+                                cond["second_signal"],
+                            )
+                        elif "constant" in cond:
+                            kwargs_set["second_operand"] = cond["constant"]
+                        de.set_circuit_condition(**kwargs_set)
+            else:
+                # Fast path: object.__setattr__ for simple attributes,
+                # skip circuit_condition when circuit_enabled is False.
+                # rgb_signal uses the normal setter (needs SignalID converter).
+                object.__setattr__(
+                    de, "always_on", props.get("always_on", False),
+                )
+                use_colors = props.get("use_colors", False)
+                object.__setattr__(de, "use_colors", use_colors)
+                if use_colors:
+                    object.__setattr__(de, "color_mode", LampColorMode.PACKED_RGB)
+                    color_sig = props.get("color_signal")
+                    if color_sig:
+                        if isinstance(color_sig, dict):
+                            de.rgb_signal = color_sig
+                        else:
+                            de.rgb_signal = _str_to_signal_ref(str(color_sig))
+
+                ce = props.get("circuit_enabled", False)
+                object.__setattr__(de, "circuit_enabled", ce)
+                if ce:
+                    cond = props.get("condition")
+                    if cond:
+                        # Build a minimal Condition with object.__setattr__
+                        lamp_cond = Condition.__new__(Condition)
+                        object.__setattr__(
+                            lamp_cond, "first_signal",
+                            _to_signal_id(_str_to_signal_ref(cond["first"])),
+                        )
+                        object.__setattr__(
+                            lamp_cond, "comparator", cond["op"],
+                        )
+                        if "second_signal" in cond:
+                            object.__setattr__(
+                                lamp_cond, "second_signal",
+                                _to_signal_id(_str_to_signal_ref(cond["second_signal"])),
+                            )
+                        elif "constant" in cond:
+                            object.__setattr__(
+                                lamp_cond, "constant", cond["constant"],
+                            )
+                        object.__setattr__(
+                            de, "circuit_condition", lamp_cond,
+                        )
 
         elif entity.type in ("small-electric-pole", "medium-electric-pole", "substation"):
             # Power poles have no combinator settings; quality is set at construction
@@ -1407,9 +1816,32 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None) -> Any:
                 if not any(a() is e1 for a in e2.neighbours):
                     e2.neighbours.append(Association(e1))
             continue
-        # Materialise the network: horizontal-first chaining with
-        # rightmost bridge merging.  Returns (ep_a, ep_b) pairs.
-        pairs = _wire_horizontal_first(eps, lb)
+        # Materialise the network into pairwise connections.
+        #
+        # Three paths, in priority order:
+        #   1. Pre-wired (net.prewired_pairs set) — use directly.
+        #   2. Large network with positioned endpoints — chain in
+        #      position-sorted order (fast path, O(n log n)).
+        #   3. Generic — run _wire_horizontal_first (O(n³) worst-case
+        #      but preserves wire-length and non-crossing properties).
+        if net.prewired_pairs is not None:
+            pairs = net.prewired_pairs
+        elif len(eps) > 500 and all(
+            lb.entities.get(ep.entity_id) is not None
+            and _endpoint_position(ep, lb) != (0, 0)
+            for ep in eps
+        ):
+            # Fast path: sort by position and chain in order.
+            # This is correct when entities form a contiguous grid
+            # and are already position-sorted (guaranteed by the
+            # composer's topological sort + position ordering).
+            sorted_eps = _sort_endpoints_by_position(eps, lb)
+            pairs = [
+                (sorted_eps[i], sorted_eps[i + 1])
+                for i in range(len(sorted_eps) - 1)
+            ]
+        else:
+            pairs = _wire_horizontal_first(eps, lb)
         for a, b in pairs:
             bp.add_circuit_connection(
                 net.color, a.entity_id, b.entity_id,
@@ -1427,3 +1859,161 @@ def _str_to_signal_ref(s: str | int) -> dict[str, str] | str | int:
         name, quality = s.split("@", 1)
         return {"name": name, "quality": quality}
     return s
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Wire-topology debug assertions (draftsman Blueprint level)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
+    """Check low-level wire invariants on a draftsman Blueprint.
+
+    Verifies that the explicit ``bp.wires`` list is self-consistent and
+    respects Factorio's circuit connection limits.
+
+    Returns a list of error strings.  An empty list means all checks pass.
+
+    Invariants checked
+    ------------------
+    * No self-loops (wire from an entity to itself).
+    * No duplicate wires (same pair of entities, colour, and sides).
+    * Degree bound: each (entity, colour, side) port has ≤ 2 connections
+      (Factorio combinators have exactly two connection points per side
+      per colour).
+    * Wire count sanity: if the blueprint has *N* entities on a colour
+      network with no singleton islands, expect ≥ N−1 edges on that colour.
+    * Connectivity: for each colour, entities that share wire(s) form
+      exactly one connected component per connected subgraph (no orphan
+      islands within a colour unless unavoidable).
+    """
+    errors: list[str] = []
+
+    wires = getattr(bp, "wires", None)
+    if not wires:
+        return errors
+
+    # ── Build adjacency per colour ────────────────────────────────
+    # adj[colour][eid] = set of (other_eid, side_at_other)
+    adj: dict[str, dict[str, set[tuple[str, str]]]] = {}
+    # Degree counter: deg[colour][(eid, side)] = int
+    deg: dict[str, dict[tuple[str, str], int]] = {}
+    seen_wires: set[tuple[str, str, str, str, str]] = set()
+    wire_count_by_colour: dict[str, int] = {}
+
+    for w in wires:
+        assoc1, conn1, assoc2, conn2 = w
+        e1 = assoc1() if callable(assoc1) else assoc1
+        e2 = assoc2() if callable(assoc2) else assoc2
+        eid1: str = getattr(e1, "id", None) or f"_e{id(e1)}"
+        eid2: str = getattr(e2, "id", None) or f"_e{id(e2)}"
+
+        wt1 = conn1.value if hasattr(conn1, "value") else int(conn1)
+        wt2 = conn2.value if hasattr(conn2, "value") else int(conn2)
+        colour = "red" if wt1 % 2 == 1 else "green"
+        side1 = "input" if wt1 <= 2 else "output"
+        side2 = "input" if wt2 <= 2 else "output"
+
+        # Self-loop on the *same port* is meaningless (input→input, output→output
+        # on the same entity).  Same entity but *different ports* (output→input)
+        # is a valid Factorio pattern (e.g. clock loopback) — process normally.
+        if eid1 == eid2 and side1 == side2:
+            errors.append(
+                f"Self-loop on same port: {eid1!r}:{side1} ↔ {eid2!r}:{side2} ({colour})"
+            )
+            continue
+
+        # Duplicate check
+        wire_key = (eid1, eid2, colour, side1, side2)
+        wire_key_rev = (eid2, eid1, colour, side2, side1)
+        if wire_key in seen_wires or wire_key_rev in seen_wires:
+            errors.append(
+                f"Duplicate wire: {eid1!r} ↔ {eid2!r} ({colour}, "
+                f"{side1}↔{side2})"
+            )
+        seen_wires.add(wire_key)
+
+        # Adjacency
+        adj.setdefault(colour, {}).setdefault(eid1, set()).add((eid2, side2))
+        adj.setdefault(colour, {}).setdefault(eid2, set()).add((eid1, side1))
+
+        # Degree tracking
+        deg.setdefault(colour, {}).setdefault((eid1, side1), 0)
+        deg.setdefault(colour, {}).setdefault((eid2, side2), 0)
+        deg[colour][(eid1, side1)] += 1
+        deg[colour][(eid2, side2)] += 1
+
+        wire_count_by_colour[colour] = wire_count_by_colour.get(colour, 0) + 1
+
+    # ── Degree bound check (Factorio: ≤ 2 per port per colour) ────
+    for colour, colour_deg in deg.items():
+        for (eid, side), d in colour_deg.items():
+            if d > 2:
+                errors.append(
+                    f"Degree overflow: {eid!r} {side} on {colour} has "
+                    f"{d} connections (max 2)"
+                )
+
+    # ── Connectivity check per colour ─────────────────────────────
+    for colour, colour_adj in adj.items():
+        if not colour_adj:
+            continue
+        eids = set(colour_adj.keys())
+        visited: set[str] = set()
+        components: list[set[str]] = []
+
+        for eid in sorted(eids):
+            if eid in visited:
+                continue
+            stack = [eid]
+            comp: set[str] = set()
+            while stack:
+                cur = stack.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                comp.add(cur)
+                for neighbour, _ in colour_adj.get(cur, set()):
+                    if neighbour not in visited:
+                        stack.append(neighbour)
+            components.append(comp)
+
+        if len(components) > 1:
+            sizes = [len(c) for c in components]
+            errors.append(
+                f"{colour} wires: {len(eids)} entities split into "
+                f"{len(components)} component(s) (sizes: {sizes})"
+            )
+
+    # ── Wire count sanity ─────────────────────────────────────────
+    for colour, eid_set_adj in adj.items():
+        n_entities = len(eid_set_adj)
+        n_wires = wire_count_by_colour.get(colour, 0)
+        # A connected graph needs at least n-1 edges.  More edges
+        # than 2(n-1) suggests redundant wiring (cycles).
+        if n_entities >= 2 and n_wires < n_entities - 1:
+            errors.append(
+                f"{colour}: {n_wires} wire(s) for {n_entities} entities "
+                f"(need ≥ {n_entities - 1} for connectivity)"
+            )
+        if n_wires > 2 * (n_entities - 1) and n_entities >= 3:
+            errors.append(
+                f"{colour}: {n_wires} wire(s) for {n_entities} entities "
+                f"(excessive; ≤ {2 * (n_entities - 1)} expected for simple "
+                f"chains/trees)"
+            )
+
+    return errors
+
+
+def assert_wire_topology(bp: Any, *, label: str = "") -> None:
+    """Assert that *bp* has valid wire topology (no-op when ``__debug__`` is False)."""
+    if not __debug__:
+        return
+    errs = check_wire_topology(bp, label=label)
+    if errs:
+        prefix = f" [{label}]" if label else ""
+        raise AssertionError(
+            f"Wire topology violation(s){prefix}:\n" +
+            "\n".join(f"  - {e}" for e in errs)
+        )

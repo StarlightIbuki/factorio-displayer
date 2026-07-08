@@ -85,7 +85,7 @@ def build_progress_bar(
         in_net = Network(
             network_id="red_in",
             color="red",
-            endpoints=[Endpoint(lamp_ids[0], "input")],
+            endpoints={Endpoint(lamp_ids[0], "input")},
         )
         lb.add_network(in_net)
         lb.set_input_port("in", "red_in")

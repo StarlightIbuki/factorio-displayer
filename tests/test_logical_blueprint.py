@@ -448,7 +448,7 @@ class TestDraftsmanRoundTrip:
 
         bp = Blueprint()
         bp.label = "Wired"
-        ac = new_entity("arithmetic-combinator", id="mod", tile_position=(12, 22))
+        ac = new_entity("arithmetic-combinator", id="mod", tile_position=(4, 22))
         ac.set_arithmetic_condition(
             first_operand="signal-clock", operation="%",
             second_operand=60, output_signal="signal-M",

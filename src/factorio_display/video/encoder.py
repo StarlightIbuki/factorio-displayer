@@ -33,6 +33,9 @@ from .. import (
     SIGNAL_POOL,
 )
 
+from ..logical_blueprint import assert_wire_topology
+from ..cache_paths import cache_dir, cache_file as make_cache_file
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -125,6 +128,72 @@ def _frame_diff(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.abs(a.astype(np.float32) - b.astype(np.float32))) / 255.0)
 
 
+def _fix_conditions_in_dict(d: dict) -> None:
+    """Fix ``compare_type`` fields in a blueprint dict *in place*.
+
+    Draftsman's ``Condition.compare_type`` defaults to ``"or"``, and
+    ``Blueprint.to_dict()`` omits default values.  Factorio may interpret
+    a missing ``compare_type`` differently, causing AND/OR confusion.
+
+    This walks every decider combinator in the blueprint dict and ensures
+    that within-range pairs carry ``"and"`` while inter-range boundaries
+    carry ``"or"``.
+    """
+    for entity in d.get("blueprint", {}).get("entities", []):
+        cb = entity.get("control_behavior", {})
+        decider = cb.get("decider_conditions", {})
+        conds: list[dict] = decider.get("conditions", [])
+        if not conds:
+            continue
+
+        i = 0
+        range_idx = 0
+        while i < len(conds):
+            cond_a = conds[i]
+            comp = cond_a.get("comparator", "")
+
+            if comp == "=":
+                cond_a.setdefault("compare_type", "and")
+                if range_idx > 0:
+                    cond_a["compare_type"] = "or"
+                i += 1
+                range_idx += 1
+                continue
+
+            # comp is "≥" — first of a pair  [>= start, <= end]
+            cond_b = conds[i + 1] if i + 1 < len(conds) else None
+            is_pair = (
+                cond_b is not None
+                and cond_b.get("comparator", "") == "\u2264"
+            )
+            if is_pair:
+                cond_a["compare_type"] = "or" if range_idx > 0 else "and"
+                cond_b.setdefault("compare_type", "and")
+                i += 2
+                range_idx += 1
+            else:
+                cond_a.setdefault("compare_type", "and")
+                i += 1
+
+
+def _to_fixed_string(bp: Blueprint) -> str:
+    """Like ``bp.to_string()``, but with corrected ``compare_type`` fields."""
+    from draftsman.utils import JSON_to_string
+    d = bp.to_dict()
+    _fix_conditions_in_dict(d)
+    return JSON_to_string(d)
+
+
+def _fix_blueprint_conditions(bp: Blueprint) -> Blueprint:
+    """Convenience wrapper that returns a *new* Blueprint with fixed conditions.
+    Prefer :func:`_to_fixed_string` for serialization to avoid re-serializing
+    from objects (which would lose the fix).
+    """
+    d = bp.to_dict()
+    _fix_conditions_in_dict(d)
+    return Blueprint.from_dict(d)
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Core blueprint builder (extracted for reuse by chunked encoder)
 # ══════════════════════════════════════════════════════════════════════
@@ -138,121 +207,134 @@ def _encode_frames_core(
     clock: str,
     current_tick: int,
     label_suffix: str = "",
-) -> str:
-    """Build a blueprint string from pre-processed frame data.
+) -> "LogicalBlueprint":
+    """Build a LogicalBlueprint from pre-processed frame data.
 
     Takes already-resized and adaptive-dropped frames plus tick ranges,
-    and produces a combinator blueprint with snake-grid DC layout.
-    This is a top-level function so ProcessPoolExecutor can serialise it.
+    and produces a LogicalBlueprint with DC entities and star-wired
+    red networks (inputs joined, outputs joined).  No spatial layout —
+    that is the composer's job.
 
     *mapping_params* is a dict with keys ``width``, ``height``, ``qualities``,
     ``signal_pool`` — reconstructable as ``SignalMapping(**mapping_params)``.
+
+    Returns a :class:`~factorio_display.logical_blueprint.LogicalBlueprint`
+    with ``input_ports={"clock": ...}`` and ``output_ports={"data": ...}``.
     """
+    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity
+
     mapping = SignalMapping(**mapping_params)
 
     total_input = len(kept_frames)
     if total_input == 0:
         sys.stderr.write("No frames to encode.\n")
-        return ""
+        return LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
 
-    frame_entries = [(f, s, e) for f, (s, e) in zip(kept_frames, tick_ranges)]
+    # Normalise tick_ranges: accept either flat list[tuple] or
+    # list[list[tuple]] (from cross-chunk dedup where one frame
+    # may have multiple merged tick ranges).
+    ranges_per_frame: list[list[tuple[int, int]]]
+    if tick_ranges and isinstance(tick_ranges[0], list):
+        ranges_per_frame = tick_ranges  # type: ignore[assignment]
+    else:
+        ranges_per_frame = [[r] for r in tick_ranges]  # type: ignore[arg-type]
+
+    frame_entries = [(f, ranges) for f, ranges in zip(kept_frames, ranges_per_frame)]
 
     if deduplicate:
-        seen: dict[str, tuple[np.ndarray, list[tuple[int, int]]]] = {}
-        order: list[str] = []
-        for resized, start, end in frame_entries:
-            h = hashlib.sha256(resized.tobytes()).hexdigest()
+        seen: dict[int, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[int] = []
+        for resized, ranges in frame_entries:
+            h = hash(resized.tobytes())
             if h not in seen:
                 seen[h] = (resized, [])
                 order.append(h)
-            seen[h][1].append((start, end))
+            seen[h][1].extend(ranges)
         unique_frames = [seen[h] for h in order]
     else:
-        unique_frames = [(resized, [(start, end)]) for resized, start, end in frame_entries]
+        unique_frames = [(resized, list(ranges)) for resized, ranges in frame_entries]
 
-    blueprint = Blueprint()
-    blueprint.label = f"Video Memory: {output_name}{label_suffix}"
-    blueprint.icons = ["parameter-0"]
+    lb = LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
 
-    total = len(unique_frames)
-    cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
-    cols = min(cols, 26)
-    rows = (total + cols - 1) // cols
-
-    dc_grid: dict[tuple[int, int], str] = {}
+    # ── Build DC entities — no spatial layout (that's the composer's job).
+    # All DCs join a shared red network: inputs star-joined, outputs star-joined.
+    dc_ids: list[str] = []
     for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
-        idx = gate_num - 1
-        col = idx % cols
-        row = idx // cols
         dc_id = f"gate_{gate_num}"
 
-        conditions: list = []
+        conditions: list[dict] = []
         for start, end in ranges:
             if start == end:
-                conditions.append(
-                    DeciderCombinator.Condition(
-                        first_signal={"name": clock},
-                        comparator="=",
-                        constant=start,
-                    )
-                )
+                conditions.append({
+                    "first": clock,
+                    "op": "=",
+                    "constant": start,
+                    "compare_type": "and",
+                })
             else:
-                conditions.append(
-                    DeciderCombinator.Condition(
-                        first_signal={"name": clock},
-                        comparator=">=",
-                        constant=start,
-                    )
-                )
-                conditions.append(
-                    DeciderCombinator.Condition(
-                        first_signal={"name": clock},
-                        comparator="<=",
-                        constant=end,
-                        compare_type="and",
-                    )
-                )
+                conditions.append({
+                    "first": clock,
+                    "op": ">=",
+                    "constant": start,
+                    "compare_type": "and",
+                })
+                conditions.append({
+                    "first": clock,
+                    "op": "<=",
+                    "constant": end,
+                    "compare_type": "and",
+                })
 
-        outputs: list = []
-        for (x, y), sig in mapping.iter_pixels():
+        # Non-zero pixel fast path: only iterate pixels that have colour.
+        outputs: list[dict] = []
+        nonzero_mask = np.any(resized != 0, axis=2)
+        ys, xs = np.nonzero(nonzero_mask)
+        for y, x in zip(ys, xs):
+            sig = mapping.get_signal(int(x), int(y))
+            if sig is None:
+                continue
             r, g, b = resized[y, x]
             color_int = (int(r) << 16) | (int(g) << 8) | int(b)
-            if color_int > 0:
-                outputs.append(
-                    DeciderCombinator.Output(
-                        signal={"name": sig["name"], "quality": sig["quality"]},
-                        copy_count_from_input=False,
-                        constant=color_int,
-                    )
-                )
+            sig_str = sig["name"]
+            if sig.get("quality") and sig["quality"] != "normal":
+                sig_str = f"{sig['name']}@{sig['quality']}"
+            outputs.append({
+                "signal": sig_str,
+                "copy_count": False,
+                "constant": color_int,
+            })
 
-        dc = new_entity(
+        dc = LogicalEntity(
+            dc_id,
             "decider-combinator",
-            id=dc_id,
-            tile_position=(col, row * 2),
-            direction=Direction.SOUTH,
+            properties={
+                "conditions": conditions,
+                "outputs": outputs,
+            },
         )
-        dc.conditions = conditions
-        dc.outputs = outputs
-        blueprint.entities.append(dc)
-        dc_grid[(row, col)] = dc_id
+        lb.add_entity(dc)
+        dc_ids.append(dc_id)
 
-    # Snake-grid wiring — all on red (unified signal bus)
-    prev_id: str | None = None
-    for r in range(rows):
-        col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-        for c in col_iter:
-            dc_id = dc_grid.get((r, c))
-            if dc_id is None:
-                continue
-            if prev_id is not None:
-                blueprint.add_circuit_connection(
-                    "red", prev_id, dc_id, side_1="input", side_2="input"
-                )
-                blueprint.add_circuit_connection(
-                    "red", prev_id, dc_id, side_1="output", side_2="output"
-                )
-            prev_id = dc_id
+    # ── Join all inputs together (red), all outputs together (red) ──
+    # This expresses logical network membership — no spatial knowledge.
+    if len(dc_ids) >= 2:
+        first_id = dc_ids[0]
+        for dc_id in dc_ids[1:]:
+            lb.connect("red", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
+            lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
+
+    # ── Declare ports ───────────────────────────────────────────────
+    if dc_ids:
+        first_input_ep = Endpoint(dc_ids[0], "input")
+        for net in lb.networks:
+            if net.color == "red" and first_input_ep in net.endpoints:
+                lb.set_input_port("clock", net.network_id)
+                break
+        last_output_ep = Endpoint(dc_ids[-1], "output")
+        for net in lb.networks:
+            if net.color == "red" and last_output_ep in net.endpoints:
+                lb.set_output_port("data", net.network_id)
+                break
 
     total_ticks = current_tick - 1
     total_combinators = len(unique_frames)
@@ -267,7 +349,7 @@ def _encode_frames_core(
             f"\nEncoded {total_input} frames over {total_ticks} ticks "
             f"(~{total_ticks / max(1, total_input):.1f} tick(s)/frame).\n"
         )
-    return blueprint.to_string()
+    return lb
 
 
 def _encode_frames_logical(
@@ -295,34 +377,32 @@ def _encode_frames_logical(
         sys.stderr.write("No frames to encode.\n")
         return LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
 
-    frame_entries = [(f, s, e) for f, (s, e) in zip(kept_frames, tick_ranges)]
+    # Normalise tick_ranges (same as _encode_frames_core)
+    ranges_per_frame: list[list[tuple[int, int]]]
+    if tick_ranges and isinstance(tick_ranges[0], list):
+        ranges_per_frame = tick_ranges  # type: ignore[assignment]
+    else:
+        ranges_per_frame = [[r] for r in tick_ranges]  # type: ignore[arg-type]
+
+    frame_entries = [(f, ranges) for f, ranges in zip(kept_frames, ranges_per_frame)]
 
     if deduplicate:
-        seen: dict[str, tuple[np.ndarray, list[tuple[int, int]]]] = {}
-        order: list[str] = []
-        for resized, start, end in frame_entries:
-            h = hashlib.sha256(resized.tobytes()).hexdigest()
+        seen: dict[int, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[int] = []
+        for resized, ranges in frame_entries:
+            h = hash(resized.tobytes())
             if h not in seen:
                 seen[h] = (resized, [])
                 order.append(h)
-            seen[h][1].append((start, end))
+            seen[h][1].extend(ranges)
         unique_frames = [seen[h] for h in order]
     else:
-        unique_frames = [(resized, [(start, end)]) for resized, start, end in frame_entries]
+        unique_frames = [(resized, list(ranges)) for resized, ranges in frame_entries]
 
     lb = LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
 
-    total = len(unique_frames)
-    cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
-    cols = min(cols, 26)
-    rows = (total + cols - 1) // cols
-
-    dc_grid: dict[tuple[int, int], str] = {}
-    first_dc_id: str | None = None
+    dc_ids: list[str] = []
     for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
-        idx = gate_num - 1
-        col = idx % cols
-        row = idx // cols
         dc_id = f"gate_{gate_num}"
 
         conditions: list[dict] = []
@@ -332,12 +412,14 @@ def _encode_frames_logical(
                     "first": clock,
                     "op": "=",
                     "constant": start,
+                    "compare_type": "and",
                 })
             else:
                 conditions.append({
                     "first": clock,
                     "op": ">=",
                     "constant": start,
+                    "compare_type": "and",
                 })
                 conditions.append({
                     "first": clock,
@@ -346,19 +428,24 @@ def _encode_frames_logical(
                     "compare_type": "and",
                 })
 
+        # Non-zero pixel fast path: only iterate pixels that have colour.
         outputs: list[dict] = []
-        for (x, y), sig in mapping.iter_pixels():
+        nonzero_mask = np.any(resized != 0, axis=2)
+        ys, xs = np.nonzero(nonzero_mask)
+        for y, x in zip(ys, xs):
+            sig = mapping.get_signal(int(x), int(y))
+            if sig is None:
+                continue
             r, g, b = resized[y, x]
             color_int = (int(r) << 16) | (int(g) << 8) | int(b)
-            if color_int > 0:
-                sig_str = sig["name"]
-                if sig.get("quality") and sig["quality"] != "normal":
-                    sig_str = f"{sig['name']}@{sig['quality']}"
-                outputs.append({
-                    "signal": sig_str,
-                    "copy_count": False,
-                    "constant": color_int,
-                })
+            sig_str = sig["name"]
+            if sig.get("quality") and sig["quality"] != "normal":
+                sig_str = f"{sig['name']}@{sig['quality']}"
+            outputs.append({
+                "signal": sig_str,
+                "copy_count": False,
+                "constant": color_int,
+            })
 
         dc = LogicalEntity(
             dc_id,
@@ -367,39 +454,25 @@ def _encode_frames_logical(
                 "conditions": conditions,
                 "outputs": outputs,
             },
-            position=(col, row * 2),
-            direction=2,  # SOUTH
         )
         lb.add_entity(dc)
-        dc_grid[(row, col)] = dc_id
-        if first_dc_id is None:
-            first_dc_id = dc_id
+        dc_ids.append(dc_id)
 
-    # Snake-grid wiring — all on red (unified signal bus)
-    prev_id: str | None = None
-    first_input_ep: Endpoint | None = None
-    last_output_ep: Endpoint | None = None
-    for r in range(rows):
-        col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-        for c in col_iter:
-            dc_id = dc_grid.get((r, c))
-            if dc_id is None:
-                continue
-            if prev_id is not None:
-                lb.connect("red", Endpoint(prev_id, "input"), Endpoint(dc_id, "input"))
-                lb.connect("red", Endpoint(prev_id, "output"), Endpoint(dc_id, "output"))
-            else:
-                first_input_ep = Endpoint(dc_id, "input")
-            prev_id = dc_id
-            last_output_ep = Endpoint(dc_id, "output")
+    # Wire all inputs together (red) and all outputs together (red)
+    if len(dc_ids) >= 2:
+        first_id = dc_ids[0]
+        for dc_id in dc_ids[1:]:
+            lb.connect("red", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
+            lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
 
     # Declare ports
-    if first_input_ep is not None:
+    if dc_ids:
+        first_input_ep = Endpoint(dc_ids[0], "input")
         for net in lb.networks:
             if net.color == "red" and first_input_ep in net.endpoints:
                 lb.set_input_port("clock", net.network_id)
                 break
-    if last_output_ep is not None:
+        last_output_ep = Endpoint(dc_ids[-1], "output")
         for net in lb.networks:
             if net.color == "red" and last_output_ep in net.endpoints:
                 lb.set_output_port("data", net.network_id)
@@ -435,11 +508,27 @@ def _chunk_cache_dir(source_id: str, time_chunks: int, total_w: int, total_h: in
         key += "_dedup"
     key += f"_tc{time_chunks}"
     safe = hashlib.md5(key.encode()).hexdigest()[:12]
-    return Path(f".encode_chunks_{safe}")
+    return cache_dir("video_time_chunks", f"encode_chunks_{safe}")
 
 
 def _chunk_meta_path(cache_dir: Path) -> Path:
     return cache_dir / "meta.json"
+
+
+def _write_toml_cache_async(lb: "LogicalBlueprint", cache_path: Path) -> None:
+    """Write a LogicalBlueprint as TOML to *cache_path* in a
+    background thread (non-blocking).  Errors are silently ignored."""
+    import threading
+    from ..logical_blueprint import to_toml
+
+    def _write() -> None:
+        try:
+            cache_path.write_text(to_toml(lb), encoding="utf-8")
+        except Exception:
+            pass  # cache write failures are non-fatal
+
+    t = threading.Thread(target=_write, daemon=True)
+    t.start()
 
 
 # ══════════════════════════════════════════════════════════════════════�?
@@ -447,13 +536,16 @@ def _chunk_meta_path(cache_dir: Path) -> Path:
 # ══════════════════════════════════════════════════════════════════════�?
 
 def _build_chunk_worker(payload: bytes) -> tuple[int, str]:
-    """Build a single time-chunk blueprint in a worker process.
+    """Build a single time-chunk LogicalBlueprint in a worker process.
 
-    Returns ``(chunk_idx, blueprint_string)``.
+    Returns ``(chunk_idx, toml_string)``.  LogicalBlueprint is serialized
+    as TOML because it cannot be pickled across process boundaries.
     """
+    from ..logical_blueprint import to_toml
+
     data = pickle.loads(payload)
     chunk_idx = data["chunk_idx"]
-    bp_str = _encode_frames_core(
+    lb = _encode_frames_core(
         kept_frames=data["kept_frames"],
         tick_ranges=data["tick_ranges"],
         output_name=data["output_name"],
@@ -463,365 +555,80 @@ def _build_chunk_worker(payload: bytes) -> tuple[int, str]:
         current_tick=data["current_tick"],
         label_suffix=data.get("label_suffix", ""),
     )
-    return chunk_idx, bp_str
+    return chunk_idx, to_toml(lb)
 
 
 # ══════════════════════════════════════════════════════════════════════�?
 # Merge helpers
 # ══════════════════════════════════════════════════════════════════════�?
 
-def _max_col_in_blueprint(bp: Blueprint) -> int:
-    """Return the maximum tile X coordinate of any entity in the blueprint."""
-    max_c = 0
-    for e in bp.entities:
-        tp = getattr(e, "tile_position", None)
-        if tp is not None:
-            max_c = max(max_c, tp[0])
-    return max_c
-
-
 def _merge_chunk_blueprints(
-    chunk_bps: list[str],
+    chunk_lbs: list["LogicalBlueprint"],
     output_name: str,
-    deduplicate_cross: bool = False,
-    total_ticks: int = 0,
-) -> str:
-    """Merge multiple time-chunk blueprint strings into one.
+) -> "LogicalBlueprint":
+    """Merge multiple time-chunk LogicalBlueprints into one.
 
-    Each chunk's entities are placed at increasing X offsets.  Green (input)
-    and red (output) wires connect the last DC of chunk *i* to the first DC
-    of chunk *i+1*.
+    Each chunk's entities and networks are prefixed to avoid collisions,
+    then their ``data`` ports are connected in time order.
     """
-    if not chunk_bps:
-        return ""
+    from ..logical_blueprint import LogicalBlueprint
 
-    non_empty = [bp for bp in chunk_bps if bp and bp.strip()]
-    if not non_empty:
-        return ""
+    if not chunk_lbs:
+        return LogicalBlueprint(label=f"Video Memory: {output_name}")
 
-    if len(non_empty) == 1:
-        return non_empty[0]
+    if len(chunk_lbs) == 1:
+        return chunk_lbs[0]
 
-    parsed: list[Blueprint] = []
-    for bp_str in non_empty:
-        parsed.append(Blueprint.from_string(bp_str))
+    merged = LogicalBlueprint(label=f"Video Memory: {output_name}")
 
-    if deduplicate_cross:
-        sys.stderr.write("Cross-chunk deduplication started (this may be slow)…\n")
-        return _merge_with_cross_dedup(parsed, output_name, total_ticks)
-
-    # ── Build merged blueprint with fresh entities ────────────────────
-    merged = Blueprint()
-    merged.label = f"Video Memory: {output_name}"
-
-    # Per-chunk: first and last DC entity IDs in merged (for inter-chunk wiring)
-    chunk_first_id: list[str] = []
-    chunk_last_id: list[str] = []
-
-    cum_x_offset = 0.0
-    margin = 2  # pylint: disable=invalid-name
-
-    for ci, bp in enumerate(parsed):
-        entity_dicts = bp.to_dict().get("blueprint", {}).get("entities", [])
-
-        if not entity_dicts:
-            chunk_first_id.append("")
-            chunk_last_id.append("")
+    # Merge chunks with prefixes — each chunk's networks stay independent
+    for ci, chunk_lb in enumerate(chunk_lbs):
+        prefix = f"tc{ci}_"
+        if not chunk_lb.entities:
             continue
+        merged.merge(chunk_lb, entity_prefix=prefix, network_prefix=prefix)
+        # Re-declare the chunk's output port with the prefixed name
+        # (merge() already prefixed the port's network_id, but the port
+        #  name itself needs the prefix so we can connect them in order.)
+        old_data = chunk_lb.output_ports.get("data")
+        if old_data is not None:
+            merged.output_ports[f"{prefix}data"] = prefix + old_data
 
-        # Map: id(old_entity_object) ->new entity ID string
-        old_obj_to_new_id: dict[int, str] = {}
+    # Connect chunks in time order: chunk i's data → chunk i+1's clock
+    for ci in range(len(chunk_lbs) - 1):
+        src_prefix = f"tc{ci}_"
+        dst_prefix = f"tc{ci + 1}_"
+        src_net_id = merged.output_ports.get(f"{src_prefix}data")
+        dst_net_id = merged.input_ports.get("clock")  # clock is unprefixed (shared)
+        # Find the dst chunk's clock network (prefixed)
+        if dst_net_id is None:
+            # clock port may have been overwritten — scan networks
+            for net in merged.networks:
+                if not net.network_id.startswith(dst_prefix):
+                    continue
+                if net.color == "red":
+                    for ep in net.endpoints:
+                        if ep.port == "input":
+                            dst_net_id = net.network_id
+                            break
+                if dst_net_id:
+                    break
 
-        first_dc_id = ""
-        last_dc_id = ""
-        first_dc_pos = (1e9, 1e9)
-        last_dc_pos = (-1, -1)
-
-        for old_e in bp.entities:
-            name = getattr(old_e, "name", "")
-            tp = getattr(old_e, "tile_position", None)
-            if tp is None:
-                continue
-            x = tp[0] + cum_x_offset
-            y = tp[1]
-            eid = f"c{ci}_e{len(merged.entities)}"
-
-            # Create fresh entity with same properties
-            e = new_entity(name, id=str(eid), tile_position=(int(x), int(y)))
-
-            # Copy combinator-specific properties from old entity
-            # Decider combinators
-            if "decider-combinator" in name:
-                old_conds = getattr(old_e, "conditions", None)
-                old_outs = getattr(old_e, "outputs", None)
-                old_dir = getattr(old_e, "direction", None)
-                if old_conds is not None:
-                    e.conditions = list(old_conds)
-                if old_outs is not None:
-                    e.outputs = list(old_outs)
-                if old_dir is not None:
-                    e.direction = old_dir
-                # Track first/last DC
-                if y < first_dc_pos[1] or (y == first_dc_pos[1] and x < first_dc_pos[0]):
-                    first_dc_pos = (x, y)
-                    first_dc_id = str(eid)
-                if y > last_dc_pos[1] or (y == last_dc_pos[1] and x > last_dc_pos[0]):
-                    last_dc_pos = (x, y)
-                    last_dc_id = str(eid)
-
-            # Arithmetic combinators
-            elif "arithmetic-combinator" in name:
-                old_cond = getattr(old_e, "arithmetic_condition", None)
-                old_dir = getattr(old_e, "direction", None)
-                if old_cond is not None:
-                    e.set_arithmetic_condition(
-                        first_operand=getattr(old_cond, "first_operand", None),
-                        operation=getattr(old_cond, "operation", None),
-                        second_operand=getattr(old_cond, "second_operand", None),
-                        output_signal=getattr(old_cond, "output_signal", None),
-                    )
-                if old_dir is not None:
-                    e.direction = old_dir
-
-            # Constant combinators
-            elif "constant-combinator" in name:
-                old_signals = getattr(old_e, "signals", None)
-                if old_signals is not None:
-                    for slot, sig in enumerate(old_signals):
-                        if sig is not None:
-                            e.set_signal(slot, sig)
-
-            # Speakers
-            elif "programmable-speaker" in name:
-                for attr in ("instrument_name", "note_name", "volume_signal",
-                             "volume_controlled_by_signal", "allow_polyphony",
-                             "circuit_enabled"):
-                    val = getattr(old_e, attr, None)
-                    if val is not None:
-                        setattr(e, attr, val)
-
-            merged.entities.append(e)
-            old_obj_to_new_id[id(old_e)] = str(eid)
-
-        # ── Copy intra-chunk wires ────────────────────────────────────
-        for wire in getattr(bp, "wires", []):
-            if len(wire) < 4:
-                continue
-            assoc1, wt1_raw, assoc2, wt2_raw = wire[0], wire[1], wire[2], wire[3]
-            old_e1 = assoc1() if callable(assoc1) else assoc1
-            old_e2 = assoc2() if callable(assoc2) else assoc2
-            wt1 = wt1_raw.value if hasattr(wt1_raw, "value") else int(wt1_raw)
-            wt2 = wt2_raw.value if hasattr(wt2_raw, "value") else int(wt2_raw)
-
-            new_id1 = old_obj_to_new_id.get(id(old_e1))
-            new_id2 = old_obj_to_new_id.get(id(old_e2))
-            if not new_id1 or not new_id2:
-                continue
-
-            color = "red" if wt1 % 2 == 1 else "green"
-            side_1 = "input" if wt1 <= 2 else "output"
-            side_2 = "input" if wt2 <= 2 else "output"
-            try:
-                merged.add_circuit_connection(
-                    color, new_id1, new_id2,
-                    side_1=side_1, side_2=side_2,
+        if src_net_id and dst_net_id:
+            src_net = next((n for n in merged.networks if n.network_id == src_net_id), None)
+            dst_net = next((n for n in merged.networks if n.network_id == dst_net_id), None)
+            if src_net and dst_net and src_net.endpoints and dst_net.endpoints:
+                merged.connect(
+                    src_net.color,
+                    next(iter(src_net.endpoints)),
+                    next(iter(dst_net.endpoints)),
                 )
-            except Exception:
-                pass
-
-        chunk_first_id.append(first_dc_id)
-        chunk_last_id.append(last_dc_id)
-
-        # Compute next X offset
-        cum_x_offset += _max_col_in_blueprint(bp) + 1 + margin
-
-    # ── inter-chunk wiring ────────────────────────────────────────────
-    for ci in range(len(non_empty) - 1):
-        prev_last = chunk_last_id[ci]
-        next_first = chunk_first_id[ci + 1]
-        if prev_last and next_first:
-            merged.add_circuit_connection(
-                "red", prev_last, next_first,
-                side_1="input", side_2="input",
-            )
-            merged.add_circuit_connection(
-                "red", prev_last, next_first,
-                side_1="output", side_2="output",
-            )
 
     sys.stderr.write(
-        f"Merged {len(non_empty)} time chunks "
+        f"Merged {len(chunk_lbs)} time chunks "
         f"-> {len(merged.entities)} entities.\n"
     )
-    return merged.to_string()
-
-
-def _merge_with_cross_dedup(
-    parsed: list[Blueprint],
-    output_name: str,
-    total_ticks: int,
-) -> str:
-    """Merge chunks with cross-chunk deduplication.
-
-    Identical DC outputs across chunks are merged: their tick-range conditions
-    are combined into a single DC, reducing the total combinator count.
-    """
-    # Collect all DCs from all chunks
-    # Key: hash of (output_signals, output_values) -> merged conditions
-    from collections import OrderedDict
-
-    # dc_signature -> (conditions_list, first_entity_for_reference)
-    merged_dcs: dict[str, dict] = OrderedDict()
-
-    for bp in parsed:
-        for e in bp.entities:
-            if "decider-combinator" not in e.name:
-                continue
-            # Build a signature from the outputs
-            outputs = getattr(e, "outputs", []) or []
-            sig_parts: list[str] = []
-            for o in outputs:
-                sig = getattr(o, "signal", None)
-                const = getattr(o, "constant", None)
-                if sig is not None:
-                    # SignalID from draftsman has .name and .quality attributes
-                    sig_name = getattr(sig, "name", None) or str(sig)
-                    sig_qual = getattr(sig, "quality", "normal") or "normal"
-                    sig_parts.append(f"{sig_name}|{sig_qual}={const}")
-            sig_key = "||".join(sorted(sig_parts))
-
-            conditions = getattr(e, "conditions", []) or []
-            cond_parts: list[str] = []
-            for c in conditions:
-                fs = getattr(c, "first_signal", None)
-                comp = getattr(c, "comparator", "")
-                const = getattr(c, "constant", 0)
-                if fs is not None:
-                    fs_name = getattr(fs, "name", None) or str(fs)
-                    cond_parts.append(f"{fs_name}{comp}{const}")
-
-            if sig_key not in merged_dcs:
-                merged_dcs[sig_key] = {
-                    "conditions": [],  # list of (start_tick, end_tick)
-                    "outputs": outputs,
-                    "clock_signal": "",
-                }
-
-            # Parse conditions into tick ranges
-            tick_ranges_for_dc: list[tuple[int, int]] = []
-            i = 0
-            cond_list = conditions
-            while i < len(cond_list):
-                c = cond_list[i]
-                fs = getattr(c, "first_signal", None)
-                comp = getattr(c, "comparator", "")
-                const = getattr(c, "constant", 0)
-                clock_name = ""
-                if fs is not None:
-                    clock_name = getattr(fs, "name", None) or str(fs)
-                    merged_dcs[sig_key]["clock_signal"] = clock_name
-
-                if comp == "=":
-                    tick_ranges_for_dc.append((const, const))
-                    i += 1
-                elif comp == ">=":
-                    start = const
-                    if i + 1 < len(cond_list):
-                        c2 = cond_list[i + 1]
-                        if getattr(c2, "comparator", "") == "<=":
-                            end = getattr(c2, "constant", start)
-                            tick_ranges_for_dc.append((start, end))
-                            i += 2
-                        else:
-                            i += 1
-                    else:
-                        i += 1
-                else:
-                    i += 1
-
-            merged_dcs[sig_key]["conditions"].extend(tick_ranges_for_dc)
-
-    # Build the merged blueprint
-    merged = Blueprint()
-    merged.label = f"Video Memory: {output_name} (cross-dedup)"
-
-    total = len(merged_dcs)
-    cols = max(1, math.isqrt(max(0, 2 * total - 1)) + 1) if total > 0 else 1
-    cols = min(cols, 26)
-    rows = (total + cols - 1) // cols
-
-    dc_grid: dict[tuple[int, int], str] = {}
-
-    for gate_num, (sig_key, info) in enumerate(merged_dcs.items(), start=1):
-        idx = gate_num - 1
-        col = idx % cols
-        row = idx // cols
-        dc_id = f"gate_{gate_num}"
-
-        # Build conditions from merged tick ranges
-        clock = info["clock_signal"]
-        conditions: list = []
-        for start, end in info["conditions"]:
-            if start == end:
-                conditions.append(
-                    DeciderCombinator.Condition(
-                        first_signal={"name": clock},
-                        comparator="=",
-                        constant=start,
-                    )
-                )
-            else:
-                conditions.append(
-                    DeciderCombinator.Condition(
-                        first_signal={"name": clock},
-                        comparator=">=",
-                        constant=start,
-                    )
-                )
-                conditions.append(
-                    DeciderCombinator.Condition(
-                        first_signal={"name": clock},
-                        comparator="<=",
-                        constant=end,
-                        compare_type="and",
-                    )
-                )
-
-        dc = new_entity(
-            "decider-combinator",
-            id=dc_id,
-            tile_position=(col, row * 2),
-            direction=Direction.SOUTH,
-        )
-        dc.conditions = conditions
-        dc.outputs = info["outputs"]
-        merged.entities.append(dc)
-        dc_grid[(row, col)] = dc_id
-
-    # Snake wiring
-    prev_id: str | None = None
-    for r in range(rows):
-        col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-        for c in col_iter:
-            dc_id = dc_grid.get((r, c))
-            if dc_id is None:
-                continue
-            if prev_id is not None:
-                merged.add_circuit_connection(
-                    "red", prev_id, dc_id, side_1="input", side_2="input"
-                )
-                merged.add_circuit_connection(
-                    "red", prev_id, dc_id, side_1="output", side_2="output"
-                )
-            prev_id = dc_id
-
-    original_total = sum(len([e for e in bp.entities if "decider-combinator" in e.name])
-                         for bp in parsed)
-    sys.stderr.write(
-        f"Cross-chunk dedup: {original_total} -> {total} combinators "
-        f"({original_total - total} removed) over {total_ticks} ticks.\n"
-    )
-    return merged.to_string()
+    return merged
 
 
 def encode_frames(
@@ -836,12 +643,20 @@ def encode_frames(
     total_height: int | None = None,
     expected_frames: int | None = None,
     source_id: str = "",
-) -> str:
-    """Encode an iterable of RGB ``(H, W, 3)`` uint8 frames into a blueprint.
+    *,
+    use_cache: bool = False,
+) -> Blueprint:
+    """Encode an iterable of RGB ``(H, W, 3)`` uint8 frames into a Blueprint.
 
     If the display has more pixels than the signal pool can address, the
     display is split into disconnected vertical chunks, each with its own
     signal mapping and combinator bank.
+
+    Parameters
+    ----------
+    use_cache : bool
+        If True, cache the core output as LogicalBlueprint TOML on disk
+        (async, non-blocking).  Default is False.
     """
     if fps <= 0:
         fps = 60.0
@@ -871,12 +686,8 @@ def encode_frames(
     total_pixels = total_w * total_h
 
     # ── Vertical chunk splitting (when pool can't cover all pixels) ───
-    if total_pixels > available and available >= total_w:
-        chunk_height = available // total_w
-        num_chunks = math.ceil(total_h / chunk_height)
-    else:
-        chunk_height = total_h
-        num_chunks = 1
+    from ..integer2signal.mapping import compute_chunking
+    chunk_height, num_chunks = compute_chunking(total_w, total_h, signal_pool, qualities)
 
     clock = CLOCK_SIGNAL
 
@@ -886,17 +697,17 @@ def encode_frames(
 
     hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}"
     safe_name = hashlib.md5(hash_str.encode('utf-8')).hexdigest()[:8]
-    cache_file = Path(f".encode_cache_{safe_name}.pkl")
+    frame_cache_file = make_cache_file("video_frames", f"encode_cache_{safe_name}", ".pkl")
     loaded_from_cache = False
 
     kept_frames: list[np.ndarray] = []
     tick_ranges: list[tuple[int, int]] = []
     current_tick = 0
 
-    if cache_file.exists():
-        sys.stderr.write(f"Found cache {cache_file}, loading intermediate results...\n")
+    if frame_cache_file.exists():
+        sys.stderr.write(f"Found cache {frame_cache_file}, loading intermediate results...\n")
         try:
-            with open(cache_file, "rb") as f:
+            with open(frame_cache_file, "rb") as f:
                 cache_data = pickle.load(f)
                 kept_frames = cache_data["frames"]
                 tick_ranges = cache_data["ticks"]
@@ -947,7 +758,7 @@ def encode_frames(
             current_tick += carry_ticks
 
         try:
-            with open(cache_file, "wb") as f:
+            with open(frame_cache_file, "wb") as f:
                 pickle.dump({
                     "frames": kept_frames,
                     "ticks": tick_ranges,
@@ -958,7 +769,9 @@ def encode_frames(
 
     if not kept_frames:
         sys.stderr.write("No frames to encode.\n")
-        return ""
+        bp = Blueprint()
+        bp.label = f"Video Memory: {output_name}"
+        return bp
 
     # ==================================================================
     # Phase 2: Build blueprint — one chunk per vertical slice
@@ -973,7 +786,31 @@ def encode_frames(
             "qualities": mapping.qualities,
             "signal_pool": mapping.base_signals,
         }
-        return _encode_frames_core(
+
+        # ── Optional TOML-format cache ────────────────────────────
+        from ..logical_blueprint import from_toml, to_draftsman
+
+        if use_cache:
+            _frame_hashes = hashlib.sha256(
+                b"".join(f.tobytes() for f in kept_frames)
+            ).hexdigest()
+            _core_cache_key = (
+                f"{source_id}_{_frame_hashes[:12]}_"
+                f"{json.dumps(mapping_params, sort_keys=True)}_"
+                f"dedup{deduplicate}_clk{clock}_tick{current_tick}"
+            )
+            _core_cache_hash = hashlib.md5(_core_cache_key.encode()).hexdigest()[:12]
+            _toml_cache_file = make_cache_file("video_core", f"encode_core_{_core_cache_hash}", ".toml")
+
+            if _toml_cache_file.exists():
+                sys.stderr.write(
+                    f"Found TOML cache {_toml_cache_file}, "
+                    f"skipping combinator build.\n"
+                )
+                lb = from_toml(_toml_cache_file.read_text(encoding="utf-8"))
+                return to_draftsman(lb)
+
+        lb = _encode_frames_core(
             kept_frames=kept_frames,
             tick_ranges=tick_ranges,
             output_name=output_name,
@@ -982,6 +819,12 @@ def encode_frames(
             clock=clock,
             current_tick=current_tick,
         )
+
+        if use_cache:
+            _write_toml_cache_async(lb, _toml_cache_file)
+
+        result = to_draftsman(lb)
+        return result
 
     # ── Multi-chunk path ──────────────────────────────────────────────
     sys.stderr.write(
@@ -994,7 +837,7 @@ def encode_frames(
     vchunk_hash = hashlib.md5(
         f"{source_id}_{total_w}x{total_h}_{chunk_height}_{num_chunks}_{fps}".encode()
     ).hexdigest()[:12]
-    vcache_dir = Path(f".encode_vchunks_{vchunk_hash}")
+    vcache_dir = cache_dir("video_vertical_chunks", f"encode_vchunks_{vchunk_hash}")
     vcache_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Pre-slice frames + build mapping params for each chunk ────────
@@ -1003,7 +846,7 @@ def encode_frames(
         y0 = ci * chunk_height
         y1 = min(y0 + chunk_height, total_h)
         ch_h = y1 - y0
-        cpath = vcache_dir / f"vchunk_{ci:04d}.bp.txt"
+        cpath = vcache_dir / f"vchunk_{ci:04d}.toml" if use_cache else None
 
         ch_mapping = SignalMapping(total_w, ch_h, qualities, signal_pool)
         mp = {
@@ -1018,12 +861,14 @@ def encode_frames(
         })
 
     # ── Load cached / build uncached chunks in parallel ───────────────
-    chunk_results: dict[int, str] = {}
+    from ..logical_blueprint import LogicalBlueprint, from_toml, to_draftsman
+
+    chunk_results: dict[int, LogicalBlueprint] = {}
     pending: list[dict] = []
 
     for cm in chunk_meta:
-        if cm["cpath"].exists():
-            chunk_results[cm["ci"]] = cm["cpath"].read_text(encoding="utf-8")
+        if use_cache and cm["cpath"] is not None and cm["cpath"].exists():
+            chunk_results[cm["ci"]] = from_toml(cm["cpath"].read_text(encoding="utf-8"))
         else:
             pending.append(cm)
 
@@ -1034,11 +879,11 @@ def encode_frames(
             f"with {workers} worker(s)…\n"
         )
 
-        def _build_one(cm: dict) -> tuple[int, str]:
+        def _build_one(cm: dict) -> tuple[int, LogicalBlueprint]:
             """Build a single vertical chunk (runs in worker thread)."""
             y0, y1 = cm["y0"], cm["y1"]
             chunk_frames = [f[y0:y1, :, :] for f in kept_frames]
-            bp_str = _encode_frames_core(
+            lb = _encode_frames_core(
                 kept_frames=chunk_frames,
                 tick_ranges=tick_ranges,
                 output_name=f"{output_name} vc{cm['ci']}",
@@ -1048,7 +893,7 @@ def encode_frames(
                 current_tick=current_tick,
                 label_suffix=f" [vchunk {cm['ci'] + 1}/{num_chunks}]",
             )
-            return cm["ci"], bp_str
+            return cm["ci"], lb
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_build_one, cm) for cm in pending]
@@ -1056,108 +901,40 @@ def encode_frames(
                 concurrent.futures.as_completed(futures),
                 total=len(futures), desc="Building vertical chunks", unit="chunk",
             ):
-                ci, bp_str = future.result()
-                chunk_results[ci] = bp_str
-                # Cache immediately
-                cm = next(c for c in chunk_meta if c["ci"] == ci)
-                cm["cpath"].write_text(bp_str, encoding="utf-8")
+                ci, lb = future.result()
+                chunk_results[ci] = lb
+                # Async TOML cache
+                if use_cache:
+                    cm = next(c for c in chunk_meta if c["ci"] == ci)
+                    if cm["cpath"] is not None:
+                        _write_toml_cache_async(lb, cm["cpath"])
     else:
         sys.stderr.write(f"All {num_chunks} vertical chunk(s) cached, skipping build.\n")
 
-    # ── Merge chunk blueprints (sequential, fast) ─────────────────────
-    blueprint = Blueprint()
-    blueprint.label = f"Video Memory: {output_name} ({total_w}×{total_h}, {num_chunks} chunks)"
-    blueprint.icons = ["parameter-0"]
-
-    margin = 2
-    cum_y = 0
+    # ── Merge chunk LogicalBlueprints (no spatial knowledge) ──────────
+    merged = LogicalBlueprint(
+        label=f"Video Memory: {output_name} ({total_w}×{total_h}, {num_chunks} chunks)"
+    )
 
     for cm in chunk_meta:
         ci = cm["ci"]
-        ch_bp_str = chunk_results.get(ci, "")
-        if not ch_bp_str:
+        chunk_lb = chunk_results.get(ci)
+        if chunk_lb is None or not chunk_lb.entities:
             continue
-
-        ch_bp = Blueprint.from_string(ch_bp_str)
-        old_to_new: dict[int, str] = {}
-        max_y = cum_y
-
-        for old_e in ch_bp.entities:
-            name = getattr(old_e, "name", "")
-            tp = getattr(old_e, "tile_position", None)
-            if tp is None:
-                continue
-            x, y = tp[0], tp[1] + cum_y
-            eid = f"vc{ci}_e{len(blueprint.entities)}"
-            e = new_entity(name, id=str(eid), tile_position=(int(x), int(y)))
-
-            if "decider-combinator" in name:
-                old_conds = getattr(old_e, "conditions", None)
-                old_outs = getattr(old_e, "outputs", None)
-                old_dir = getattr(old_e, "direction", None)
-                if old_conds is not None:
-                    e.conditions = list(old_conds)
-                if old_outs is not None:
-                    e.outputs = list(old_outs)
-                if old_dir is not None:
-                    e.direction = old_dir
-            elif "arithmetic-combinator" in name:
-                old_cond = getattr(old_e, "arithmetic_condition", None)
-                old_dir = getattr(old_e, "direction", None)
-                if old_cond is not None:
-                    e.set_arithmetic_condition(
-                        first_operand=getattr(old_cond, "first_operand", None),
-                        operation=getattr(old_cond, "operation", None),
-                        second_operand=getattr(old_cond, "second_operand", None),
-                        output_signal=getattr(old_cond, "output_signal", None),
-                    )
-                if old_dir is not None:
-                    e.direction = old_dir
-            elif "constant-combinator" in name:
-                old_signals = getattr(old_e, "signals", None)
-                if old_signals is not None:
-                    for slot, sig in enumerate(old_signals):
-                        if sig is not None:
-                            e.set_signal(slot, sig)
-
-            blueprint.entities.append(e)
-            old_to_new[id(old_e)] = str(eid)
-            max_y = max(max_y, y)
-
-        for wire in getattr(ch_bp, "wires", []):
-            if len(wire) < 4:
-                continue
-            # wire = [Association, WireConnectorID/int, Association, WireConnectorID/int]
-            # Association is callable → returns the entity
-            assoc1, wt1_raw, assoc2, wt2_raw = wire[0], wire[1], wire[2], wire[3]
-            old_e1 = assoc1() if callable(assoc1) else assoc1
-            old_e2 = assoc2() if callable(assoc2) else assoc2
-            wt1 = wt1_raw.value if hasattr(wt1_raw, "value") else int(wt1_raw)
-            wt2 = wt2_raw.value if hasattr(wt2_raw, "value") else int(wt2_raw)
-
-            new_id1 = old_to_new.get(id(old_e1))
-            new_id2 = old_to_new.get(id(old_e2))
-            if not new_id1 or not new_id2:
-                continue
-            # WireConnectorID: 1=red+input, 2=green+input, 3=red+output, 4=green+output
-            color = "red" if wt1 % 2 == 1 else "green"
-            side_1 = "input" if wt1 <= 2 else "output"
-            side_2 = "input" if wt2 <= 2 else "output"
-            try:
-                blueprint.add_circuit_connection(
-                    color, new_id1, new_id2, side_1=side_1, side_2=side_2,
-                )
-            except Exception:
-                pass
-
-        cum_y = max_y + 1 + margin
+        prefix = f"vc{ci}_"
+        merged.merge(chunk_lb, entity_prefix=prefix, network_prefix=prefix)
+        # Re-declare data port with prefixed name
+        old_data = chunk_lb.output_ports.get("data")
+        if old_data is not None:
+            merged.output_ports[f"{prefix}data"] = prefix + old_data
 
     total_ticks = current_tick - 1
     sys.stderr.write(
         f"\nEncoded {len(kept_frames)} frames over {total_ticks} ticks "
         f"across {num_chunks} vertical chunk(s).\n"
     )
-    return blueprint.to_string()
+    result = to_draftsman(merged)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1181,12 +958,13 @@ def encode_frames_chunked(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
+    use_cache: bool = False,
 ) -> dict:
     """Encode frames with time-dimension chunking for parallel generation.
 
     Splits the video into *time_chunks* time slices, builds each slice's
     combinator grid in parallel (via :class:`~concurrent.futures.ProcessPoolExecutor`),
-    caches finished chunks to disk, and merges them into one blueprint.
+    and merges them into one blueprint.
 
     Parameters
     ----------
@@ -1197,18 +975,18 @@ def encode_frames_chunked(
         Max parallel worker processes.  ``None`` uses ``os.cpu_count()``.
     output_chunks_dir : str or None
         If set, write each chunk's individual blueprint to this directory
-        (for inspection).
+        (for inspection).  Writes as blueprint strings.
     deduplicate_cross : bool
         After building all chunks, run a cross-chunk deduplication pass
-        during merge.  Identical DC outputs from different time chunks are
-        merged into a single combinator.  This runs single-threaded and
-        **may be slow** for large videos.
+        during merge.
+    use_cache : bool
+        If True, cache individual chunk results as LogicalBlueprint TOML
+        on disk (async).  Default is False.
 
     Returns
     -------
     dict
-        ``{"full": str, "chunks": list[str]}`` — the merged blueprint
-        string and a list of per-chunk blueprint strings.
+        ``{"full": Blueprint, "chunks": list[Blueprint]}``
     """
     # ── Phase 0 & 1 (same as encode_frames) ───────────────────────────
     if fps <= 0:
@@ -1229,16 +1007,16 @@ def encode_frames_chunked(
 
     hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}"
     safe_name = hashlib.md5(hash_str.encode('utf-8')).hexdigest()[:8]
-    cache_file = Path(f".encode_cache_{safe_name}.pkl")
+    frame_cache_file = make_cache_file("video_frames", f"encode_cache_{safe_name}", ".pkl")
 
     kept_frames: list[np.ndarray] = []
     tick_ranges: list[tuple[int, int]] = []
     current_tick = 0
 
-    if cache_file.exists():
-        sys.stderr.write(f"Found cache {cache_file}, loading intermediate results...\n")
+    if frame_cache_file.exists():
+        sys.stderr.write(f"Found cache {frame_cache_file}, loading intermediate results...\n")
         try:
-            with open(cache_file, "rb") as f:
+            with open(frame_cache_file, "rb") as f:
                 cache_data = pickle.load(f)
                 kept_frames = cache_data["frames"]
                 tick_ranges = cache_data["ticks"]
@@ -1287,7 +1065,7 @@ def encode_frames_chunked(
             current_tick += carry_ticks
 
         try:
-            with open(cache_file, "wb") as f:
+            with open(frame_cache_file, "wb") as f:
                 pickle.dump({
                     "frames": kept_frames,
                     "ticks": tick_ranges,
@@ -1299,7 +1077,9 @@ def encode_frames_chunked(
     total_input = len(kept_frames)
     if total_input == 0:
         sys.stderr.write("No frames to encode.\n")
-        return {"full": "", "chunks": []}
+        bp = Blueprint()
+        bp.label = f"Video Memory: {output_name}"
+        return {"full": bp, "chunks": []}
 
     # ── Determine signal pool for mapping ─────────────────────────────
     if mapping is None:
@@ -1313,19 +1093,47 @@ def encode_frames_chunked(
 
     # ── Fast path: single time chunk (no parallelism) ─────────────────
     if time_chunks <= 1:
-        bp_str = _encode_frames_core(
+        from ..logical_blueprint import to_draftsman
+        lb = _encode_frames_core(
             kept_frames=kept_frames, tick_ranges=tick_ranges,
             output_name=output_name, deduplicate=deduplicate,
             mapping_params=mapping_params,
             clock=clock, current_tick=current_tick,
         )
-        return {"full": bp_str, "chunks": [bp_str]}
+        result = to_draftsman(lb)
+        return {"full": result, "chunks": [result]}
+
+    # ── Cross-chunk dedup at frame level (before splitting) ───────────
+    # Deduplicate identical frames across the entire video, merging their
+    # tick ranges.  This happens at the raw frame level — no DCs involved —
+    # so spatial layout is left entirely to the composer.
+    #
+    # After dedup, each unique frame stays paired with all its merged
+    # tick ranges (list[list[tuple[int,int]]]) so that when split into
+    # chunks, identical frames never straddle chunk boundaries.
+    if deduplicate_cross:
+        seen: dict[int, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[int] = []
+        for frame, (start, end) in zip(kept_frames, tick_ranges):
+            h = hash(frame.tobytes())
+            if h not in seen:
+                seen[h] = (frame, [])
+                order.append(h)
+            seen[h][1].append((start, end))
+        deduped = [seen[h] for h in order]
+        kept_frames = [f for f, _ in deduped]
+        tick_ranges = [ranges for _, ranges in deduped]
+        total_input = len(kept_frames)
+        sys.stderr.write(
+            f"Cross-chunk dedup: {total_input} unique frames "
+            f"({sum(len(r) for r in tick_ranges) - total_input} duplicates removed).\n"
+        )
 
     # ── Split frames into time chunks ─────────────────────────────────
     total_ticks = current_tick - 1
     chunk_size = math.ceil(total_input / time_chunks)
     chunk_frames: list[list[np.ndarray]] = []
-    chunk_tick_ranges: list[list[tuple[int, int]]] = []
+    chunk_tick_ranges: list[list] = []  # list[list] — may be multi-range per frame
     for ci in range(time_chunks):
         start = ci * chunk_size
         end = min(start + chunk_size, total_input)
@@ -1338,27 +1146,33 @@ def encode_frames_chunked(
     )
 
     # ── Chunk cache setup ─────────────────────────────────────────────
-    cache_dir = _chunk_cache_dir(
-        source_id, time_chunks, total_w, total_h,
-        fps, adaptive, threshold, deduplicate,
-    )
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    if use_cache:
+        cache_dir = _chunk_cache_dir(
+            source_id, time_chunks, total_w, total_h,
+            fps, adaptive, threshold, deduplicate,
+        )
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
-    meta = {"time_chunks": time_chunks, "total_ticks": total_ticks}
-    with open(_chunk_meta_path(cache_dir), "w") as f:
-        json.dump(meta, f)
+        meta = {"time_chunks": time_chunks, "total_ticks": total_ticks}
+        with open(_chunk_meta_path(cache_dir), "w") as f:
+            json.dump(meta, f)
+    else:
+        cache_dir = None
 
-    # ── Build chunks (parallel, with caching) ─────────────────────────
-    chunk_results: dict[int, str] = {}
+    # ── Build chunks (parallel, with optional caching) ────────────────
+    from ..logical_blueprint import LogicalBlueprint, from_toml, to_draftsman
+
+    chunk_results: dict[int, LogicalBlueprint] = {}
     pending_indices: list[int] = []
 
     for ci in range(time_chunks):
-        cpath = cache_dir / f"chunk_{ci:04d}.bp.txt"
-        if cpath.exists():
-            sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached, skipping.\n")
-            chunk_results[ci] = cpath.read_text(encoding="utf-8")
-        else:
-            pending_indices.append(ci)
+        if use_cache and cache_dir is not None:
+            cpath = cache_dir / f"chunk_{ci:04d}.toml"
+            if cpath.exists():
+                sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached, skipping.\n")
+                chunk_results[ci] = from_toml(cpath.read_text(encoding="utf-8"))
+                continue
+        pending_indices.append(ci)
 
     if pending_indices:
         workers = chunk_workers or os.cpu_count() or 1
@@ -1370,7 +1184,13 @@ def encode_frames_chunked(
         payloads: list[bytes] = []
         for ci in pending_indices:
             if chunk_tick_ranges[ci]:
-                chunk_cur_tick = chunk_tick_ranges[ci][-1][1] + 1
+                # chunk_tick_ranges[ci] may be list[tuple] or list[list[tuple]]
+                # after cross-dedup.  Access the last range's end tick safely.
+                last_item = chunk_tick_ranges[ci][-1]
+                if isinstance(last_item, list):
+                    chunk_cur_tick = last_item[-1][1] + 1
+                else:
+                    chunk_cur_tick = last_item[1] + 1
             else:
                 chunk_cur_tick = 1
             data = {
@@ -1392,35 +1212,35 @@ def encode_frames_chunked(
                 concurrent.futures.as_completed(futures),
                 total=len(futures), desc="Building chunks", unit="chunk",
             ):
-                ci, bp_str = future.result()
-                chunk_results[ci] = bp_str
-                cpath = cache_dir / f"chunk_{ci:04d}.bp.txt"
-                cpath.write_text(bp_str, encoding="utf-8")
-                sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached.\n")
+                ci, lb_toml = future.result()
+                lb = from_toml(lb_toml)
+                chunk_results[ci] = lb
+                if use_cache and cache_dir is not None:
+                    cpath = cache_dir / f"chunk_{ci:04d}.toml"
+                    _write_toml_cache_async(lb, cpath)
+                    sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached.\n")
 
     # ── Assemble ordered chunk list ───────────────────────────────────
-    chunk_bps = [chunk_results[ci] for ci in range(time_chunks)]
+    chunk_lbs = [chunk_results[ci] for ci in range(time_chunks)]
 
     # ── Write individual chunk files if requested ─────────────────────
     if output_chunks_dir:
+        from ..logical_blueprint import to_toml as _to_toml
         out_dir = Path(output_chunks_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        for ci, bp_str in enumerate(chunk_bps):
-            cpath = out_dir / f"chunk_{ci:04d}.bp.txt"
-            cpath.write_text(bp_str, encoding="utf-8")
+        for ci, lb in enumerate(chunk_lbs):
+            cpath = out_dir / f"chunk_{ci:04d}.toml"
+            cpath.write_text(_to_toml(lb), encoding="utf-8")
         sys.stderr.write(
-            f"Wrote {len(chunk_bps)} individual chunk blueprint(s) "
+            f"Wrote {len(chunk_lbs)} individual chunk TOML(s) "
             f"to {out_dir}/\n"
         )
 
     # ── Merge chunks ──────────────────────────────────────────────────
-    full_bp = _merge_chunk_blueprints(
-        chunk_bps, output_name,
-        deduplicate_cross=deduplicate_cross,
-        total_ticks=total_ticks,
-    )
+    full_lb = _merge_chunk_blueprints(chunk_lbs, output_name)
+    full_bp = to_draftsman(full_lb)
 
-    return {"full": full_bp, "chunks": chunk_bps}
+    return {"full": full_bp, "chunks": [to_draftsman(lb) for lb in chunk_lbs]}
 
 
 # ---------------------------------------------------------------------------
@@ -1442,8 +1262,11 @@ def encode_video(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
-) -> str:
-    """Encode a video file (``.mp4``, ``.avi``, ``.mov``, etc.)."""
+) -> Blueprint:
+    """Encode a video file (``.mp4``, ``.avi``, ``.mov``, etc.).
+
+    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    """
     cap = _videocap_utf8(str(video_path))
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video: {video_path}")
@@ -1519,8 +1342,11 @@ def encode_gif(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
-) -> str:
-    """Encode an animated GIF."""
+) -> Blueprint:
+    """Encode an animated GIF.
+
+    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    """
     from PIL import Image
 
     gif = Image.open(str(gif_path))
@@ -1597,8 +1423,11 @@ def encode_png_series(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
-) -> str:
-    """Encode a sequence of image files (PNG, JPEG, etc.)."""
+) -> Blueprint:
+    """Encode a sequence of image files (PNG, JPEG, etc.).
+
+    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    """
     if fps <= 0:
         fps = 60.0
 
@@ -1658,8 +1487,11 @@ def encode_frame(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
-) -> str:
-    """Encode a single still image as a one-frame blueprint."""
+) -> Blueprint:
+    """Encode a single still image as a one-frame blueprint.
+
+    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    """
     if fps <= 0:
         fps = 60.0
     return encode_png_series(
@@ -1691,8 +1523,11 @@ def encode_auto(
     chunk_workers: int | None = None,
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
-) -> str:
-    """Auto-detect input type and call the appropriate encoder."""
+) -> Blueprint:
+    """Auto-detect input type and call the appropriate encoder.
+
+    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    """
     path = Path(input_path)
     video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
     image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}

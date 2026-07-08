@@ -411,8 +411,10 @@ def encode_audio_auto(
         if key in kwargs:
             midi_kwargs[key] = kwargs[key]
 
+    from .._unicode_io import mido_open  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+
     sys.stderr.write(f"Loading MIDI: {path}\n")
-    mid = mido.MidiFile(path)
+    mid = mido_open(path)
     sys.stderr.write(
         f"  {len(mid.tracks)} track(s), "
         f"ticks_per_beat={mid.ticks_per_beat}, "
@@ -978,13 +980,14 @@ def encode_audio_to_logical(
         dc_ids.append(dc_id)
         created_count += 1
 
-    # Build networks: green bus (input→input) and red bus (output→output)
+    # Wire all inputs together (green) and all outputs together (red)
     if len(dc_ids) >= 2:
-        for color, port in (("green", "input"), ("red", "output")):
-            for i in range(len(dc_ids) - 1):
-                ep_a = Endpoint(entity_id=dc_ids[i], port=port)
-                ep_b = Endpoint(entity_id=dc_ids[i + 1], port=port)
-                lb.connect(color, ep_a, ep_b)
+        first_id = dc_ids[0]
+        for dc_id in dc_ids[1:]:
+            lb.connect("green", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
+        first_out = dc_ids[0]
+        for dc_id in dc_ids[1:]:
+            lb.connect("red", Endpoint(first_out, "output"), Endpoint(dc_id, "output"))
 
     sys.stderr.write(
         f"Audio memory (logical): {created_count}/{page_count} DCs "

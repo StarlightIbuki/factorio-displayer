@@ -9,9 +9,9 @@ from .. import (
     DISPLAY_HEIGHT,
     DISPLAY_WIDTH,
     QUALITIES,
+    SIGNAL_POOL,
 )
-from ..integer2signal.pool import get_filtered_pool
-from ..integer2signal.mapping import SignalMapping
+from ..integer2signal.mapping import SignalMapping, compute_chunking
 from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity
 # pylint: enable=relative-beyond-top-level
 
@@ -20,17 +20,19 @@ def build_display(  # pylint: disable=too-many-locals
     name: str = "Video Display",
     width: int | None = None,
     height: int | None = None,
-) -> str:
-    """Build a lamp-grid display blueprint string.
+) -> Blueprint:
+    """Build a lamp-grid display Blueprint.
 
     Always generates the display dynamically — no pre-computed blueprint
     is used.  Custom dimensions produce a fresh blueprint.
 
     No power poles or substations are placed — the user supplies power in-game.
+
+    Returns a :class:`~draftsman.blueprintable.Blueprint`.
     """
     from ..logical_blueprint import to_draftsman
     lb = build_display_logical(name=name, width=width, height=height)
-    return to_draftsman(lb).to_string()
+    return to_draftsman(lb)
 
 
 def build_display_logical(  # pylint: disable=too-many-locals
@@ -40,58 +42,120 @@ def build_display_logical(  # pylint: disable=too-many-locals
 ) -> LogicalBlueprint:
     """Build a lamp-grid display LogicalBlueprint.
 
-    Returns a :class:`LogicalBlueprint` with ``input_ports={"data": ...}``
-    for the colour signal bus.
+    If the display has more pixels than the signal pool can address, the
+    display is split into disconnected vertical chunks, each with its own
+    signal mapping and independent red-wire bus.
+
+    Returns a :class:`LogicalBlueprint` with ``input_ports={"data_0": ...,
+    "data_1": ...}`` (one port per chunk) for the colour signal bus.
+    For single-chunk displays the port is named ``"data"`` for backwards
+    compatibility.
     """
     w = width if width is not None else DISPLAY_WIDTH
     h = height if height is not None else DISPLAY_HEIGHT
 
-    pool = get_filtered_pool(CLOCK_SIGNAL)
-    mapping = SignalMapping(w, h, QUALITIES, pool)
+    pool = SIGNAL_POOL
+    qualities = QUALITIES
 
+    chunk_height, num_chunks = compute_chunking(w, h, pool, qualities)
+
+    return _build_display_chunked(
+        name=name, width=w, height=h,
+        chunk_height=chunk_height, num_chunks=num_chunks,
+        pool=pool, qualities=qualities,
+    )
+
+
+def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    name: str,
+    width: int,
+    height: int,
+    chunk_height: int,
+    num_chunks: int,
+    pool: list[str],
+    qualities: list[str],
+) -> LogicalBlueprint:
+    """Build a chunked lamp-grid display LogicalBlueprint.
+
+    Each chunk is a self-contained lamp grid with its own SignalMapping
+    and independent red-wire bus.  Chunks are placed at increasing Y
+    offsets so they stack vertically.
+    """
     lb = LogicalBlueprint(label=name)
 
-    lamp_grid: list[list[str | None]] = [[None for _ in range(w)] for _ in range(h)]
+    cum_y = 0
+    margin = 0  # lamps are 1x1, no overlap risk
 
-    for (x, y), sig in mapping.iter_pixels():
-        lamp_id = f"lamp_{x}_{y}"
-        sig_str = sig["name"]
-        if sig.get("quality") and sig["quality"] != "normal":
-            sig_str = f"{sig['name']}@{sig['quality']}"
-        lamp = LogicalEntity(
-            lamp_id,
-            "small-lamp",
-            properties={
-                "use_colors": True,
-                "always_on": True,
-                "circuit_enabled": False,
-                "color_signal": sig_str,
-            },
-            position=(x, y),
-        )
-        lb.add_entity(lamp)
-        lamp_grid[y][x] = lamp_id
+    for ci in range(num_chunks):
+        y0 = ci * chunk_height
+        y1 = min(y0 + chunk_height, height)
+        ch_h = y1 - y0
+        ch_w = width
 
-    # Horizontal wiring — chain lamps across each row
-    for y in range(h):
-        for x in range(w - 1):
-            curr_id = lamp_grid[y][x]
-            next_id = lamp_grid[y][x + 1]
-            if curr_id and next_id:
-                lb.connect("red", Endpoint(curr_id, "input"),
-                          Endpoint(next_id, "input"))
+        mapping = SignalMapping(ch_w, ch_h, qualities, pool)
 
-    # Vertical wiring at the rightmost column
-    for y in range(h - 1):
-        if lamp_grid[y][w - 1] and lamp_grid[y + 1][w - 1]:
-            lb.connect("red", Endpoint(lamp_grid[y][w - 1], "input"),
-                      Endpoint(lamp_grid[y + 1][w - 1], "input"))
+        # Build lamp grid for this chunk, offset by cum_y
+        lamp_grid: list[list[str | None]] = [[None for _ in range(ch_w)] for _ in range(ch_h)]
 
-    # Declare data input port (first lamp's network)
-    if lamp_grid[0][0]:
-        for net in lb.networks:
-            if net.color == "red" and Endpoint(lamp_grid[0][0], "input") in net.endpoints:
-                lb.set_input_port("data", net.network_id)
-                break
+        for (x, y), sig in mapping.iter_pixels():
+            lamp_id = f"lamp_c{ci}_{x}_{y}"
+            sig_str = sig["name"]
+            if sig.get("quality") and sig["quality"] != "normal":
+                sig_str = f"{sig['name']}@{sig['quality']}"
+            lamp = LogicalEntity(
+                lamp_id,
+                "small-lamp",
+                properties={
+                    "use_colors": True,
+                    "always_on": True,
+                    "circuit_enabled": False,
+                    "color_signal": sig_str,
+                },
+                position=(x, y + cum_y),
+            )
+            lb.add_entity(lamp)
+            lamp_grid[y][x] = lamp_id
+
+        # Horizontal wiring — chain lamps across each row
+        for py in range(ch_h):
+            for px in range(ch_w - 1):
+                curr_id = lamp_grid[py][px]
+                next_id = lamp_grid[py][px + 1]
+                if curr_id and next_id:
+                    lb.connect("red", Endpoint(curr_id, "input"),
+                              Endpoint(next_id, "input"))
+
+        # Vertical wiring at the rightmost column
+        for py in range(ch_h - 1):
+            if lamp_grid[py][ch_w - 1] and lamp_grid[py + 1][ch_w - 1]:
+                lb.connect("red", Endpoint(lamp_grid[py][ch_w - 1], "input"),
+                          Endpoint(lamp_grid[py + 1][ch_w - 1], "input"))
+
+        # Declare data input port for this chunk
+        port_name = "data" if num_chunks == 1 else f"data_{ci}"
+        if lamp_grid[0][0]:
+            for net in lb.networks:
+                if net.color == "red" and Endpoint(lamp_grid[0][0], "input") in net.endpoints:
+                    lb.set_input_port(port_name, net.network_id)
+                    # ── Pre-assign wire pairs for the lamp grid ──────
+                    pairs: list[tuple[Endpoint, Endpoint]] = []
+                    for py in range(ch_h):
+                        for px in range(ch_w - 1):
+                            if lamp_grid[py][px] and lamp_grid[py][px + 1]:
+                                pairs.append((
+                                    Endpoint(lamp_grid[py][px], "input"),
+                                    Endpoint(lamp_grid[py][px + 1], "input"),
+                                ))
+                    for py in range(ch_h - 1):
+                        if lamp_grid[py][ch_w - 1] and lamp_grid[py + 1][ch_w - 1]:
+                            pairs.append((
+                                Endpoint(lamp_grid[py][ch_w - 1], "input"),
+                                Endpoint(lamp_grid[py + 1][ch_w - 1], "input"),
+                            ))
+                    net.prewired_pairs = pairs
+                    break
+
+        # Advance Y offset for next chunk
+        cum_y += ch_h + margin
 
     return lb

@@ -69,6 +69,51 @@ _MIDI_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 RAIL_WIDTH = 13  # 12 channel columns + 1 page_port column
 
 
+def _patch_instrument_notes() -> None:
+    """Extend Draftsman's instrument note lists to cover the full 48-note
+    speaker window for each instrument we use.
+
+    Draftsman validates note names against each instrument's prototype
+    note list and silently rejects (sets to ``None``) any name not found.
+    Factorio itself allows any pitch on any instrument, so this patching
+    is safe — it just teaches Draftsman about the notes we need.
+
+    Uses :func:`draftsman.data.instruments.add_instrument` to properly
+    reindex the internal lookup tables.
+    """
+    import draftsman.data.instruments as _inst_data
+
+    _INST_NAMES = {"piano", "bass", "celesta", "plucked", "drum-kit"}
+
+    raw = _inst_data.raw
+    ps_list = raw.get("programmable-speaker")
+    if not isinstance(ps_list, list):
+        return
+
+    for inst_entry in ps_list:
+        name = inst_entry.get("name", "")
+        if name not in _INST_NAMES:
+            continue
+
+        existing: set[str] = {
+            n["name"] for n in inst_entry.get("notes", [])
+            if isinstance(n, dict) and "name" in n
+        }
+
+        midi_base = INSTRUMENT_MIDI_BASES.get(name, 53)
+        all_needed = [
+            _pitch_index_to_factorio_note(pid, midi_base=midi_base)
+            for pid in range(SPEAKER_COUNT)
+        ]
+
+        if set(all_needed) <= existing:
+            continue  # already complete
+
+        _inst_data.add_instrument(
+            name, all_needed, entity_name="programmable-speaker",
+        )
+
+
 def _pitch_index_to_factorio_note(pitch_idx: int, midi_base: int = 53) -> str:
     """Convert a pitch index (0–47) to a Factorio note name like 'F3', 'C#4'.
 
@@ -79,6 +124,10 @@ def _pitch_index_to_factorio_note(pitch_idx: int, midi_base: int = 53) -> str:
     octave = midi // 12 - 1
     semitone = midi % 12
     return f"{_MIDI_NOTE_NAMES[semitone]}{octave}"
+
+
+# Patch Draftsman's instrument data before any entity creation.
+_patch_instrument_notes()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -514,8 +563,9 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
         endpoints.append(ep)
 
     # ── One shared modulo AC ───────────────────────────────────────
-    # Placed at the right of the first rail's page_port.
-    mod_x = PORT_X + 1
+    # Placed to the right of the last rail so sub-tick red wiring
+    # stays within the 9-tile Factorio wire distance limit.
+    mod_x = x_offset + num_rails * RAIL_WIDTH + 1
     ac_mod = new_entity("arithmetic-combinator", id="mod",
                         tile_position=(mod_x, MOD_Y))
     ac_mod.set_arithmetic_condition(
@@ -558,14 +608,19 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
             side_1="input", side_2="input",
         )
 
-    # Port green bus: connect each port to the shared mod AC (center point)
-    # then mod distributes clock to all ports within reach.
-    # Avoids direct port-to-port wiring which can exceed 9-tile reach.
+    # Port green bus: connect each port to the shared mod AC if within
+    # 9-tile wire distance.  More distant ports get clock through the
+    # external clock source connected by the memory encoder.
     for ep in endpoints:
-        blueprint.add_circuit_connection(
-            "green", ep.port_id, "mod",
-            side_1="input", side_2="input",
-        )
+        port_ent = next((e for e in blueprint.entities if getattr(e, "id", None) == ep.port_id), None)
+        if port_ent is not None:
+            px = getattr(port_ent, "tile_position", (0, 0))[0]
+            py = getattr(port_ent, "tile_position", (0, 0))[1]
+            if max(abs(px - mod_x), abs(py - MOD_Y)) <= 9:
+                blueprint.add_circuit_connection(
+                    "green", ep.port_id, "mod",
+                    side_1="input", side_2="input",
+                )
 
     # Clock green bus: mod receives clock from an external source
     # (connected by the memory encoder when combining blueprints)
@@ -587,6 +642,7 @@ def build_audio_decoder_logical(
     clock_signal: str = "signal-clock",
     signal_pool: list[str] | None = None,
     qualities: list[str] | None = None,
+    map_drums: bool = False,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a single-rail 48-speaker audio decoder as a
     :class:`LogicalBlueprint` (no positions, networks instead of wires).
@@ -607,6 +663,9 @@ def build_audio_decoder_logical(
         Base signal names.  Defaults to the project pool.
     qualities : list[str] | None
         Quality tiers.  Defaults to the project qualities.
+    map_drums : bool
+        When True and instrument is ``"drum"``, speakers use drum-kit
+        note names (kick-1, snare-1, …) instead of MIDI note names.
 
     Returns
     -------
@@ -655,15 +714,23 @@ def build_audio_decoder_logical(
     speaker_ids: dict[int, str] = {}
     col_speakers: dict[int, list[str]] = {c: [] for c in range(12)}
 
+    is_drum = instrument_proto == "drum-kit" and map_drums
     for pitch_idx, sig in iter_speaker_signals():
         col = pitch_idx % 12
         spk_id = f"spk_{pitch_idx}"
+        if is_drum:
+            if pitch_idx < len(DRUM_KIT_NOTES):
+                note_name = DRUM_KIT_NOTES[pitch_idx]
+            else:
+                note_name = DRUM_KIT_NOTES[0]  # placeholder (never played)
+        else:
+            note_name = _pitch_index_to_factorio_note(pitch_idx)
         lb.add_entity(LogicalEntity(
             entity_id=spk_id,
             type="programmable-speaker",
             properties={
                 "instrument": instrument_proto,
-                "note": _pitch_index_to_factorio_note(pitch_idx),
+                "note": note_name,
                 "vol_signal": sig["name"],
                 "vol_quality": sig["quality"],
                 "polyphony": True,

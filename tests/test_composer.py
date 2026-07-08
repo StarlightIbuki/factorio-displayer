@@ -757,11 +757,17 @@ class TestLayoutOrdering:
         pos_b = merged.entities["b_b_ent"].position
         pos_c = merged.entities["c_c_ent"].position
 
-        # A and B should be adjacent (small y-difference), C further away
+        # A and B should be adjacent (small Chebyshev distance), C further away.
+        # Use Chebyshev distance because the new layout places the sink at origin
+        # and dependencies to its right (different X coordinates).
         assert pos_a is not None and pos_b is not None and pos_c is not None
-        dist_ab = abs(pos_a[1] - pos_b[1])
-        dist_ac = abs(pos_a[1] - pos_c[1])
-        dist_bc = abs(pos_b[1] - pos_c[1])
+
+        def _cheb(p1, p2):
+            return max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
+
+        dist_ab = _cheb(pos_a, pos_b)
+        dist_ac = _cheb(pos_a, pos_c)
+        dist_bc = _cheb(pos_b, pos_c)
 
         assert dist_ab <= dist_ac, (
             f"Connected A-B should be closer than A-C: AB={dist_ab}, AC={dist_ac}"

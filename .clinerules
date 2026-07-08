@@ -1,0 +1,37 @@
+# Project Overview: factorio-display
+You are building Factorio blueprints for audio/video displays using combinators and programmable speakers.
+
+## 0. Critical First Step
+Before proposing any plan or touching any code, use `read_file` to read `architecture.md`. You must understand the audio pipeline, combinator conventions, wiring, entity layout coordinates, and test structure before writing a single line.
+
+## 1. Terminal & Environment Rules
+- **PowerShell syntax:** When using `execute_command`, NEVER chain commands with `&&`. You must use `;`. 
+  *Correct:* `Set-Location <path>; <command>`
+- **Python interpreter:** Always use the explicit virtual environment path from the repo root: `.venv/Scripts/python.exe`.
+- **Running tests:** Strictly use this command:
+  `.venv\Scripts\python.exe -m pytest tests/ -v --tb=short`
+- **Diffing:** When using `apply_diff` on Python files, use tight function-scoped context (e.g., `@@ def ...`). Broad context blocks frequently cause hunk-matching failures.
+
+## 2. Factorio Domain Notes
+- **Draftsman Warnings:** Treat `Draftsman` warnings (e.g., `UnknownNoteWarning`) as non-fatal. The blueprints still generate correctly; do not attempt to "fix" the source code just to clear these warnings.
+- **Blueprint Entities:** Calling `blueprint.entities` after `Blueprint.from_string()` yields parsed entity objects containing `.tile_position`, `.name`, and `.volume_signal`.
+- **Sub-ticks:** Sub-tick values in CC entries must strictly match the modulo AC output (keep them consistently 0-based or 1-based).
+
+## 3. Execution Protocol
+
+### Phase A: Pre-Implementation
+1. Check your logic: is the plan mathematically sound and feasible inside Factorio's tick/combinator limits?
+2. Write the unit test(s) first.
+3. Put explicit, high-visibility debug logs in the implementation. 
+4. **Sanity Check:** If a request seems odd, ambiguous, or contradicts `architecture.md`, STOP and ask the user for clarification.
+
+### Phase B: The Anti-Looping Tripwire (When in trouble)
+If an assumption breaks, or a test fails 2 times in a row:
+1. Stop brute-forcing. 
+2. Ask yourself: *What was the original purpose of this function? Does my approach actually make sense?*
+3. Use `execute_command` to run the tests with extra logging turned on. 
+4. **The hard stop:** If you cannot deduce the root cause after the 3rd failed attempt, present your findings and ask the user for help. Do not spin your wheels burning tokens.
+
+### Phase C: Verification
+1. You are forbidden from claiming a bug/feature is "Done" until you have run the test suite and read the passing terminal output yourself.
+2. If you fixed a bug that didn't trip an existing test, write the regression test for it before wrapping up.

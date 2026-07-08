@@ -14,7 +14,7 @@ from factorio_display.logical_blueprint import (
 )
 from factorio_display.composer import _entity_bounding_box as _bb
 from factorio_display.video.player_blueprint import build_display
-from factorio_display.video.encoder import encode_frames
+from factorio_display.video.encoder import encode_frames, _to_fixed_string
 from factorio_display.timer import build_raw_timer, build_mod_timer
 from factorio_display.progress_bar import build_progress_bar
 from factorio_display.composer import Composer, _assign_tile_positions, _connect_nets_by_color
@@ -32,8 +32,7 @@ def main():
     print("=== Step 1: Building sub-blueprints ===")
 
     # ── Display ───────────────────────────────────────────────────
-    display_bp_str = build_display(name="Display", width=W, height=H)
-    display_bp = Blueprint.from_string(display_bp_str)
+    display_bp = build_display(name="Display", width=W, height=H)
     display_lb = from_draftsman(display_bp)
 
     red_nets = [n for n in display_lb.networks if n.color == "red" and n.endpoints]
@@ -59,14 +58,13 @@ def main():
         frames.append(frame)
 
     print(f"\n  Encoding {len(frames)} synthetic frames ({W}x{H})...")
-    video_bp_str = encode_frames(
+    video_bp = encode_frames(
         frames, output_name="Synthetic", fps=3.0,
         total_width=W, total_height=H, deduplicate=False,
     )
-    if not video_bp_str:
-        print("  ERROR: encode_frames returned empty string!")
+    if not video_bp:
+        print("  ERROR: encode_frames returned empty Blueprint!")
         return
-    video_bp = Blueprint.from_string(video_bp_str)
     video_lb = from_draftsman(video_bp)
 
     red_nets_v = [n for n in video_lb.networks if n.color == "red" and n.endpoints]
@@ -166,7 +164,7 @@ def main():
     # ═══════════════════════════════════════════════════════════════
     print("\n=== Step 4: Materialize + round-trip ===")
     bp_out = to_draftsman(result)
-    bp_str = bp_out.to_string()
+    bp_str = _to_fixed_string(bp_out)
     out_dir.joinpath("06_final_bp.txt").write_text(bp_str, encoding="utf-8")
 
     bp_check = Blueprint.from_string(bp_str)

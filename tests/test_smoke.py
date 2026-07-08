@@ -84,9 +84,9 @@ def _encode_video_frames_to_bp(
 
     output_name: str = "SmokeVideo",
 
-) -> str:
+) -> "Blueprint":
 
-    """Encode raw numpy frames into a video-memory blueprint string."""
+    """Encode raw numpy frames into a video-memory Blueprint."""
 
     from factorio_display.video.encoder import _encode_frames_core
 
@@ -118,7 +118,8 @@ def _encode_video_frames_to_bp(
 
     tick_ranges = [(i, i) for i in range(len(frames))]
 
-    return _encode_frames_core(
+    from factorio_display.logical_blueprint import to_draftsman
+    return to_draftsman(_encode_frames_core(
 
         kept_frames=list(frames),
 
@@ -134,7 +135,7 @@ def _encode_video_frames_to_bp(
 
         current_tick=len(frames),
 
-    )
+    ))
 
 
 
@@ -218,9 +219,9 @@ def _encode_midi_to_bp(midi_path: Path) -> str:
 
 @pytest.fixture(scope="module")
 
-def video_bp_str() -> str:
+def video_bp() -> "Blueprint":
 
-    """3-frame 10Ã50 random-colour video memory blueprint."""
+    """3-frame 10×50 random-colour video memory Blueprint."""
 
     frames = _make_test_video_frames(3, 10, 50)
 
@@ -274,10 +275,7 @@ def display_lb() -> LogicalBlueprint:
 
 
 
-    bp_str = build_display("SmokeDisplay", width=10, height=50)
-
-    bp = Blueprint.from_string(bp_str)
-
+    bp = build_display("SmokeDisplay", width=10, height=50)
     return from_draftsman(bp)
 
 
@@ -286,13 +284,11 @@ def display_lb() -> LogicalBlueprint:
 
 @pytest.fixture(scope="module")
 
-def video_memory_lb(video_bp_str: str) -> LogicalBlueprint:
+def video_memory_lb(video_bp: "Blueprint") -> LogicalBlueprint:
 
     """Video memory LogicalBlueprint."""
 
-    bp = Blueprint.from_string(video_bp_str)
-
-    return from_draftsman(bp)
+    return from_draftsman(video_bp)
 
 
 

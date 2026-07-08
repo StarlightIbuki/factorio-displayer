@@ -256,5 +256,7 @@ def loudness_to_midi_file(
     **kwargs
         Forwarded to :func:`loudness_to_midi`.
     """
+    from .._unicode_io import mido_save  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+
     mid = loudness_to_midi(loudness_data, **kwargs)
-    mid.save(output_path)
+    mido_save(mid, output_path)

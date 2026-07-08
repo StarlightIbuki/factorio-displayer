@@ -4,8 +4,7 @@ Factorio memory encoding.
 
 Pipeline
 --------
-1. Read PCM samples from an audio file (via ``soundfile``, with ``pydub``
-   fallback for MP3).
+1. Read PCM samples from an audio file (via ``soundfile``).
 2. Compute STFT with overlapping Hann windows (window = 4 game ticks
    ≈ 66.7 ms, hop = 1 tick).
 3. Map each FFT frequency bin to the closest MIDI note (0–127) and sum
@@ -295,47 +294,61 @@ def fold_loudness_array(
 # ── audio file I/O ──────────────────────────────────────────────────────
 
 # File extensions supported by soundfile (lossless/lossy via libsndfile).
-_SF_EXTENSIONS: set[str] = {"wav", "flac", "ogg", "aiff", "aif", "au", "caf"}
+_SF_EXTENSIONS: set[str] = {
+    "wav", "flac", "ogg", "aiff", "aif", "au", "caf",
+    "mp3", "mp4", "m4a", "aac", "wma",
+}
 
-# File extensions that need pydub (MP3 via ffmpeg).
-_MP3_EXTENSIONS: set[str] = {"mp3", "mp4", "m4a", "aac", "wma"}
+
+def _sf_read_unicode(path: str, dtype: str = "float64"):
+    """Call ``sf.read(path, ...)`` with a Unicode-safe fallback on Windows.
+
+    On some Windows builds libsndfile cannot open files whose path
+    contains non-ASCII characters.  When that happens we copy the file
+    to a temporary ASCII-named location and read from there.
+    """
+    import soundfile as sf  # pylint: disable=import-outside-toplevel
+
+    try:
+        return sf.read(path, dtype=dtype, always_2d=False)
+    except sf.LibsndfileError:
+        # Only bother with the temp-file fallback on Windows for
+        # paths that actually contain non-ASCII characters.
+        if sys.platform != "win32" or path.isascii():
+            raise
+        import os
+        import tempfile
+        import shutil
+        ext = path.rsplit(".", 1)[-1] if "." in path else "tmp"
+        tmp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"fd_audio_{os.getpid()}.{ext}",
+        )
+        try:
+            shutil.copy2(path, tmp_path)
+            return sf.read(tmp_path, dtype=dtype, always_2d=False)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def read_audio_file(path: str) -> tuple[np.ndarray, int]:
     """Read an audio file and return ``(samples_float64, sample_rate)``.
 
-    Uses ``soundfile`` for WAV/FLAC/OGG and falls back to ``pydub`` for MP3.
+    Uses ``soundfile`` for all supported formats (WAV, FLAC, OGG, MP3, etc.).
     Samples are always returned as float64 mono (stereo is downmixed).
     """
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
 
     if ext in _SF_EXTENSIONS:
-        import soundfile as sf  # pylint: disable=import-outside-toplevel
-        data, sr = sf.read(path, dtype="float64", always_2d=False)
+        data, sr = _sf_read_unicode(path)
         return data, int(sr)
-
-    if ext in _MP3_EXTENSIONS:
-        try:
-            from pydub import AudioSegment  # pylint: disable=import-outside-toplevel
-        except ImportError:
-            raise RuntimeError(
-                "pydub is required to read MP3 files. "
-                "Install with: pip install pydub"
-            ) from None
-        audio = AudioSegment.from_file(path)
-        sr = audio.frame_rate
-        # Convert to mono float64
-        if audio.channels > 1:
-            audio = audio.set_channels(1)
-        samples_np = (
-            np.array(audio.get_array_of_samples(), dtype=np.float64)
-            / (2.0 ** (8 * audio.sample_width - 1))
-        )
-        return samples_np, int(sr)
 
     raise ValueError(
         f"Unsupported audio format: .{ext}. "
-        f"Supported: {', '.join(sorted(_SF_EXTENSIONS | _MP3_EXTENSIONS))}"
+        f"Supported: {', '.join(sorted(_SF_EXTENSIONS))}"
     )
 
 

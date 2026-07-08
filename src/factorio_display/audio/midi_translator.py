@@ -862,8 +862,8 @@ def midi_to_multi_rail_tick_data(
         or sustain_level < 1.0 or release_ticks > 0
     )
 
-    rail_data: list[list[list[float]]] = []
-    for ri in range(num_rails):
+    def _build_one_rail(ri: int) -> list[list[float]]:
+        """Build tick_data for a single rail (thread-safe, no shared state)."""
         td: list[list[float]] = [[0.0] * SPEAKER_COUNT for _ in range(num_ticks)]
         for pitch_idx, start_t, end_t, loudness in rail_notes[ri]:
             start_i = int(start_t)
@@ -890,7 +890,22 @@ def midi_to_multi_rail_tick_data(
                 for p in range(SPEAKER_COUNT):
                     if td[tick][p] > 100.0:
                         td[tick][p] = 100.0
-        rail_data.append(td)
+        return td
+
+    # Process rails in parallel — each rail is fully independent.
+    if num_rails > 1:
+        import concurrent.futures
+        rail_data = [None] * num_rails
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(num_rails, 4)) as executor:
+            future_to_ri = {
+                executor.submit(_build_one_rail, ri): ri
+                for ri in range(num_rails)
+            }
+            for future in concurrent.futures.as_completed(future_to_ri):
+                ri = future_to_ri[future]
+                rail_data[ri] = future.result()
+    else:
+        rail_data = [_build_one_rail(0)]
 
     return rail_instruments, rail_data
 
@@ -909,14 +924,18 @@ def _emit_processed_midi(mid: mido.MidiFile, path: str) -> None:
             else:
                 new_track.append(msg)
 
-    out.save(path)
+    from .._unicode_io import mido_save  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+
+    mido_save(out, path)
     sys.stderr.write(f"[midi_translator] Processed MIDI saved to: {path}\n")
 
 
 # --- MAIN PIPELINE ---
 def translate_to_factorio(input_file, output_file, boost=False):
+    from .._unicode_io import mido_open  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+
     print(f"Loading {input_file}...")
-    mid = mido.MidiFile(input_file)
+    mid = mido_open(input_file)
 
     print(f"Processing Timing... (Boost: {boost})")
     mid = process_timing(mid, boost_melody=boost)
@@ -939,7 +958,9 @@ def translate_to_factorio(input_file, output_file, boost=False):
         for msg in folded_track:
             new_track.append(msg)
 
-    processed_mid.save(output_file)
+    from .._unicode_io import mido_save  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+
+    mido_save(processed_mid, output_file)
     print(f"Translation complete. Saved to {output_file}.")
 
 if __name__ == "__main__":

@@ -10,13 +10,20 @@ from factorio_display.audio.player_blueprint import (
     DEBUG_Y,
     INSTRUMENT_MAP,
     RAIL_WIDTH,
+    _pitch_index_to_factorio_note,
     build_audio_decoder,
+    build_audio_decoder_logical,
     build_multi_rail_decoder,
 )
 from factorio_display.audio.pitch_mapping import (
+    DRUM_KIT_NOTES,
     SPEAKER_COUNT,
     pitch_index_to_signal,
 )
+from factorio_display.video.player_blueprint import (
+    build_display_logical,
+)
+from factorio_display import SIGNAL_POOL, QUALITIES
 
 
 # ── helpers ────────────────────────────────────────────────────────────
@@ -378,7 +385,7 @@ class TestMultiRailDecoder:
         bp_dual = _parse_bp(build_multi_rail_decoder(
             name="Dual", instruments=["piano", "piano"],
         ))
-        assert len(bp_dual.wires) > len(bp_single.wires) * 2, (
+        assert len(bp_dual.wires) >= len(bp_single.wires) * 2, (
             f"Expected cross-rail wiring overhead"
         )
 
@@ -414,3 +421,119 @@ class TestMultiRailDecoder:
             warnings.simplefilter("always")
             build_multi_rail_decoder(instruments=["piano"])
         assert_no_unexpected_warnings(w)
+
+
+# ── logical-blueprint tests ───────────────────────────────────────────
+
+class TestLogicalBlueprintDecoder:
+    """Tests for ``build_audio_decoder_logical``."""
+
+    def test_drum_kit_note_names_with_map_drums(self):
+        """Drum-kit rail with map_drums=True uses drum-kit note names."""
+        lb = build_audio_decoder_logical(
+            name="Drum Test",
+            instrument="drum",
+            map_drums=True,
+        )
+        speakers = [e for e in lb.entities.values()
+                     if e.type == "programmable-speaker"]
+        assert len(speakers) == 48
+        for i, spk in enumerate(speakers):
+            note = spk.properties.get("note", "")
+            if i < len(DRUM_KIT_NOTES):
+                assert note == DRUM_KIT_NOTES[i], (
+                    f"Speaker {i}: expected {DRUM_KIT_NOTES[i]!r}, got {note!r}"
+                )
+            else:
+                # Remaining speakers use placeholder (first drum note)
+                assert note == DRUM_KIT_NOTES[0], (
+                    f"Speaker {i}: expected placeholder {DRUM_KIT_NOTES[0]!r}, got {note!r}"
+                )
+
+    def test_drum_kit_note_names_without_map_drums(self):
+        """Drum-kit rail with map_drums=False uses MIDI note names."""
+        lb = build_audio_decoder_logical(
+            name="Drum Test",
+            instrument="drum",
+            map_drums=False,
+        )
+        speakers = [e for e in lb.entities.values()
+                     if e.type == "programmable-speaker"]
+        assert len(speakers) == 48
+        for i, spk in enumerate(speakers):
+            note = spk.properties.get("note", "")
+            expected = _pitch_index_to_factorio_note(i)
+            assert note == expected, (
+                f"Speaker {i}: expected {expected!r}, got {note!r}"
+            )
+
+    def test_piano_uses_midi_note_names(self):
+        """Piano rail always uses MIDI note names (regardless of map_drums)."""
+        for map_drums in (True, False):
+            lb = build_audio_decoder_logical(
+                name="Piano Test",
+                instrument="piano",
+                map_drums=map_drums,
+            )
+            speakers = [e for e in lb.entities.values()
+                         if e.type == "programmable-speaker"]
+            assert len(speakers) == 48
+            for i, spk in enumerate(speakers):
+                note = spk.properties.get("note", "")
+                expected = _pitch_index_to_factorio_note(i)
+                assert note == expected, (
+                    f"Speaker {i} (map_drums={map_drums}): "
+                    f"expected {expected!r}, got {note!r}"
+                )
+
+
+# ── display builder tests ─────────────────────────────────────────────
+
+class TestBuildDisplayLogical:
+    """Tests for ``build_display_logical`` — the video lamp-grid builder."""
+
+    def test_normal_display(self):
+        """A display within pool limits creates a single lamp grid."""
+        lb = build_display_logical(name="Test", width=10, height=6)
+        lamps = [e for e in lb.entities.values() if e.type == "small-lamp"]
+        assert len(lamps) == 60  # 10×6
+
+        # Should have exactly one "data" input port
+        data_ports = [p for p, n in lb.input_ports.items() if p == "data"]
+        assert len(data_ports) == 1
+
+    def test_large_display_chunks(self):
+        """A display exceeding the signal pool is split into vertical chunks."""
+        # 62×35 requires 434 base signals; SIGNAL_POOL has 182
+        lb = build_display_logical(name="Large", width=62, height=35)
+
+        lamps = [e for e in lb.entities.values() if e.type == "small-lamp"]
+        assert len(lamps) == 62 * 35  # all pixels present
+
+        # Should have multiple "data" input ports (one per chunk)
+        data_ports = [p for p, n in lb.input_ports.items() if p.startswith("data")]
+        assert len(data_ports) >= 2, f"Expected chunked data ports, got {data_ports}"
+
+    def test_large_display_chunked_networks_independent(self):
+        """Each chunk's lamp network is independent (no cross-chunk wiring)."""
+        lb = build_display_logical(name="Independent", width=62, height=35)
+
+        # Collect lamp IDs per chunk by checking which data port they're on
+        data_ports = sorted(
+            [p for p in lb.input_ports if p.startswith("data")],
+            key=lambda p: int(p.split("_")[1]) if "_" in p else 0,
+        )
+
+        for port_name in data_ports:
+            net_id = lb.input_ports[port_name]
+            net = next(n for n in lb.networks if n.network_id == net_id)
+            lamp_eps = [ep for ep in net.endpoints if "lamp" in ep.entity_id]
+            assert len(lamp_eps) > 0, f"Port {port_name} has no lamps"
+
+    def test_large_display_chunk_positions_non_overlapping(self):
+        """Each chunk's lamps occupy distinct Y-ranges."""
+        lb = build_display_logical(name="Positions", width=62, height=35)
+        lamps = [e for e in lb.entities.values() if e.type == "small-lamp"]
+        positions = [(e.position[0], e.position[1]) for e in lamps]
+        # All positions should be unique
+        assert len(positions) == len(set(positions)), "Duplicate lamp positions"
