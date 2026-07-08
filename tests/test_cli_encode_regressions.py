@@ -53,7 +53,7 @@ def test_single_frame_timer_uses_mod_one_and_no_constant_kick() -> None:
     assert subtick_mod.properties["second_operand"] == 1
 
 
-def test_layout_places_sources_left_of_sink_for_compact_bridges() -> None:
+def test_layout_places_sources_near_sink_for_compact_bridges() -> None:
     sink = LogicalBlueprint(label="Display")
     sink.add_entity(LogicalEntity("sink_ent", "arithmetic-combinator", position=(0, 0)))
 
@@ -74,4 +74,6 @@ def test_layout_places_sources_left_of_sink_for_compact_bridges() -> None:
     sink_pos = merged.entities["display_sink_ent"].position
     src_pos = merged.entities["video_src_ent"].position
     assert sink_pos is not None and src_pos is not None
-    assert src_pos[0] < sink_pos[0], f"Expected source left of sink, got src={src_pos}, sink={sink_pos}"
+    assert max(abs(src_pos[0] - sink_pos[0]), abs(src_pos[1] - sink_pos[1])) <= 8, (
+        f"Expected source near sink, got src={src_pos}, sink={sink_pos}"
+    )

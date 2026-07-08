@@ -107,6 +107,7 @@ class PortConnection:
 # ═══════════════════════════════════════════════════════════════════════
 
 _CACHE_DIR = cache_namespace_dir("compose")
+_LAYOUT_CACHE_REV = "layout-v2"
 
 
 def _cache_key(*parts: str) -> str:
@@ -638,39 +639,115 @@ def _layout_components(
     sink_dy = -min(sink_ys)
     sink_max_x = max(sink_xs) + sink_dx
     sink_min_y = min(sink_ys) + sink_dy
+    sink_max_y = max(sink_ys) + sink_dy
 
     for _, ent in sink_items:
         if ent.position is not None:
             x, y = ent.position
             ent.position = (x + sink_dx, y + sink_dy)
 
-    # ── Place sources to the left of the sink ────────────────────
-    # Display lamp buses often expose spare degree near the left edge;
-    # placing memory/timer groups on that side keeps bridge wires short.
+    # ── Place sources as one compact side-cluster ────────────────
+    # Keep logical modules visually cohesive by choosing one side of
+    # the sink (left/right/top/bottom) and packing all sources there.
     sink_min_x = min(sink_xs) + sink_dx
-    col_x = sink_min_x - 4
-    next_y = sink_min_y
+    sink_cx = (sink_min_x + sink_max_x) // 2
+    sink_cy = (sink_min_y + sink_max_y) // 2
 
+    source_meta: list[tuple[str, int, int, int, int]] = []
     for prefix in source_prefixes:
         items = groups.get(prefix, [])
-        xs = [ent.position[0] for _, ent in items if ent.position is not None]
-        ys = [ent.position[1] for _, ent in items if ent.position is not None]
-        if not xs:
-            continue
-
-        min_x, min_y = min(xs), min(ys)
-        max_y = max(ys)
-        # Align the group's right edge at col_x so each source stays compact
-        # and as close to the sink as possible.
-        dx = col_x - max(xs)
-        dy = next_y - min_y
-
+        min_x: int | None = None
+        min_y: int | None = None
+        max_x: int | None = None
+        max_y: int | None = None
         for _, ent in items:
+            if ent.position is None:
+                continue
+            x, y = ent.position
+            fw, fh = _entity_footprint(ent)
+            ex0, ey0 = x, y
+            ex1, ey1 = x + fw - 1, y + fh - 1
+            if min_x is None:
+                min_x, min_y, max_x, max_y = ex0, ey0, ex1, ey1
+            else:
+                min_x = min(min_x, ex0)
+                min_y = min(min_y, ey0)
+                max_x = max(max_x, ex1)
+                max_y = max(max_y, ey1)
+
+        if min_x is None or min_y is None or max_x is None or max_y is None:
+            continue
+        w = max_x - min_x + 1
+        h = max_y - min_y + 1
+        source_meta.append((prefix, min_x, min_y, w, h))
+
+    if not source_meta:
+        return
+
+    # Keep modules tightly packed while preserving non-overlap.
+    # clearance = minimum tiles between bounding boxes.
+    clearance = 1
+    stack_gap = 0
+    side_layouts: dict[str, dict[str, tuple[int, int]]] = {}
+    side_scores: dict[str, tuple[int, int, int]] = {}
+
+    # Left / right: vertical stacking
+    for side in ("left", "right"):
+        placements: dict[str, tuple[int, int]] = {}
+        y_cursor = sink_min_y
+        for prefix, _min_x, _min_y, w, h in source_meta:
+            if side == "left":
+                px = sink_min_x - clearance - w + 1
+            else:
+                px = sink_max_x + clearance
+            py = y_cursor
+            placements[prefix] = (px, py)
+            y_cursor += h + stack_gap
+
+        centers = [
+            (placements[p][0] + w // 2, placements[p][1] + h // 2)
+            for p, _mx, _my, w, h in source_meta
+        ]
+        max_sink_dist = max(_cheb_pos(c, (sink_cx, sink_cy)) for c in centers)
+        spread = (y_cursor - sink_min_y)
+        side_bias = 0 if side == "right" else 1  # prefer right on ties
+        side_layouts[side] = placements
+        side_scores[side] = (max_sink_dist, spread, side_bias)
+
+    # Top / bottom: horizontal stacking
+    for side in ("top", "bottom"):
+        placements = {}
+        x_cursor = sink_min_x
+        for prefix, _min_x, _min_y, w, h in source_meta:
+            px = x_cursor
+            if side == "top":
+                py = sink_min_y - clearance - h + 1
+            else:
+                py = sink_max_y + clearance
+            placements[prefix] = (px, py)
+            x_cursor += w + stack_gap
+
+        centers = [
+            (placements[p][0] + w // 2, placements[p][1] + h // 2)
+            for p, _mx, _my, w, h in source_meta
+        ]
+        max_sink_dist = max(_cheb_pos(c, (sink_cx, sink_cy)) for c in centers)
+        spread = (x_cursor - sink_min_x)
+        side_bias = 2 if side == "top" else 3
+        side_layouts[side] = placements
+        side_scores[side] = (max_sink_dist, spread, side_bias)
+
+    best_side = min(side_scores.keys(), key=lambda s: side_scores[s])
+    best_layout = side_layouts[best_side]
+
+    for prefix, min_x, min_y, _w, _h in source_meta:
+        px, py = best_layout[prefix]
+        dx = px - min_x
+        dy = py - min_y
+        for _, ent in groups.get(prefix, []):
             if ent.position is not None:
                 x, y = ent.position
                 ent.position = (x + dx, y + dy)
-
-        next_y = max_y + dy + 2
 
 
 def compose(
@@ -722,7 +799,7 @@ def compose(
 
     # ── Cache check ───────────────────────────────────────────────
     if use_cache and cache_key_parts:
-        cached = cache_get(output_name, *cache_key_parts)
+        cached = cache_get(output_name, *cache_key_parts, _LAYOUT_CACHE_REV)
         if cached is not None:
             return cached
 
@@ -772,7 +849,7 @@ def compose(
 
     # ── Cache ─────────────────────────────────────────────────────
     if use_cache and cache_key_parts:
-        cache_put(merged, output_name, *cache_key_parts)
+        cache_put(merged, output_name, *cache_key_parts, _LAYOUT_CACHE_REV)
 
     return merged
 
