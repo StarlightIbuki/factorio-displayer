@@ -2,8 +2,6 @@
 requires = [
     "hatchling>=1.21",
     "factorio-draftsman>=3.0.0",
-    "opencv-python>=4.8.0",
-    "numpy>=1.24.0",
 ]
 build-backend = "hatchling.build"
 

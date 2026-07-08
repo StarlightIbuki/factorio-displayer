@@ -10,3 +10,4 @@ _diagnose
 .encode_chunks*
 .encode_vchunks*
 .blueprint_cache
+.factorio_display_cache

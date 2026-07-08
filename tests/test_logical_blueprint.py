@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from factorio_display.logical_blueprint import (
+    blueprint_string_to_yaml,
     Endpoint,
+    from_blueprint_string,
     LogicalBlueprint,
     LogicalEntity,
     Network,
@@ -130,6 +132,37 @@ class TestLogicalBlueprint:
         lb.connect("green", Endpoint("a", "output"), Endpoint("b", "output"))
         ep_set = lb.endpoints_of("a", "output")
         assert len(ep_set) == 2
+
+    def test_place_relative_preserves_offsets(self):
+        lb = LogicalBlueprint()
+        lb.add_entity(LogicalEntity("a", "arithmetic-combinator", position=(10, 20)))
+        lb.add_entity(LogicalEntity("b", "arithmetic-combinator", position=(13, 24)))
+
+        lb.place_relative(origin_x=0, origin_y=0)
+
+        assert lb.entities["a"].position == (0, 0)
+        assert lb.entities["b"].position == (3, 4)
+
+    def test_place_relative_can_assign_unpositioned(self):
+        lb = LogicalBlueprint()
+        lb.add_entity(LogicalEntity("a", "arithmetic-combinator", position=(5, 7)))
+        lb.add_entity(LogicalEntity("b", "arithmetic-combinator"))
+
+        lb.place_relative(origin_x=0, origin_y=0, assign_unpositioned=True)
+
+        assert lb.entities["a"].position == (0, 0)
+        assert lb.entities["b"].position == (0, 2)
+
+    def test_merge_with_position_offset(self):
+        src = LogicalBlueprint()
+        src.add_entity(LogicalEntity("x", "arithmetic-combinator", position=(1, 2)))
+        src.add_entity(LogicalEntity("y", "arithmetic-combinator"))
+
+        dst = LogicalBlueprint()
+        dst.merge(src, entity_prefix="m_", network_prefix="m_", position_offset=(10, -3))
+
+        assert dst.entities["m_x"].position == (11, -1)
+        assert dst.entities["m_y"].position is None
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -488,6 +521,40 @@ class TestDraftsmanRoundTrip:
         from conftest import validate_logical_connectivity
         vresult = validate_logical_connectivity(lb)
         assert vresult["errors"] == [], f"Connectivity errors: {vresult['errors']}"
+
+    def test_from_blueprint_string(self):
+        from draftsman.blueprintable import Blueprint
+        from draftsman.entity import new_entity
+
+        bp = Blueprint()
+        ac = new_entity("arithmetic-combinator", id="mod", tile_position=(1, 2))
+        ac.set_arithmetic_condition(
+            first_operand="signal-clock",
+            operation="%",
+            second_operand=60,
+            output_signal="signal-M",
+        )
+        bp.entities.append(ac)
+
+        lb = from_blueprint_string(bp.to_string())
+        assert len(lb.entities) == 1
+        ent = next(iter(lb.entities.values()))
+        assert ent.type == "arithmetic-combinator"
+        assert ent.position == (1, 2)
+
+    def test_blueprint_string_to_yaml(self):
+        from draftsman.blueprintable import Blueprint
+        from draftsman.entity import new_entity
+
+        bp = Blueprint()
+        bp.label = "YamlTest"
+        cc = new_entity("constant-combinator", id="lut", tile_position=(0, 0))
+        cc.set_signal(0, "signal-A", 5, "normal")
+        bp.entities.append(cc)
+
+        yaml_text = blueprint_string_to_yaml(bp.to_string())
+        assert 'label: "YamlTest"' in yaml_text
+        assert 'type: "constant-combinator"' in yaml_text
 
     def test_toml_to_draftsman(self):
         """Build a LogicalBlueprint from TOML, convert to draftsman."""

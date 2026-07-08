@@ -331,6 +331,59 @@ class LogicalBlueprint:
         )
         self.entities = dict(items)
 
+    def shift_positions(self, dx: int, dy: int) -> None:
+        """Shift all positioned entities by ``(dx, dy)`` in-place.
+
+        Unpositioned entities (``position is None``) are left untouched.
+        """
+        if dx == 0 and dy == 0:
+            return
+        for ent in self.entities.values():
+            if ent.position is None:
+                continue
+            x, y = ent.position
+            ent.position = (x + dx, y + dy)
+        self._network_bounds_cache.clear()
+
+    def place_relative(
+        self,
+        origin_x: int = 0,
+        origin_y: int = 0,
+        *,
+        assign_unpositioned: bool = False,
+        unpositioned_step_y: int = 2,
+    ) -> None:
+        """Place this blueprint relative to an origin while preserving offsets.
+
+        This treats existing positions as *local/relative* coordinates.
+        Positioned entities are translated so the current bounding-box origin
+        (``min_x``, ``min_y``) lands on ``(origin_x, origin_y)``.
+
+        When ``assign_unpositioned`` is True, any entities with
+        ``position is None`` are assigned a fallback vertical column starting
+        below the current placed area.
+        """
+        positioned = [ent.position for ent in self.entities.values() if ent.position is not None]
+        if positioned:
+            min_x = min(p[0] for p in positioned)
+            min_y = min(p[1] for p in positioned)
+            self.shift_positions(origin_x - min_x, origin_y - min_y)
+
+        if not assign_unpositioned:
+            return
+
+        current_max_y = max(
+            (ent.position[1] for ent in self.entities.values() if ent.position is not None),
+            default=origin_y - unpositioned_step_y,
+        )
+        next_y = current_max_y + unpositioned_step_y
+        for ent in self.entities.values():
+            if ent.position is not None:
+                continue
+            ent.position = (origin_x, next_y)
+            next_y += unpositioned_step_y
+        self._network_bounds_cache.clear()
+
     def endpoints_of(self, entity_id: str, port: str) -> set[str]:
         """Return the set of network ids the given endpoint belongs to."""
         result: set[str] = set()
@@ -477,6 +530,7 @@ class LogicalBlueprint:
         entity_prefix: str = "",
         network_prefix: str = "",
         port_prefix: str = "",
+        position_offset: tuple[int, int] | None = None,
     ) -> None:
         """Merge *other* into this logical blueprint in-place.
 
@@ -484,6 +538,10 @@ class LogicalBlueprint:
         network ids, and port names are prefixed with *entity_prefix* /
         *network_prefix* / *port_prefix* respectively (empty string = no
         prefix).  Duplicate ids after prefixing raise ``ValueError``.
+
+        If *position_offset* is provided, all positioned entities from
+        *other* are shifted by ``(dx, dy)`` during merge.  This makes it easy
+        to compose blueprints that only define relative coordinates.
 
         Ports from *other* are preserved with their (now-prefixed) network
         ids and port names, and added to this blueprint's ports.  If a
@@ -497,7 +555,10 @@ class LogicalBlueprint:
                     f"Entity id {new_id!r} already exists after prefix "
                     f"{entity_prefix!r}; use a different prefix"
                 )
-            new_ent = replace(ent, entity_id=new_id)
+            new_pos = ent.position
+            if new_pos is not None and position_offset is not None:
+                new_pos = (new_pos[0] + position_offset[0], new_pos[1] + position_offset[1])
+            new_ent = replace(ent, entity_id=new_id, position=new_pos)
             self.add_entity(new_ent)
 
         # ── Networks ────────────────────────────────────────────
@@ -754,6 +815,108 @@ def from_toml(toml_str: str) -> LogicalBlueprint:
     """
     data = tomllib.loads(toml_str)
     return _from_parsed(data)
+
+
+def from_blueprint_string(blueprint_str: str) -> LogicalBlueprint:
+    """Parse a Factorio blueprint string into a :class:`LogicalBlueprint`."""
+    from draftsman.blueprintable import Blueprint
+
+    return from_draftsman(Blueprint.from_string(blueprint_str))
+
+
+def _logical_to_data(lb: LogicalBlueprint) -> dict[str, Any]:
+    """Convert a :class:`LogicalBlueprint` into a plain nested mapping."""
+    data: dict[str, Any] = {}
+
+    if lb.label:
+        data["label"] = lb.label
+
+    entities: list[dict[str, Any]] = []
+    for ent in lb.entities.values():
+        item: dict[str, Any] = {
+            "id": ent.entity_id,
+            "type": ent.type,
+        }
+        if ent.position is not None:
+            item["position"] = [ent.position[0], ent.position[1]]
+        if ent.direction is not None:
+            item["direction"] = ent.direction
+        for k, v in ent.properties.items():
+            item[k] = v
+        entities.append(item)
+    data["entity"] = entities
+
+    networks: list[dict[str, Any]] = []
+    for net in lb.networks:
+        item = {
+            "id": net.network_id,
+            "color": net.color,
+            "endpoints": sorted(ep.to_string() for ep in net.endpoints),
+        }
+        if net.prewired_pairs is not None:
+            item["prewired_pairs"] = [
+                f"{a.to_string()}->{b.to_string()}" for a, b in net.prewired_pairs
+            ]
+        networks.append(item)
+    data["network"] = networks
+
+    data["input_port"] = [
+        {"name": name, "network": net_id}
+        for name, net_id in lb.input_ports.items()
+    ]
+    data["output_port"] = [
+        {"name": name, "network": net_id}
+        for name, net_id in lb.output_ports.items()
+    ]
+    return data
+
+
+def _yaml_scalar(v: Any) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if v is None:
+        return "null"
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{s}"'
+
+
+def _yaml_dump(v: Any, indent: int = 0) -> str:
+    prefix = " " * indent
+    if isinstance(v, dict):
+        lines: list[str] = []
+        for key, value in v.items():
+            if isinstance(value, (dict, list)):
+                lines.append(f"{prefix}{key}:")
+                lines.append(_yaml_dump(value, indent + 2))
+            else:
+                lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
+        return "\n".join(lines)
+
+    if isinstance(v, list):
+        lines = []
+        if not v:
+            return f"{prefix}[]"
+        for item in v:
+            if isinstance(item, (dict, list)):
+                lines.append(f"{prefix}-")
+                lines.append(_yaml_dump(item, indent + 2))
+            else:
+                lines.append(f"{prefix}- {_yaml_scalar(item)}")
+        return "\n".join(lines)
+
+    return f"{prefix}{_yaml_scalar(v)}"
+
+
+def to_yaml(lb: LogicalBlueprint) -> str:
+    """Serialize a :class:`LogicalBlueprint` to a YAML string."""
+    return _yaml_dump(_logical_to_data(lb)) + "\n"
+
+
+def blueprint_string_to_yaml(blueprint_str: str) -> str:
+    """Convert a Factorio blueprint string directly to Logical YAML."""
+    return to_yaml(from_blueprint_string(blueprint_str))
 
 
 def _from_parsed(data: dict[str, Any]) -> LogicalBlueprint:

@@ -185,6 +185,9 @@ factorio-display export-audio --instrument piano --format logical
 
 # Encode a MIDI file to logical format
 factorio-display encode-audio song.mid --format logical
+
+# Convert blueprint string text to logical YAML
+factorio-display blueprint-to-yaml blueprint.txt -o blueprint.yaml
 ```
 
 ### Programmatic API
@@ -192,7 +195,8 @@ factorio-display encode-audio song.mid --format logical
 ```python
 from factorio_display.logical_blueprint import (
     LogicalBlueprint, LogicalEntity, Endpoint, to_toml, from_toml,
-    from_draftsman, to_draftsman,
+  from_draftsman, from_blueprint_string, to_draftsman,
+  to_yaml, blueprint_string_to_yaml,
 )
 
 # Build programmatically
@@ -216,6 +220,13 @@ lb2 = from_toml(toml_string)
 # Convert to/from draftsman Blueprint
 bp = to_draftsman(lb)
 lb3 = from_draftsman(bp)
+lb4 = from_blueprint_string(bp.to_string())
+
+# Serialize to YAML
+print(to_yaml(lb))
+
+# Convert blueprint string directly to logical YAML
+print(blueprint_string_to_yaml(bp.to_string()))
 ```
 
 ## How It Works in Factorio

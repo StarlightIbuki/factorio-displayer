@@ -17,7 +17,7 @@ from factorio_display.video.player_blueprint import build_display
 from factorio_display.video.encoder import encode_frames, _to_fixed_string
 from factorio_display.timer import build_raw_timer, build_mod_timer
 from factorio_display.progress_bar import build_progress_bar
-from factorio_display.composer import Composer, _assign_tile_positions, _connect_nets_by_color
+from factorio_display.composer import Composer, _connect_nets_by_color
 
 from draftsman.blueprintable import Blueprint
 
@@ -81,7 +81,6 @@ def main():
     # ── Timer: raw self-loop → mod ───────────────────────────────
     timer_lb = build_raw_timer("Clock")
     mod_lb = build_mod_timer(60, name="SubTick")  # diagnostic: fixed interval
-    _assign_tile_positions(mod_lb, start_x=0, start_y=4)
     timer_lb.merge(mod_lb, entity_prefix="mod_", network_prefix="mod_")
     _connect_nets_by_color(
         timer_lb, "red",

@@ -62,6 +62,18 @@ def _fix_argv_encoding() -> None:
         pass
 
 
+def _read_text_auto(path: Path) -> str:
+    """Read text using common encodings produced by shells/editors."""
+    data = path.read_bytes()
+    for enc in ("utf-8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    # Last resort for mixed legacy files.
+    return data.decode("latin-1")
+
+
 def _is_midi_file(path: str) -> bool:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return ext in ("mid", "midi")
@@ -346,7 +358,7 @@ def _build_timer_for_memory(memory_lb: LogicalBlueprint) -> LogicalBlueprint:
     - ``"sub_tick"`` (red) — sub-tick for progress bar
     """
     from .timer import build_raw_timer, build_mod_timer, build_clock_bridge
-    from .composer import _assign_tile_positions, _connect_nets_by_color
+    from .composer import _connect_nets_by_color
 
     # _extract_total_ticks returns the largest tick index referenced by
     # memory conditions. A single-frame image typically uses only tick 0,
@@ -371,7 +383,6 @@ def _build_timer_for_memory(memory_lb: LogicalBlueprint) -> LogicalBlueprint:
 
     # Mod timer: reads RED clock, outputs sub_tick on RED.
     mod = build_mod_timer(max_tick_index + 1, name="SubTick")
-    _assign_tile_positions(mod, start_x=0, start_y=4)
     timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
     timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
 
@@ -391,7 +402,6 @@ def _build_timer_for_memory(memory_lb: LogicalBlueprint) -> LogicalBlueprint:
     else:
         # Audio memory — need RED→GREEN clock bridge.
         bridge = build_clock_bridge("Clock Bridge")
-        _assign_tile_positions(bridge, start_x=0, start_y=6)
         timer.merge(bridge, entity_prefix="bridge_", network_prefix="bridge_")
 
         # Wire raw timer (RED) → bridge (RED input)
@@ -668,6 +678,22 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     export_logical_parser.add_argument("-o", "--output", type=str, default=None,
                                        help="Write logical blueprint TOML to file instead of stdout.")
 
+    # ==================================================================
+    # Subcommand: blueprint-to-yaml
+    # ==================================================================
+    b2y_parser = subparsers.add_parser(
+        "blueprint-to-yaml",
+        help="Convert a blueprint string text file into logical YAML.",
+    )
+    b2y_parser.add_argument(
+        "input",
+        help="Path to a text file containing one blueprint string, or '-' for stdin.",
+    )
+    b2y_parser.add_argument(
+        "-o", "--output", type=str, default=None,
+        help="Write YAML to file instead of stdout.",
+    )
+
     args = parser.parse_args()
 
     from . import CLOCK_SIGNAL  # pylint: disable=import-outside-toplevel
@@ -735,6 +761,21 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         else:
             sys.stdout.write(toml_str)
 
+    elif args.command == "blueprint-to-yaml":
+        from .logical_blueprint import blueprint_string_to_yaml
+
+        if args.input == "-":
+            bp_str = sys.stdin.read().strip()
+        else:
+            bp_str = _read_text_auto(Path(args.input)).strip()
+
+        yaml_text = blueprint_string_to_yaml(bp_str)
+        if args.output:
+            Path(args.output).write_text(yaml_text, encoding="utf-8")
+            sys.stderr.write(f"YAML written to: {args.output}\n")
+        else:
+            sys.stdout.write(yaml_text)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Unified encode handler
@@ -748,26 +789,23 @@ def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
     - ``"sub_tick"`` — sub-tick on RED (for progress bar, from raw clock)
     """
     from .timer import build_raw_timer, build_mod_timer, build_clock_bridge
-    from .composer import _assign_tile_positions, _connect_nets_by_color
+    from .composer import _connect_nets_by_color
 
     timer = build_raw_timer("Timer", with_kick=False)
     timer.output_ports["raw"] = timer.output_ports.pop("out")
 
     # Mod timer: reads RED clock, wraps at total_ticks+1 → RED
     mod = build_mod_timer(total_ticks + 1, name="SubTick")
-    _assign_tile_positions(mod, start_x=0, start_y=4)
     timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
     timer.output_ports["clock_red"] = timer.output_ports.pop("out")
 
     # Sub-tick: raw clock % 60 → RED (for progress bar)
     sub = build_mod_timer(60, name="Mod60")
-    _assign_tile_positions(sub, start_x=0, start_y=6)
     timer.merge(sub, entity_prefix="sub60_", network_prefix="sub60_")
     timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
 
     # Bridge: raw clock RED → GREEN (for audio)
     bridge = build_clock_bridge("Clock Bridge")
-    _assign_tile_positions(bridge, start_x=0, start_y=8)
     timer.merge(bridge, entity_prefix="bridge_", network_prefix="bridge_")
     timer.output_ports["clock_green"] = timer.output_ports.pop("out")
 

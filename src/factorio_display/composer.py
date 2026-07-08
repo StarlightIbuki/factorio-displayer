@@ -167,32 +167,12 @@ def _assign_tile_positions(lb: LogicalBlueprint, start_x: int = 0, start_y: int 
     current bounding-box origin.  Entities without positions are placed
     in a vertical column starting from the shifted origin.
     """
-    xs: list[int] = []
-    ys: list[int] = []
-    for ent in lb.entities.values():
-        if ent.position is not None:
-            xs.append(ent.position[0])
-            ys.append(ent.position[1])
-
-    if xs:
-        origin_x, origin_y = min(xs), min(ys)
-        dx = start_x - origin_x
-        dy = start_y - origin_y
-        for ent in lb.entities.values():
-            if ent.position is not None:
-                x, y = ent.position
-                ent.position = (x + dx, y + dy)
-    else:
-        origin_x, origin_y = start_x, start_y
-
-    # Place any remaining unpositioned entities below the last positioned one
-    max_y = max((ent.position[1] for ent in lb.entities.values() if ent.position is not None),
-                default=start_y - 2)
-    y = max_y + 2
-    for ent in lb.entities.values():
-        if ent.position is None:
-            ent.position = (start_x, y)
-            y += 2  # combinators are 2 tiles tall
+    lb.place_relative(
+        origin_x=start_x,
+        origin_y=start_y,
+        assign_unpositioned=True,
+        unpositioned_step_y=2,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -364,20 +344,155 @@ def _layout_components(
     prefixes: dict[str, str] | None = None,
     connections: list[PortConnection] | None = None,
 ) -> None:
-    """Assign positions: stack component groups vertically to the right
-    of the display, ordering groups so that connected components are
-    adjacent (minimising wire distance).
+    """Assign positions for merged component groups with adaptive compaction.
+
+    Components may arrive fully positioned, partially positioned, or with no
+    positions at all. This pass guarantees every entity is positioned before
+    wiring-distance validation and keeps connected groups close together.
 
     *prefixes* is ``{label: entity_id_prefix}`` from :func:`_merge_components`.
     *connections* informs group ordering — components that share a port
     connection are placed next to each other in the vertical stack.
     """
-    positioned = [
-        (eid, ent) for eid, ent in merged.entities.items()
-        if ent.position is not None
-    ]
-    if not positioned:
-        return
+    def _entity_footprint(ent: LogicalEntity) -> tuple[int, int]:
+        """Return a coarse tile footprint used for collision-free placement."""
+        if ent.type in ("arithmetic-combinator", "decider-combinator"):
+            # East/West combinators occupy 2x1, North/South occupy 1x2.
+            if ent.direction in (2, 6):
+                return 2, 1
+            return 1, 2
+        if ent.type == "substation":
+            return 2, 2
+        return 1, 1
+
+    def _mark_rect(occ: set[tuple[int, int]], x: int, y: int, w: int, h: int) -> None:
+        for tx in range(x, x + w):
+            for ty in range(y, y + h):
+                occ.add((tx, ty))
+
+    def _can_place_rect(occ: set[tuple[int, int]], x: int, y: int, w: int, h: int) -> bool:
+        for tx in range(x, x + w):
+            for ty in range(y, y + h):
+                if (tx, ty) in occ:
+                    return False
+        return True
+
+    def _cheb_pos(a: tuple[int, int], b: tuple[int, int]) -> int:
+        return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+
+    def _spiral_candidates(cx: int, cy: int, radius: int):
+        for r in range(radius + 1):
+            if r == 0:
+                yield cx, cy
+                continue
+            x0, x1 = cx - r, cx + r
+            y0, y1 = cy - r, cy + r
+            for x in range(x0, x1 + 1):
+                yield x, y0
+                yield x, y1
+            for y in range(y0 + 1, y1):
+                yield x0, y
+                yield x1, y
+
+    def _build_group_adjacency(entity_ids: set[str]) -> dict[str, set[str]]:
+        """Build a sparse adjacency map from shared networks within one group."""
+        adj: dict[str, set[str]] = {eid: set() for eid in entity_ids}
+        for net in merged.networks:
+            ids = [ep.entity_id for ep in net.endpoints if ep.entity_id in entity_ids]
+            if len(ids) <= 1:
+                continue
+            # Large dense nets (lamp buses) don't need full O(n^2) adjacency.
+            if len(ids) > 64:
+                for i in range(len(ids) - 1):
+                    a = ids[i]
+                    b = ids[i + 1]
+                    if a != b:
+                        adj[a].add(b)
+                        adj[b].add(a)
+                continue
+            for i, a in enumerate(ids):
+                for b in ids[i + 1:]:
+                    if a != b:
+                        adj[a].add(b)
+                        adj[b].add(a)
+        return adj
+
+    def _auto_layout_group(items: list[tuple[str, LogicalEntity]]) -> None:
+        """Assign compact positions for unpositioned entities in one group."""
+        if not items:
+            return
+        occ: set[tuple[int, int]] = set()
+        entity_ids = {eid for eid, _ in items}
+        adj = _build_group_adjacency(entity_ids)
+
+        for _eid, ent in items:
+            if ent.position is None:
+                continue
+            w, h = _entity_footprint(ent)
+            _mark_rect(occ, ent.position[0], ent.position[1], w, h)
+
+        unplaced = {eid for eid, ent in items if ent.position is None}
+        if not unplaced:
+            return
+
+        item_map = {eid: ent for eid, ent in items}
+
+        def _pick_next() -> str:
+            placed_ids = {eid for eid in entity_ids if item_map[eid].position is not None}
+            return max(
+                unplaced,
+                key=lambda eid: (
+                    len(adj.get(eid, set()) & placed_ids),
+                    len(adj.get(eid, set())),
+                    -len(eid),
+                ),
+            )
+
+        while unplaced:
+            eid = _pick_next()
+            ent = item_map[eid]
+            w, h = _entity_footprint(ent)
+
+            placed_neighbors: list[tuple[int, int]] = []
+            for nid in adj.get(eid, set()):
+                nent = item_map.get(nid)
+                if nent is not None and nent.position is not None:
+                    placed_neighbors.append(nent.position)
+
+            if placed_neighbors:
+                anchor_x = round(sum(p[0] for p in placed_neighbors) / len(placed_neighbors))
+                anchor_y = round(sum(p[1] for p in placed_neighbors) / len(placed_neighbors))
+            else:
+                placed = [it.position for _id, it in items if it.position is not None]
+                if placed:
+                    anchor_x = round(sum(p[0] for p in placed) / len(placed))
+                    anchor_y = round(sum(p[1] for p in placed) / len(placed))
+                else:
+                    anchor_x, anchor_y = 0, 0
+
+            best_pos: tuple[int, int] | None = None
+            best_score: float | None = None
+            for x, y in _spiral_candidates(anchor_x, anchor_y, radius=40):
+                if not _can_place_rect(occ, x, y, w, h):
+                    continue
+                if placed_neighbors:
+                    dsum = sum(_cheb_pos((x, y), p) for p in placed_neighbors)
+                else:
+                    dsum = abs(x - anchor_x) + abs(y - anchor_y)
+                score = float(dsum) + 0.05 * (abs(x) + abs(y))
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_pos = (x, y)
+                    if score <= 0.0:
+                        break
+
+            if best_pos is None:
+                # Fallback: place below origin with sparse spacing.
+                best_pos = (0, len(entity_ids) * 2)
+
+            ent.position = best_pos
+            _mark_rect(occ, best_pos[0], best_pos[1], w, h)
+            unplaced.remove(eid)
 
     # Build prefix → group mapping from the actual component prefixes
     prefix_set: list[str] = list(prefixes.values()) if prefixes else []
@@ -391,6 +506,10 @@ def _layout_components(
                 matched = pfx
                 break
         groups.setdefault(matched, []).append((eid, ent))
+
+    # Ensure each group has concrete positions before global placement.
+    for items in groups.values():
+        _auto_layout_group(items)
 
     if len(groups) <= 1:
         return
@@ -468,6 +587,19 @@ def _layout_components(
     for pfx in groups:
         if pfx != "__root__" and pfx not in ordered:
             ordered.append(pfx)
+
+    # Prefer a display-like sink (lamp-heavy group), then speaker-heavy group.
+    def _sink_rank(prefix: str) -> tuple[int, int, int]:
+        items = groups.get(prefix, [])
+        lamps = sum(1 for _eid, ent in items if ent.type == "small-lamp")
+        speakers = sum(1 for _eid, ent in items if ent.type == "programmable-speaker")
+        return (1 if lamps > 0 else 0, lamps, speakers)
+
+    if ordered:
+        preferred_sink = max(ordered, key=_sink_rank)
+        best_rank = _sink_rank(preferred_sink)
+        if best_rank[0] > 0 and preferred_sink in ordered:
+            ordered = [p for p in ordered if p != preferred_sink] + [preferred_sink]
 
     # ── Place groups: sink at origin, dependencies to its right ───
     # The last group in topological order is the sink (e.g. the display).

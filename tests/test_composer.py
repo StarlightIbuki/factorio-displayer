@@ -776,6 +776,128 @@ class TestLayoutOrdering:
             f"Connected A-B should be closer than B-C: AB={dist_ab}, BC={dist_bc}"
         )
 
+    def test_unpositioned_components_are_auto_placed(self):
+        """Layout should assign positions even when components have none."""
+        from factorio_display.composer import PortConnection
+        from factorio_display.logical_blueprint import LogicalBlueprint
+
+        merged = LogicalBlueprint(label="Auto")
+
+        a = LogicalBlueprint(label="A")
+        a_ent = LogicalEntity(
+            "a_ent", "arithmetic-combinator",
+            properties={
+                "first_operand": "signal-A",
+                "operation": "+",
+                "second_operand": 1,
+                "output_signal": "signal-A",
+            },
+        )
+        a.add_entity(a_ent)
+        a.add_network(Network("red_0", "red", [Endpoint("a_ent", "output")]))
+        a.set_output_port("out", "red_0")
+
+        b = LogicalBlueprint(label="B")
+        b_ent = LogicalEntity(
+            "b_ent", "decider-combinator",
+            properties={
+                "conditions": [{"first": "signal-A", "op": "=", "constant": 1}],
+                "outputs": [{"signal": "signal-A", "copy_count": False, "constant": 1}],
+            },
+        )
+        b.add_entity(b_ent)
+        b.add_network(Network("red_0", "red", [Endpoint("b_ent", "input")]))
+        b.set_input_port("in", "red_0")
+
+        prefixes = {"A": "a_", "B": "b_"}
+        merged.merge(a, entity_prefix="a_", network_prefix="a_")
+        merged.merge(b, entity_prefix="b_", network_prefix="b_")
+
+        _layout_components(
+            merged,
+            prefixes,
+            [PortConnection("A", "out", "B", "in")],
+        )
+
+        assert merged.entities["a_a_ent"].position is not None
+        assert merged.entities["b_b_ent"].position is not None
+
+    def test_layout_preserves_preassigned_relative_offsets(self):
+        """Group-local geometry should survive global group repositioning."""
+        from factorio_display.composer import PortConnection
+        from factorio_display.logical_blueprint import LogicalBlueprint
+
+        merged = LogicalBlueprint(label="Relative")
+
+        display = LogicalBlueprint(label="Display")
+        display.add_entity(LogicalEntity("d0", "small-lamp", position=(10, 10)))
+        display.add_entity(LogicalEntity("d1", "small-lamp", position=(13, 14)))
+        display.add_network(Network("red_0", "red", [Endpoint("d0", "input")]))
+        display.set_input_port("data", "red_0")
+
+        src = LogicalBlueprint(label="Source")
+        src.add_entity(LogicalEntity("s0", "arithmetic-combinator", position=(0, 0)))
+        src.add_network(Network("red_0", "red", [Endpoint("s0", "output")]))
+        src.set_output_port("data", "red_0")
+
+        prefixes = {"Display": "display_", "Source": "src_"}
+        merged.merge(display, entity_prefix="display_", network_prefix="display_")
+        merged.merge(src, entity_prefix="src_", network_prefix="src_")
+
+        _layout_components(
+            merged,
+            prefixes,
+            [PortConnection("Source", "data", "Display", "data")],
+        )
+
+        p0 = merged.entities["display_d0"].position
+        p1 = merged.entities["display_d1"].position
+        assert p0 is not None and p1 is not None
+        assert (p1[0] - p0[0], p1[1] - p0[1]) == (3, 4)
+
+    def test_display_like_group_is_preferred_as_sink(self):
+        """Lamp-heavy group should stay as sink; sources should be left of it."""
+        from factorio_display.composer import PortConnection
+        from factorio_display.logical_blueprint import LogicalBlueprint
+
+        merged = LogicalBlueprint(label="SinkPref")
+
+        display = LogicalBlueprint(label="Display")
+        lamp = LogicalEntity("lamp0", "small-lamp", position=(0, 0))
+        display.add_entity(lamp)
+        display.add_network(Network("red_0", "red", [Endpoint("lamp0", "input")]))
+        display.set_input_port("data", "red_0")
+
+        src = LogicalBlueprint(label="Video")
+        dc = LogicalEntity(
+            "dc0", "decider-combinator",
+            properties={
+                "conditions": [{"first": "signal-clock", "op": "=", "constant": 0}],
+                "outputs": [{"signal": "signal-A", "copy_count": False, "constant": 1}],
+            },
+            position=(0, 0),
+        )
+        src.add_entity(dc)
+        src.add_network(Network("red_0", "red", [Endpoint("dc0", "output")]))
+        src.set_output_port("data", "red_0")
+
+        prefixes = {"Display": "display_", "Video": "video_"}
+        merged.merge(display, entity_prefix="display_", network_prefix="display_")
+        merged.merge(src, entity_prefix="video_", network_prefix="video_")
+
+        _layout_components(
+            merged,
+            prefixes,
+            [PortConnection("Video", "data", "Display", "data")],
+        )
+
+        lamp_pos = merged.entities["display_lamp0"].position
+        src_pos = merged.entities["video_dc0"].position
+        assert lamp_pos is not None and src_pos is not None
+        assert src_pos[0] < lamp_pos[0], (
+            f"Expected source left of display sink, got src={src_pos}, display={lamp_pos}"
+        )
+
 
 class TestReachabilityWarning:
     """Tests for _validate_network_reachability — distance warnings."""

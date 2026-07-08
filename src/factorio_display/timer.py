@@ -55,7 +55,6 @@ def build_raw_timer(
                     {"name": output_signal, "value": 1},
                 ],
             },
-            position=(0, 0),
         )
         lb.add_entity(cc)
 
@@ -69,7 +68,6 @@ def build_raw_timer(
             "second_operand": 1,
             "output_signal": output_signal,
         },
-        position=(0, 2 if with_kick else 0),
     )
     lb.add_entity(ac)
 
@@ -140,7 +138,6 @@ def build_mod_timer(
             "output_signal": output_signal,
             "first_operand_wires": ["red"],
         },
-        position=(0, 0),
     )
     lb.add_entity(ac)
 
@@ -196,7 +193,6 @@ def build_clock_bridge(
             "output_signal": clock_signal,
             "first_operand_wires": ["red"],
         },
-        position=(0, 0),
     )
     lb.add_entity(ac)
 
@@ -260,7 +256,6 @@ def build_repeater(
                 {"name": output_signal, "value": constant},
             ],
         },
-        position=(0, 0),
     )
     lb.add_entity(cc)
 
@@ -274,7 +269,6 @@ def build_repeater(
             "second_operand": constant,
             "output_signal": output_signal,
         },
-        position=(0, 2),
     )
     lb.add_entity(ramp_ac)
 
@@ -292,7 +286,6 @@ def build_repeater(
                 "second_operand": mod,
                 "output_signal": output_signal,
             },
-            position=(0, 4),
         )
         lb.add_entity(mod_ac)
         lb.connect("red", Endpoint(ramp_ac.entity_id, "output"), Endpoint(mod_ac.entity_id, "input"))
