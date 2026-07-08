@@ -1183,7 +1183,7 @@ def _encode_audio_for_composition(
     import shutil
 
     from . import SIGNAL_POOL, QUALITIES
-    from .audio.encoder import encode_audio_memory
+    from .audio.encoder import encode_audio_to_logical
     from .audio.player_blueprint import build_audio_decoder_logical
 
     rail_mode: str = getattr(args, "rail_mode", "auto:0.05")
@@ -1259,20 +1259,16 @@ def _encode_audio_for_composition(
     qualities = list(QUALITIES)
 
     from . import CLOCK_SIGNAL as _CS
-    audio_mem_bp = encode_audio_memory(
+    audio_mem_lb = encode_audio_to_logical(
         all_tick_data,
         output_name=f"Audio: {args.name}",
         signal_pool=signal_pool,
         qualities=qualities,
         clock_signal=_CS,
     )
-    if not audio_mem_bp:
+    if not audio_mem_lb.entities:
         return None, None, 0
 
-    from draftsman.blueprintable import Blueprint
-    from .logical_blueprint import from_draftsman
-
-    audio_mem_lb = from_draftsman(Blueprint.from_string(audio_mem_bp))
     audio_mem_lb.label = f"Audio Memory: {args.name}"
     _declare_memory_ports(audio_mem_lb)
 

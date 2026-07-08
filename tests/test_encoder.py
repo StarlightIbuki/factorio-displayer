@@ -10,6 +10,7 @@ from factorio_display.audio.encoder import (
     TICKS_PER_PAGE,
     compute_page_layout,
     encode_audio_memory,
+    encode_audio_to_logical,
     flatten_packed,
     loudness_to_packed,
     pack_four,
@@ -255,3 +256,40 @@ class TestEncodeAudioMemory:
             warnings.simplefilter("always")
             encode_audio_memory(data, "Test", self.pool, self.qual)
         assert_no_unexpected_warnings(w)
+
+
+class TestEncodeAudioToLogical:
+    @pytest.fixture(autouse=True)
+    def _pool_and_qual(self, large_signal_pool, sample_qualities):  # pylint: disable=attribute-defined-outside-init
+        self.pool = large_signal_pool
+        self.qual = sample_qualities
+
+    def test_square_positions_and_prewired_buses(self):
+        # 130 ticks -> 1560 cells -> 3 pages, all non-silent.
+        data = [[(i % 100) + 1 for i in range(SPEAKER_COUNT)] for _ in range(130)]
+        lb = encode_audio_to_logical(data, "TestLogical", self.pool, self.qual)
+
+        dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        assert len(dcs) == 3
+        xs = [e.position[0] for e in dcs if e.position is not None]
+        ys = [e.position[1] for e in dcs if e.position is not None]
+        assert min(xs) == 0 and max(xs) <= 1
+        assert min(ys) == 0 and max(ys) <= 2
+
+        green_nets = [n for n in lb.networks if n.color == "green"]
+        red_nets = [n for n in lb.networks if n.color == "red"]
+        assert green_nets and red_nets
+        assert any(n.prewired_pairs is not None for n in green_nets)
+        assert any(n.prewired_pairs is not None for n in red_nets)
+
+    def test_declares_clock_and_data_ports(self):
+        data = [[(i % 100) + 1 for i in range(SPEAKER_COUNT)] for _ in range(130)]
+        lb = encode_audio_to_logical(data, "TestLogicalPorts", self.pool, self.qual)
+
+        assert "clock" in lb.input_ports
+        assert "data" in lb.output_ports
+
+        clock_net = next(n for n in lb.networks if n.network_id == lb.input_ports["clock"])
+        data_net = next(n for n in lb.networks if n.network_id == lb.output_ports["data"])
+        assert clock_net.color == "green"
+        assert data_net.color == "red"

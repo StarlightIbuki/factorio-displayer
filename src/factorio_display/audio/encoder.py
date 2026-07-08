@@ -167,6 +167,56 @@ def compute_page_layout(
     return page_count, cells_per_page, TICKS_PER_PAGE
 
 
+def _layout_and_prewire_audio_bank(lb: "LogicalBlueprint", dc_ids: list[str]) -> None:  # noqa: F821
+    """Assign compact positions and deterministic internal bus prewiring."""
+    from ..logical_blueprint import Endpoint  # pylint: disable=import-outside-toplevel
+
+    n = len(dc_ids)
+    if n == 0:
+        return
+
+    cols = max(1, math.ceil(math.sqrt(n)))
+
+    for idx, dc_id in enumerate(dc_ids):
+        row = idx // cols
+        col = idx % cols
+        ent = lb.entities.get(dc_id)
+        if ent is None:
+            continue
+        ent.position = (col, row * 2)
+
+    if n <= 1:
+        return
+
+    rows = math.ceil(n / cols)
+    snake_ids: list[str] = []
+    for row in range(rows):
+        row_start = row * cols
+        row_end = min(row_start + cols, n)
+        row_ids = dc_ids[row_start:row_end]
+        if row % 2 == 1:
+            row_ids = list(reversed(row_ids))
+        snake_ids.extend(row_ids)
+
+    input_anchor = Endpoint(dc_ids[0], "input")
+    output_anchor = Endpoint(dc_ids[0], "output")
+
+    in_pairs = [
+        (Endpoint(snake_ids[i], "input"), Endpoint(snake_ids[i + 1], "input"))
+        for i in range(len(snake_ids) - 1)
+    ]
+    out_pairs = [
+        (Endpoint(snake_ids[i], "output"), Endpoint(snake_ids[i + 1], "output"))
+        for i in range(len(snake_ids) - 1)
+    ]
+
+    for net in lb.networks:
+        if net.color == "green" and input_anchor in net.endpoints:
+            net.prewired_pairs = in_pairs
+        elif net.color == "red" and output_anchor in net.endpoints:
+            net.prewired_pairs = out_pairs
+
+
 # ── main encoder entry point ───────────────────────────────────────────
 
 
@@ -988,6 +1038,21 @@ def encode_audio_to_logical(
         first_out = dc_ids[0]
         for dc_id in dc_ids[1:]:
             lb.connect("red", Endpoint(first_out, "output"), Endpoint(dc_id, "output"))
+
+    _layout_and_prewire_audio_bank(lb, dc_ids)
+
+    # Declare ports when the shared buses exist.
+    if dc_ids:
+        first_input_ep = Endpoint(dc_ids[0], "input")
+        for net in lb.networks:
+            if net.color == "green" and first_input_ep in net.endpoints:
+                lb.set_input_port("clock", net.network_id)
+                break
+        first_output_ep = Endpoint(dc_ids[0], "output")
+        for net in lb.networks:
+            if net.color == "red" and first_output_ep in net.endpoints:
+                lb.set_output_port("data", net.network_id)
+                break
 
     sys.stderr.write(
         f"Audio memory (logical): {created_count}/{page_count} DCs "

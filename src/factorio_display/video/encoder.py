@@ -198,6 +198,61 @@ def _fix_blueprint_conditions(bp: Blueprint) -> Blueprint:
 # Core blueprint builder (extracted for reuse by chunked encoder)
 # ══════════════════════════════════════════════════════════════════════
 
+
+def _layout_and_prewire_memory_bank(lb: "LogicalBlueprint", dc_ids: list[str]) -> None:
+    """Assign compact square positions and deterministic internal prewiring.
+
+    Memory banks are regular: all DC inputs share one red network and all DC
+    outputs share another. We assign a square-ish layout and attach prewired
+    snake connections on both buses so the bank can be treated as one compact
+    block during composition.
+    """
+    from ..logical_blueprint import Endpoint
+
+    n = len(dc_ids)
+    if n == 0:
+        return
+
+    cols = max(1, math.ceil(math.sqrt(n)))
+
+    # Decider combinators are 1x2 (north-facing) in this project.
+    for idx, dc_id in enumerate(dc_ids):
+        row = idx // cols
+        col = idx % cols
+        ent = lb.entities.get(dc_id)
+        if ent is None:
+            continue
+        ent.position = (col, row * 2)
+
+    if n <= 1:
+        return
+
+    rows = math.ceil(n / cols)
+    snake_ids: list[str] = []
+    for row in range(rows):
+        row_start = row * cols
+        row_end = min(row_start + cols, n)
+        row_ids = dc_ids[row_start:row_end]
+        if row % 2 == 1:
+            row_ids = list(reversed(row_ids))
+        snake_ids.extend(row_ids)
+
+    def _pairs_for_port(port: str):
+        return [
+            (Endpoint(snake_ids[i], port), Endpoint(snake_ids[i + 1], port))
+            for i in range(len(snake_ids) - 1)
+        ]
+
+    input_anchor = Endpoint(dc_ids[0], "input")
+    output_anchor = Endpoint(dc_ids[0], "output")
+    for net in lb.networks:
+        if net.color != "red":
+            continue
+        if input_anchor in net.endpoints:
+            net.prewired_pairs = _pairs_for_port("input")
+        elif output_anchor in net.endpoints:
+            net.prewired_pairs = _pairs_for_port("output")
+
 def _encode_frames_core(
     kept_frames: list[np.ndarray],
     tick_ranges: list[tuple[int, int]],
@@ -324,6 +379,8 @@ def _encode_frames_core(
             lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
 
     # ── Declare ports ───────────────────────────────────────────────
+    _layout_and_prewire_memory_bank(lb, dc_ids)
+
     if dc_ids:
         first_input_ep = Endpoint(dc_ids[0], "input")
         for net in lb.networks:
@@ -466,6 +523,8 @@ def _encode_frames_logical(
             lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
 
     # Declare ports
+    _layout_and_prewire_memory_bank(lb, dc_ids)
+
     if dc_ids:
         first_input_ep = Endpoint(dc_ids[0], "input")
         for net in lb.networks:
@@ -581,12 +640,28 @@ def _merge_chunk_blueprints(
 
     merged = LogicalBlueprint(label=f"Video Memory: {output_name}")
 
+    x_cursor = 0
+
     # Merge chunks with prefixes — each chunk's networks stay independent
     for ci, chunk_lb in enumerate(chunk_lbs):
         prefix = f"tc{ci}_"
         if not chunk_lb.entities:
             continue
-        merged.merge(chunk_lb, entity_prefix=prefix, network_prefix=prefix)
+
+        xs = [e.position[0] for e in chunk_lb.entities.values() if e.position is not None]
+        chunk_min_x = min(xs) if xs else 0
+        chunk_max_x = max(xs) if xs else 0
+        # 2-tile spacing between time-chunk blocks keeps them visually separate.
+        offset_x = x_cursor - chunk_min_x
+
+        merged.merge(
+            chunk_lb,
+            entity_prefix=prefix,
+            network_prefix=prefix,
+            position_offset=(offset_x, 0),
+        )
+
+        x_cursor += (chunk_max_x - chunk_min_x + 1) + 2
         # Re-declare the chunk's output port with the prefixed name
         # (merge() already prefixed the port's network_id, but the port
         #  name itself needs the prefix so we can connect them in order.)
@@ -916,13 +991,28 @@ def encode_frames(
         label=f"Video Memory: {output_name} ({total_w}×{total_h}, {num_chunks} chunks)"
     )
 
+    y_cursor = 0
+
     for cm in chunk_meta:
         ci = cm["ci"]
         chunk_lb = chunk_results.get(ci)
         if chunk_lb is None or not chunk_lb.entities:
             continue
         prefix = f"vc{ci}_"
-        merged.merge(chunk_lb, entity_prefix=prefix, network_prefix=prefix)
+
+        ys = [e.position[1] for e in chunk_lb.entities.values() if e.position is not None]
+        chunk_min_y = min(ys) if ys else 0
+        chunk_max_y = max(ys) if ys else 0
+        offset_y = y_cursor - chunk_min_y
+
+        merged.merge(
+            chunk_lb,
+            entity_prefix=prefix,
+            network_prefix=prefix,
+            position_offset=(0, offset_y),
+        )
+
+        y_cursor += (chunk_max_y - chunk_min_y + 1) + 2
         # Re-declare data port with prefixed name
         old_data = chunk_lb.output_ports.get("data")
         if old_data is not None:

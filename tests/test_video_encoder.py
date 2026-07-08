@@ -187,6 +187,46 @@ class TestEncodeFramesCore:
         assert len(lb.networks) >= 2, f"Expected ≥2 networks, got {len(lb.networks)}"
         _check_bp(lb, label="snake_wiring")
 
+    def test_memory_bank_gets_square_positions(self, sample_frames_12, small_mapping_params):
+        frames, tick_ranges = sample_frames_12
+        lb = _encode_frames_core(
+            kept_frames=frames,
+            tick_ranges=tick_ranges,
+            output_name="SquareLayout",
+            deduplicate=False,
+            mapping_params=small_mapping_params,
+            clock="signal-clock",
+            current_tick=13,
+        )
+        dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        assert len(dcs) == 12
+        xs = [e.position[0] for e in dcs if e.position is not None]
+        ys = [e.position[1] for e in dcs if e.position is not None]
+        assert min(xs) == 0
+        assert max(xs) <= 3  # ceil(sqrt(12)) = 4 columns -> x in 0..3
+        assert min(ys) == 0
+        assert max(ys) <= 4  # rows are pitched by 2 tiles: 0,2,4
+
+    def test_memory_bank_networks_are_prewired(self, sample_frames_12, small_mapping_params):
+        frames, tick_ranges = sample_frames_12
+        lb = _encode_frames_core(
+            kept_frames=frames,
+            tick_ranges=tick_ranges,
+            output_name="PrewiredLayout",
+            deduplicate=False,
+            mapping_params=small_mapping_params,
+            clock="signal-clock",
+            current_tick=13,
+        )
+        dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        red_nets = [n for n in lb.networks if n.color == "red"]
+        assert len(red_nets) >= 2
+        # At least input and output buses should carry deterministic pair lists.
+        with_pairs = [n for n in red_nets if n.prewired_pairs is not None]
+        assert len(with_pairs) >= 2
+        for net in with_pairs[:2]:
+            assert len(net.prewired_pairs or []) == max(0, len(dcs) - 1)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # encode_frames_chunked
