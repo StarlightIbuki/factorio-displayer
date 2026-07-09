@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pickle
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from factorio_display.video.encoder import (
     resolve_dimensions,
 )
 from factorio_display.integer2signal.mapping import SignalMapping
-from factorio_display.logical_blueprint import assert_wire_topology
+from factorio_display.logical_blueprint import assert_wire_topology, from_draftsman
 from factorio_display.cache_paths import version_prefix
 
 
@@ -306,35 +307,70 @@ class TestEncodeFramesChunked:
         ids = [i for i in ids if i is not None]
         assert len(ids) == len(set(ids)), f"Duplicate IDs: {len(ids)} vs {len(set(ids))}"
 
-    def test_merge_has_inter_chunk_wiring(self, sample_frames_12, small_mapping):
+    def test_merge_has_shared_clock_bus(self, sample_frames_12, small_mapping):
         frames, _ = sample_frames_12
         result = encode_frames_chunked(
             self._make_frame_iter(frames), "Test", fps=60,
             mapping=small_mapping, total_width=4, total_height=4,
             source_id="test_wiring", time_chunks=3,
         )
-        bp = result["full"]
-        # With 3 chunks and 2 inter-chunk boundaries, there should be
-        # intra-chunk wiring + inter-chunk wiring
-        wires = getattr(bp, "wires", [])
-        assert len(wires) >= 4, f"Expected ≥4 wires (intra + inter), got {len(wires)}"
+        bp = from_draftsman(result["full"])
+        clock_nets = [
+            net for net in bp.networks
+            if net.color == "red" and any(ep.port == "input" for ep in net.endpoints)
+        ]
+        assert len(clock_nets) == 1, f"Expected one shared clock network, got {len(clock_nets)}"
+        clock_net = clock_nets[0]
+        chunk_inputs = {
+            ep.entity_id.split("_", 1)[0]
+            for ep in clock_net.endpoints
+            if ep.port == "input" and ep.entity_id.startswith("tc")
+        }
+        assert chunk_inputs == {"tc0", "tc1", "tc2"}, (
+            f"Expected shared clock bus across all chunks, got {sorted(chunk_inputs)}"
+        )
+        data_nets = [
+            net for net in bp.networks
+            if net.color == "red" and any(ep.port == "output" for ep in net.endpoints)
+        ]
+        assert len(data_nets) == 1, (
+            f"Expected one shared chunk data network, got {len(data_nets)}"
+        )
+        data_net = data_nets[0]
+        chunk_outputs = {
+            ep.entity_id.split("_", 1)[0]
+            for ep in data_net.endpoints
+            if ep.port == "output" and ep.entity_id.startswith("tc")
+        }
+        assert chunk_outputs == {"tc0", "tc1", "tc2"}, (
+            f"Expected shared data bus across all chunks, got {sorted(chunk_outputs)}"
+        )
 
     def test_tick_ranges_preserved_across_chunks(
         self, sample_frames_12, small_mapping
     ):
-        """Each DC's tick-gate condition should fire at the right tick."""
+        """Each chunk should use a local tick window, not a cumulative one."""
         frames, expected_ranges = sample_frames_12
         result = encode_frames_chunked(
             self._make_frame_iter(frames), "Test", fps=60,
             mapping=small_mapping, total_width=4, total_height=4,
             source_id="test_ticks", time_chunks=3, deduplicate=False,
         )
-        bp = result["full"]
-        dcs = [e for e in bp.entities if "decider-combinator" in e.name]
-        # Each DC should have conditions (conditions is a list of Condition objects)
-        for dc in dcs:
-            conds = getattr(dc, "conditions", [])
-            assert len(conds) > 0, f"DC has no conditions"
+        expected_chunk_size = math.ceil(len(frames) / 3)
+        for i, chunk_bp in enumerate(result["chunks"]):
+            dcs = [e for e in chunk_bp.entities if "decider-combinator" in e.name]
+            assert len(dcs) > 0, f"Chunk {i} has no DCs"
+            constants: list[int] = []
+            for dc in dcs:
+                for cond in getattr(dc, "conditions", []):
+                    constant = getattr(cond, "constant", None)
+                    if constant is not None:
+                        constants.append(constant)
+            assert constants, f"Chunk {i} has no tick constants"
+            assert min(constants) == 0, f"Chunk {i} tick range is not local: {constants}"
+            assert max(constants) <= expected_chunk_size - 1, (
+                f"Chunk {i} tick range looks cumulative: {constants}"
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -637,6 +673,40 @@ class TestEdgeCases:
         dcs = [e for e in bp.entities if "decider-combinator" in e.name]
         # 4 unique colors, cross-dedup merges across chunks
         assert len(dcs) <= 4
+
+    def test_no_cache_ignores_existing_frame_cache(self, small_mapping, tmp_path, monkeypatch):
+        """use_cache=False must bypass frame-cache load/write entirely."""
+        import factorio_display.video.encoder as enc_mod
+        from factorio_display.logical_blueprint import from_draftsman
+
+        cache_file = tmp_path / "fake_frame_cache.pkl"
+        cached_red = np.full((4, 4, 3), (255, 0, 0), dtype=np.uint8)
+        with open(cache_file, "wb") as f:
+            pickle.dump({
+                "frames": [cached_red],
+                "ticks": [(0, 0)],
+                "current_tick": 1,
+            }, f)
+
+        monkeypatch.setattr(enc_mod, "make_cache_file", lambda *args, **kwargs: cache_file)
+
+        fresh_blue = np.full((4, 4, 3), (0, 0, 255), dtype=np.uint8)
+        bp = encode_frames(
+            iter([fresh_blue]), "NoCache", fps=60,
+            mapping=small_mapping, total_width=4, total_height=4,
+            source_id="no_cache_regression", use_cache=False,
+        )
+
+        lb = from_draftsman(bp)
+        dc = next(e for e in lb.entities.values() if e.type == "decider-combinator")
+        outputs = dc.properties.get("outputs", [])
+        assert outputs, "Expected decider outputs from encoded frame"
+
+        encoded_constants = {int(o["constant"]) for o in outputs}
+        blue_int = (0 << 16) | (0 << 8) | 255
+        red_int = (255 << 16) | (0 << 8) | 0
+        assert blue_int in encoded_constants
+        assert red_int not in encoded_constants
 
 
 # ═══════════════════════════════════════════════════════════════════════

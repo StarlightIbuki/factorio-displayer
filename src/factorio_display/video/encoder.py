@@ -641,8 +641,12 @@ def _merge_chunk_blueprints(
     merged = LogicalBlueprint(label=f"Video Memory: {output_name}")
 
     x_cursor = 0
+    clock_net_ids: list[str] = []
 
-    # Merge chunks with prefixes — each chunk's networks stay independent
+    # Merge chunks with prefixes. Chunk clocks and chunk data outputs are
+    # both unified onto shared buses so composition only needs one logical
+    # bridge per bus.
+    data_net_ids: list[str] = []
     for ci, chunk_lb in enumerate(chunk_lbs):
         prefix = f"tc{ci}_"
         if not chunk_lb.entities:
@@ -662,42 +666,63 @@ def _merge_chunk_blueprints(
         )
 
         x_cursor += (chunk_max_x - chunk_min_x + 1) + 2
-        # Re-declare the chunk's output port with the prefixed name
-        # (merge() already prefixed the port's network_id, but the port
-        #  name itself needs the prefix so we can connect them in order.)
+        # Track each chunk's prefixed data network id; they are unified
+        # into one shared data bus below.
         old_data = chunk_lb.output_ports.get("data")
         if old_data is not None:
-            merged.output_ports[f"{prefix}data"] = prefix + old_data
+            data_net_ids.append(prefix + old_data)
 
-    # Connect chunks in time order: chunk i's data → chunk i+1's clock
-    for ci in range(len(chunk_lbs) - 1):
-        src_prefix = f"tc{ci}_"
-        dst_prefix = f"tc{ci + 1}_"
-        src_net_id = merged.output_ports.get(f"{src_prefix}data")
-        dst_net_id = merged.input_ports.get("clock")  # clock is unprefixed (shared)
-        # Find the dst chunk's clock network (prefixed)
-        if dst_net_id is None:
-            # clock port may have been overwritten — scan networks
-            for net in merged.networks:
-                if not net.network_id.startswith(dst_prefix):
+        old_clock = chunk_lb.input_ports.get("clock")
+        if old_clock is not None:
+            clock_net_ids.append(prefix + old_clock)
+
+    if len(clock_net_ids) >= 2:
+        shared_clock_net_id = clock_net_ids[0]
+        shared_clock_net = next(
+            (n for n in merged.networks if n.network_id == shared_clock_net_id),
+            None,
+        )
+        if shared_clock_net is not None and shared_clock_net.endpoints:
+            shared_clock_ep = sorted(
+                shared_clock_net.endpoints,
+                key=lambda ep: (ep.entity_id, ep.port),
+            )[0]
+            for net_id in clock_net_ids[1:]:
+                other_net = next((n for n in merged.networks if n.network_id == net_id), None)
+                if other_net is None or not other_net.endpoints:
                     continue
-                if net.color == "red":
-                    for ep in net.endpoints:
-                        if ep.port == "input":
-                            dst_net_id = net.network_id
-                            break
-                if dst_net_id:
-                    break
+                other_ep = sorted(
+                    other_net.endpoints,
+                    key=lambda ep: (ep.entity_id, ep.port),
+                )[0]
+                merged.connect(shared_clock_net.color, shared_clock_ep, other_ep)
+            merged.input_ports["clock"] = shared_clock_net_id
+    elif clock_net_ids:
+        merged.input_ports["clock"] = clock_net_ids[0]
 
-        if src_net_id and dst_net_id:
-            src_net = next((n for n in merged.networks if n.network_id == src_net_id), None)
-            dst_net = next((n for n in merged.networks if n.network_id == dst_net_id), None)
-            if src_net and dst_net and src_net.endpoints and dst_net.endpoints:
-                merged.connect(
-                    src_net.color,
-                    next(iter(src_net.endpoints)),
-                    next(iter(dst_net.endpoints)),
-                )
+    if len(data_net_ids) >= 2:
+        shared_data_net_id = data_net_ids[0]
+        shared_data_net = next(
+            (n for n in merged.networks if n.network_id == shared_data_net_id),
+            None,
+        )
+        if shared_data_net is not None and shared_data_net.endpoints:
+            shared_data_ep = sorted(
+                shared_data_net.endpoints,
+                key=lambda ep: (ep.entity_id, ep.port),
+            )[0]
+            for net_id in data_net_ids[1:]:
+                other_net = next((n for n in merged.networks if n.network_id == net_id), None)
+                if other_net is None or not other_net.endpoints:
+                    continue
+                other_ep = sorted(
+                    other_net.endpoints,
+                    key=lambda ep: (ep.entity_id, ep.port),
+                )[0]
+                merged.connect(shared_data_net.color, shared_data_ep, other_ep)
+            merged.output_ports["data"] = shared_data_net_id
+    elif data_net_ids:
+        merged.output_ports["data"] = data_net_ids[0]
 
     sys.stderr.write(
         f"Merged {len(chunk_lbs)} time chunks "
@@ -1232,6 +1257,21 @@ def encode_frames_chunked(
         chunk_frames.append(kept_frames[start:end])
         chunk_tick_ranges.append(tick_ranges[start:end])
 
+    def _rebase_chunk_tick_ranges(ranges: list) -> list:
+        if not ranges:
+            return ranges
+        if isinstance(ranges[0], list):
+            first_range = ranges[0][0] if ranges[0] else None
+            if first_range is None:
+                return ranges
+            base_tick = first_range[0]
+            return [
+                [(start - base_tick, end - base_tick) for start, end in frame_ranges]
+                for frame_ranges in ranges
+            ]
+        base_tick = ranges[0][0]
+        return [(start - base_tick, end - base_tick) for start, end in ranges]
+
     sys.stderr.write(
         f"Splitting {total_input} frames over {total_ticks} ticks "
         f"→ {time_chunks} time chunk(s) (~{chunk_size} frames each).\n"
@@ -1275,10 +1315,11 @@ def encode_frames_chunked(
 
         payloads: list[bytes] = []
         for ci in pending_indices:
-            if chunk_tick_ranges[ci]:
-                # chunk_tick_ranges[ci] may be list[tuple] or list[list[tuple]]
+            local_tick_ranges = _rebase_chunk_tick_ranges(chunk_tick_ranges[ci])
+            if local_tick_ranges:
+                # local_tick_ranges[ci] may be list[tuple] or list[list[tuple]]
                 # after cross-dedup.  Access the last range's end tick safely.
-                last_item = chunk_tick_ranges[ci][-1]
+                last_item = local_tick_ranges[-1]
                 if isinstance(last_item, list):
                     chunk_cur_tick = last_item[-1][1] + 1
                 else:
@@ -1288,7 +1329,7 @@ def encode_frames_chunked(
             data = {
                 "chunk_idx": ci,
                 "kept_frames": chunk_frames[ci],
-                "tick_ranges": chunk_tick_ranges[ci],
+                "tick_ranges": local_tick_ranges,
                 "output_name": output_name,
                 "deduplicate": deduplicate,
                 "mapping_params": mapping_params,

@@ -434,11 +434,22 @@ def _connect_data_ports(
     For chunked displays the ports are named ``"data_0"``, ``"data_1"``, …
     and are matched in sorted order.
     """
+    def _port_sort_key(port_name: str) -> tuple[int, int | str]:
+        if port_name == "data":
+            return (0, 0)
+        if port_name.startswith("data_"):
+            suffix = port_name[5:]
+            if suffix.isdigit():
+                return (1, int(suffix))
+        return (2, port_name)
+
     video_ports = sorted(
         [p for p in video_lb.output_ports if p == "data" or p.startswith("data_")],
+        key=_port_sort_key,
     )
     display_ports = sorted(
         [p for p in display_lb.input_ports if p == "data" or p.startswith("data_")],
+        key=_port_sort_key,
     )
     for vp, dp in zip(video_ports, display_ports):
         connections.append(PortConnection(video_lb.label, vp, display_lb.label, dp))
@@ -540,6 +551,49 @@ def _declare_memory_ports(lb: LogicalBlueprint) -> None:
     else:
         for ci, (net_id, _min_y) in enumerate(red_data_nets):
             lb.set_output_port(f"data_{ci}", net_id)
+
+
+def _restore_memory_prewiring(lb: LogicalBlueprint) -> None:
+    """Rebuild deterministic prewiring metadata on memory buses.
+
+    Memory blueprints reconstructed from draftsman lose ``prewired_pairs``.
+    Re-attaching deterministic chain wiring lets network merges preserve
+    internal buses and add only one compose bridge to downstream components.
+    """
+    from .logical_blueprint import Endpoint
+
+    def _endpoint_sort_key(ep: Endpoint) -> tuple[int, int, str]:
+        ent = lb.entities.get(ep.entity_id)
+        if ent is None or ent.position is None:
+            return (0, 0, ep.entity_id)
+        x, y = ent.position
+        return (y, x, ep.entity_id)
+
+    def _chain_pairs(eps: list[Endpoint]) -> list[tuple[Endpoint, Endpoint]]:
+        ordered = sorted(eps, key=_endpoint_sort_key)
+        return [(ordered[i], ordered[i + 1]) for i in range(len(ordered) - 1)]
+
+    for net in lb.networks:
+        if net.color != "red":
+            continue
+        in_eps = [
+            ep for ep in net.endpoints
+            if ep.port == "input"
+            and (ent := lb.entities.get(ep.entity_id)) is not None
+            and ent.type == "decider-combinator"
+        ]
+        out_eps = [
+            ep for ep in net.endpoints
+            if ep.port == "output"
+            and (ent := lb.entities.get(ep.entity_id)) is not None
+            and ent.type == "decider-combinator"
+        ]
+
+        # Prefer output-bus prewiring when present (memory→display bridge path).
+        if len(out_eps) >= 2:
+            net.prewired_pairs = _chain_pairs(out_eps)
+        elif len(in_eps) >= 2:
+            net.prewired_pairs = _chain_pairs(in_eps)
 
 
 # ── Main CLI ───────────────────────────────────────────────────────────

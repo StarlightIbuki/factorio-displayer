@@ -236,16 +236,90 @@ class LogicalBlueprint:
                 # Merge network B into network A
                 net_a = self.networks[idx_a]
                 net_b = self.networks.pop(idx_b)
+                # Snapshot original endpoint sets before union so internal
+                # rewiring is computed per-subnetwork, not on the combined set.
+                endpoints_a = set(net_a.endpoints)
+                endpoints_b = set(net_b.endpoints)
+
+                def _valid_pairs(
+                    endpoints: set[Endpoint],
+                    pairs: list[tuple[Endpoint, Endpoint]] | None,
+                ) -> bool:
+                    if pairs is None:
+                        return False
+                    degree: dict[Endpoint, int] = {}
+                    for pa, pb in pairs:
+                        if pa == pb:
+                            return False
+                        if pa not in endpoints or pb not in endpoints:
+                            return False
+                        degree[pa] = degree.get(pa, 0) + 1
+                        degree[pb] = degree.get(pb, 0) + 1
+                        if degree[pa] > 2 or degree[pb] > 2:
+                            return False
+                    return True
+
+                def _build_internal_pairs(
+                    endpoints: set[Endpoint],
+                    prewired_pairs: list[tuple[Endpoint, Endpoint]] | None,
+                ) -> list[tuple[Endpoint, Endpoint]]:
+                    # Keep existing prewiring when valid. If missing or invalid,
+                    # rebuild deterministically from endpoint positions.
+                    if _valid_pairs(endpoints, prewired_pairs):
+                        return list(prewired_pairs or [])
+                    return _wire_horizontal_first(list(endpoints), self)
+
+                pairs_a = _build_internal_pairs(endpoints_a, net_a.prewired_pairs)
+                pairs_b = _build_internal_pairs(endpoints_b, net_b.prewired_pairs)
+
+                degree_a: dict[Endpoint, int] = {}
+                degree_b: dict[Endpoint, int] = {}
+                for pa, pb in pairs_a:
+                    degree_a[pa] = degree_a.get(pa, 0) + 1
+                    degree_a[pb] = degree_a.get(pb, 0) + 1
+                for pa, pb in pairs_b:
+                    degree_b[pa] = degree_b.get(pa, 0) + 1
+                    degree_b[pb] = degree_b.get(pb, 0) + 1
+
+                def _pick_bridge_endpoint(
+                    endpoints: set[Endpoint],
+                    degree: dict[Endpoint, int],
+                    preferred: Endpoint,
+                ) -> Endpoint | None:
+                    spare = [ep for ep in endpoints if degree.get(ep, 0) < 2]
+                    if not spare:
+                        return None
+                    if preferred in spare:
+                        return preferred
+                    pref_pos = _endpoint_position(preferred, self)
+                    return min(
+                        spare,
+                        key=lambda ep: _chebyshev(_endpoint_position(ep, self), pref_pos),
+                    )
+
+                bridge_a = _pick_bridge_endpoint(net_a.endpoints, degree_a, ep_a)
+                bridge_b = _pick_bridge_endpoint(net_b.endpoints, degree_b, ep_b)
+                if bridge_a is not None and bridge_b is not None:
+                    merged_pairs = pairs_a + pairs_b
+                    bridge_pair = (bridge_a, bridge_b)
+                    bridge_pair_rev = (bridge_b, bridge_a)
+                    if bridge_pair not in merged_pairs and bridge_pair_rev not in merged_pairs:
+                        merged_pairs.append(bridge_pair)
+                    net_a.prewired_pairs = merged_pairs
+                else:
+                    # No degree headroom to add a safe bridge; fall back to
+                    # generic materialisation for the merged network.
+                    net_a.prewired_pairs = None
+
                 # Since endpoints is a set, just update (auto-dedup)
-                net_a.endpoints.update(net_b.endpoints)
-                # Merging two networks invalidates pre-wired pairs
-                # because the combined endpoint set is no longer
-                # covered by the original pre-wired layouts.
-                # _wire_horizontal_first in to_draftsman will re-wire
-                # the combined set correctly (layout now ensures
-                # endpoints are close enough).
-                net_a.prewired_pairs = None
+                net_a.endpoints.update(endpoints_b)
                 result = net_a
+
+                # Keep named ports consistent with the surviving network.
+                for port_map in (self.input_ports, self.output_ports):
+                    for port_name, net_id in list(port_map.items()):
+                        if net_id == net_b.network_id:
+                            port_map[port_name] = net_a.network_id
         elif idx_a is not None:
             net = self.networks[idx_a]
             if ep_b not in net.endpoints:

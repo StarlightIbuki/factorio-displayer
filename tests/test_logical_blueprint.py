@@ -164,6 +164,80 @@ class TestLogicalBlueprint:
         assert dst.entities["m_x"].position == (11, -1)
         assert dst.entities["m_y"].position is None
 
+    def test_connect_merge_preserves_prewired_with_single_bridge(self):
+        lb = LogicalBlueprint()
+        for eid in ("a0", "a1", "b0", "b1"):
+            lb.add_entity(LogicalEntity(eid, "arithmetic-combinator"))
+
+        net_a = Network(
+            "red_a",
+            "red",
+            endpoints={Endpoint("a0", "input"), Endpoint("a1", "input")},
+            prewired_pairs=[(Endpoint("a0", "input"), Endpoint("a1", "input"))],
+        )
+        net_b = Network(
+            "red_b",
+            "red",
+            endpoints={Endpoint("b0", "input"), Endpoint("b1", "input")},
+            prewired_pairs=[(Endpoint("b0", "input"), Endpoint("b1", "input"))],
+        )
+        lb.add_network(net_a)
+        lb.add_network(net_b)
+
+        lb.connect("red", Endpoint("a0", "input"), Endpoint("b0", "input"))
+
+        assert len(lb.networks) == 1
+        merged_net = lb.networks[0]
+        assert merged_net.prewired_pairs is not None
+        pairs = merged_net.prewired_pairs
+        assert len(pairs) == 3
+
+        as_set = {frozenset((p[0].to_string(), p[1].to_string())) for p in pairs}
+        assert frozenset(("a0:input", "a1:input")) in as_set
+        assert frozenset(("b0:input", "b1:input")) in as_set
+        # Exactly one cross-subnetwork bridge
+        cross = [
+            p for p in as_set
+            if (any(s.startswith("a") for s in p) and any(s.startswith("b") for s in p))
+        ]
+        assert len(cross) == 1
+
+    def test_connect_merge_rebuilds_missing_prewire_and_adds_single_bridge(self):
+        lb = LogicalBlueprint()
+        for eid in ("a0", "a1", "b0", "b1"):
+            lb.add_entity(LogicalEntity(eid, "arithmetic-combinator"))
+
+        lb.add_network(Network(
+            "red_a",
+            "red",
+            endpoints={Endpoint("a0", "input"), Endpoint("a1", "input")},
+            prewired_pairs=[(Endpoint("a0", "input"), Endpoint("a1", "input"))],
+        ))
+        # No prewired pairs on B: merge logic should rebuild internal pairs
+        # for B, then add exactly one cross-network bridge.
+        lb.add_network(Network(
+            "red_b",
+            "red",
+            endpoints={Endpoint("b0", "input"), Endpoint("b1", "input")},
+        ))
+
+        lb.connect("red", Endpoint("a0", "input"), Endpoint("b0", "input"))
+
+        assert len(lb.networks) == 1
+        merged = lb.networks[0]
+        assert merged.prewired_pairs is not None
+        pairs = merged.prewired_pairs
+        assert len(pairs) == 3
+
+        as_set = {frozenset((p[0].to_string(), p[1].to_string())) for p in pairs}
+        assert frozenset(("a0:input", "a1:input")) in as_set
+        assert frozenset(("b0:input", "b1:input")) in as_set
+        cross = [
+            p for p in as_set
+            if (any(s.startswith("a") for s in p) and any(s.startswith("b") for s in p))
+        ]
+        assert len(cross) == 1
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # TOML round-trip

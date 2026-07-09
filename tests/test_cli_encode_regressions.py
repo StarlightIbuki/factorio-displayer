@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from factorio_display.cli import (
     _build_timer_for_memory,
+    _connect_data_ports,
     _should_process_audio,
 )
 from factorio_display.composer import PortConnection, _layout_components
@@ -22,6 +23,31 @@ def _make_single_frame_video_memory() -> LogicalBlueprint:
     lb.add_entity(dc)
     lb.add_network(Network("red_clock", "red", {Endpoint("gate_1", "input")}))
     lb.add_network(Network("red_data", "red", {Endpoint("gate_1", "output")}))
+    lb.set_input_port("clock", "red_clock")
+    lb.set_output_port("data", "red_data")
+    return lb
+
+
+def _make_multi_single_tick_video_memory() -> LogicalBlueprint:
+    lb = LogicalBlueprint(label="Video Memory: TestMulti")
+    for i in range(3):
+        dc = LogicalEntity(
+            f"gate_{i + 1}",
+            "decider-combinator",
+            properties={
+                "conditions": [{"first": "signal-clock", "op": "=", "constant": i}],
+                "outputs": [{"signal": "signal-A", "copy_count": False, "constant": i + 1}],
+            },
+            position=(i * 2, 0),
+        )
+        lb.add_entity(dc)
+
+    lb.add_network(Network(
+        "red_clock", "red", {Endpoint("gate_1", "input"), Endpoint("gate_2", "input"), Endpoint("gate_3", "input")},
+    ))
+    lb.add_network(Network(
+        "red_data", "red", {Endpoint("gate_1", "output"), Endpoint("gate_2", "output"), Endpoint("gate_3", "output")},
+    ))
     lb.set_input_port("clock", "red_clock")
     lb.set_output_port("data", "red_data")
     return lb
@@ -51,6 +77,56 @@ def test_single_frame_timer_uses_mod_one_and_no_constant_kick() -> None:
     subtick_mod = next(e for e in arith if e.entity_id.endswith("subtick_mod"))
     assert subtick_mod.properties["operation"] == "%"
     assert subtick_mod.properties["second_operand"] == 1
+
+
+def test_multi_single_tick_frames_set_timer_interval_from_equals() -> None:
+    memory_lb = _make_multi_single_tick_video_memory()
+    timer = _build_timer_for_memory(memory_lb)
+
+    arith = [e for e in timer.entities.values() if e.type == "arithmetic-combinator"]
+    subtick_mod = next(e for e in arith if e.entity_id.endswith("subtick_mod"))
+
+    # Frames at ticks 0,1,2 require modulo interval 3.
+    assert subtick_mod.properties["operation"] == "%"
+    assert subtick_mod.properties["second_operand"] == 3
+
+
+def test_timer_ports_reference_live_networks() -> None:
+    memory_lb = _make_multi_single_tick_video_memory()
+    timer = _build_timer_for_memory(memory_lb)
+
+    for port_name, net_id in timer.input_ports.items():
+        assert any(net.network_id == net_id for net in timer.networks), (
+            f"Timer input port {port_name!r} points to missing network {net_id!r}"
+        )
+    for port_name, net_id in timer.output_ports.items():
+        assert any(net.network_id == net_id for net in timer.networks), (
+            f"Timer output port {port_name!r} points to missing network {net_id!r}"
+        )
+
+
+def test_connect_data_ports_sorts_chunk_indices_numerically() -> None:
+    video_lb = LogicalBlueprint(label="Video Memory")
+    display_lb = LogicalBlueprint(label="Display")
+
+    for i in range(12):
+        video_dc = LogicalEntity(f"video_dc_{i}", "decider-combinator", position=(i, 0))
+        display_dc = LogicalEntity(f"display_dc_{i}", "decider-combinator", position=(i, 0))
+        video_lb.add_entity(video_dc)
+        display_lb.add_entity(display_dc)
+
+        video_net = Network(f"red_video_{i}", "red", {Endpoint(video_dc.entity_id, "output")})
+        display_net = Network(f"red_display_{i}", "red", {Endpoint(display_dc.entity_id, "input")})
+        video_lb.add_network(video_net)
+        display_lb.add_network(display_net)
+        video_lb.set_output_port(f"data_{i}", video_net.network_id)
+        display_lb.set_input_port(f"data_{i}", display_net.network_id)
+
+    connections: list[PortConnection] = []
+    _connect_data_ports(connections, video_lb, display_lb)
+
+    assert [c.from_port for c in connections] == [f"data_{i}" for i in range(12)]
+    assert [c.to_port for c in connections] == [f"data_{i}" for i in range(12)]
 
 
 def test_layout_places_sources_near_sink_for_compact_bridges() -> None:
