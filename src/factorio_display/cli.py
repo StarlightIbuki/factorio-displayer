@@ -1036,6 +1036,7 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
         connections.append(PortConnection("Timer", "clock_red", video_lb.label, "clock"))
         _connect_data_ports(connections, video_lb, display_lb)
         connections.append(PortConnection("Timer", "clock_green", audio_mem_lb.label, "clock"))
+        connections.append(PortConnection("Timer", "clock_green", player_lb.label, "clock"))
         connections.append(PortConnection(audio_mem_lb.label, "data", player_lb.label, "data"))
     else:
         # Video-only timer
@@ -1169,6 +1170,21 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         if debug_dir:
             _debug_dump_toml(audio_lb, "01_audio_memory", debug_dir)
 
+        from .audio.player_blueprint import build_audio_decoder_logical
+        instrument = rail_mode.split(",")[0].strip() if "," in rail_mode else rail_mode
+        if ":" in instrument:
+            instrument = instrument.split(":")[0]
+        if instrument in ("auto", "all"):
+            instrument = "piano"
+        
+        player_lb = build_audio_decoder_logical(
+            name=f"Audio Player: {args.name}",
+            instrument=instrument,
+            clock_signal="signal-clock",
+            map_drums=getattr(args, "map_drums", True),
+        )
+
+
         components: list[LogicalBlueprint] = []
         connections: list[PortConnection] = []
 
@@ -1176,7 +1192,6 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         components.append(timer)
         if debug_dir:
             _debug_dump_toml(timer, "02_timer", debug_dir)
-        connections.append(PortConnection("Timer", "clock", audio_lb.label, "clock"))
 
         if use_progress:
             total_ticks = _extract_total_ticks(audio_lb)
@@ -1191,7 +1206,11 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             connections.append(PortConnection("Timer", "sub_tick", "Progress", "in"))
 
         components.append(audio_lb)
+        components.append(player_lb)
+        
         connections.append(PortConnection("Timer", "clock", audio_lb.label, "clock"))
+        connections.append(PortConnection("Timer", "clock", player_lb.label, "clock"))
+        connections.append(PortConnection(audio_lb.label, "data", player_lb.label, "data"))
 
         result = compose(
             components=components,
@@ -1305,10 +1324,10 @@ def _encode_audio_for_composition(
     # Encode audio memory
     # Use single-rail piano for extracted audio by default
     instrument = rail_mode.split(",")[0].strip() if "," in rail_mode else rail_mode
-    if instrument in ("auto", "all"):
-        instrument = "piano"
     if ":" in instrument:
         instrument = instrument.split(":")[0]
+    if instrument in ("auto", "all"):
+        instrument = "piano"
 
     signal_pool = list(SIGNAL_POOL)
     qualities = list(QUALITIES)

@@ -695,6 +695,7 @@ def build_audio_decoder_logical(
         entity_id=port_id,
         type="constant-combinator",
         properties={"signals": [{"name": "signal-info", "value": 1}]},
+        position=(PORT_X, PORT_Y),
     ))
 
     # ── Modulo AC: clock % 60 → signal-M ─────────────────────────
@@ -708,6 +709,7 @@ def build_audio_decoder_logical(
             "second_operand": TICKS_PER_PAGE,
             "output_signal": "signal-M",
         },
+        position=(MOD_X, MOD_Y),
     ))
 
     # ── Speakers (48) ────────────────────────────────────────────
@@ -717,6 +719,7 @@ def build_audio_decoder_logical(
     is_drum = instrument_proto == "drum-kit" and map_drums
     for pitch_idx, sig in iter_speaker_signals():
         col = pitch_idx % 12
+        row = SPK_Y + (3 - pitch_idx // 12)
         spk_id = f"spk_{pitch_idx}"
         if is_drum:
             if pitch_idx < len(DRUM_KIT_NOTES):
@@ -736,6 +739,7 @@ def build_audio_decoder_logical(
                 "polyphony": True,
                 "circuit_enabled": True,
             },
+            position=(col, row),
         ))
         speaker_ids[pitch_idx] = spk_id
         col_speakers[col].append(spk_id)
@@ -761,6 +765,7 @@ def build_audio_decoder_logical(
             entity_id=cc_id,
             type="constant-combinator",
             properties={"signals": cc_signals},
+            position=(ch, LUT_Y),
         ))
 
         # Match DC (handles sub_tick 1..59)
@@ -776,6 +781,7 @@ def build_audio_decoder_logical(
                     {"signal": "signal-each", "copy_count": False, "constant": 1},
                 ],
             },
+            position=(ch, MATCH_Y),
         ))
 
         # Match0 DC (handles sub_tick 0 — value-0 fallback)
@@ -792,6 +798,7 @@ def build_audio_decoder_logical(
                     {"signal": "signal-each", "copy_count": False, "constant": 1},
                 ],
             },
+            position=(ch, MATCH0_Y),
         ))
 
         # Selector AC: each(red) * each(green) → bell
@@ -805,14 +812,15 @@ def build_audio_decoder_logical(
                 "operation": "*",
                 "second_operand": "signal-each",
                 "second_operand_wires": ["green"],
-                "output_signal": "signal-bell",
+                "output_signal": BELL_SIG,
             },
+            position=(ch, SEL_Y),
         ))
 
         # Unpacker chain (6 ACs per channel)
         spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(4)]
 
-        def _add_ac(uid: str, first_op: str, op: str, second_op: int | str, out: str) -> str:
+        def _add_ac(uid: str, first_op: str, op: str, second_op: int | str, out: str, y: int) -> str:
             ac_id = f"{base_id}_{uid}"
             lb.add_entity(LogicalEntity(
                 entity_id=ac_id,
@@ -823,15 +831,19 @@ def build_audio_decoder_logical(
                     "second_operand": second_op,
                     "output_signal": out,
                 },
+                position=(ch, y),
             ))
             return ac_id
+        
+        def _fmt(s: dict[str, str]) -> str:
+            return f"{s['name']}@{s['quality']}"
 
-        uid_l1 = _add_ac("l1", "signal-bell", ">>", 21, spk_sigs[0]["name"])
-        uid_s2 = _add_ac("s2", "signal-bell", ">>", 14, "signal-5")
-        uid_l2 = _add_ac("l2", "signal-5", "AND", 127, spk_sigs[1]["name"])
-        uid_s3 = _add_ac("s3", "signal-bell", ">>", 7, "signal-6")
-        uid_l3 = _add_ac("l3", "signal-6", "AND", 127, spk_sigs[2]["name"])
-        uid_l4 = _add_ac("l4", "signal-bell", "AND", 127, spk_sigs[3]["name"])
+        uid_l1 = _add_ac("l1", BELL_SIG, ">>", 21, _fmt(spk_sigs[0]), UNP_L1_Y)
+        uid_s2 = _add_ac("s2", BELL_SIG, ">>", 14, "signal-5", UNP_S2_Y)
+        uid_l2 = _add_ac("l2", "signal-5", "AND", 127, _fmt(spk_sigs[1]), UNP_L2_Y)
+        uid_s3 = _add_ac("s3", BELL_SIG, ">>", 7, "signal-6", UNP_S3_Y)
+        uid_l3 = _add_ac("l3", "signal-6", "AND", 127, _fmt(spk_sigs[2]), UNP_L3_Y)
+        uid_l4 = _add_ac("l4", BELL_SIG, "AND", 127, _fmt(spk_sigs[3]), UNP_L4_Y)
 
         out_order = [uid_l1, uid_l2, uid_l3, uid_l4]
 
@@ -891,5 +903,11 @@ def build_audio_decoder_logical(
 
     # Clock green bus: all ports → mod
     lb.connect("green", Endpoint(port_id, "input"), Endpoint(mod_id, "input"))
+
+    for net in lb.networks:
+        if net.color == "red" and Endpoint(port_id, "output") in net.endpoints:
+            lb.set_input_port("data", net.network_id)
+        elif net.color == "green" and Endpoint(port_id, "input") in net.endpoints:
+            lb.set_input_port("clock", net.network_id)
 
     return lb
