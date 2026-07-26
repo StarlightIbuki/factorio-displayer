@@ -323,7 +323,7 @@ def _apply_connections(
         # Update port registries so they point to the surviving network.
         _survivor = next(
             (n for n in merged.networks
-             if n.color == src_net.color and src_ep in n.endpoints),
+             if n.color == src_net.color and src_ep in n.endpoints and dst_ep in n.endpoints),
             None,
         )
         if _survivor is not None:
@@ -335,6 +335,13 @@ def _apply_connections(
                     for pname, pnet in list(port_map_entry.items()):
                         if pnet == dead_id:
                             port_map_entry[pname] = _survivor_id
+                # Also update the per-component port_map used for subsequent lookups,
+                # so later connections to a merged input port resolve to the surviving network.
+                for label_map in port_map.values():
+                    for sub in (label_map.get("input_ports", {}), label_map.get("output_ports", {})):
+                        for pname, pnet in list(sub.items()):
+                            if pnet == dead_id:
+                                sub[pname] = _survivor_id
         connected += 1
 
     return connected

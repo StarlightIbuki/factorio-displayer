@@ -21,6 +21,8 @@ from factorio_display.composer import compose_all_in_one, Composer, _layout_comp
 from factorio_display.timer import build_raw_timer, build_mod_timer, build_clock_bridge
 from factorio_display.cli import _declare_memory_ports, _build_timer_for_memory, _extract_total_ticks
 
+from conftest import validate_logical_connectivity
+
 
 class TestProgressBar:
     def test_builds_valid_lb(self):
@@ -950,3 +952,154 @@ class TestReachabilityWarning:
         captured = capsys.readouterr()
         assert "Timer" in captured.err
         assert "Progress" in captured.err
+
+
+class TestMergedPortTopology:
+    """Topology constraint tests for merged/same-name ports."""
+
+    def test_merged_same_name_input_ports_are_all_reachable(self):
+        """When two input ports share a name they are merged into one network;
+        every endpoint in that merged network must be reachable from every other.
+
+        This is the topology constraint that used to be violated: after
+        auto-merging same-name inputs and then connecting two distinct outputs to
+        two different receivers, the second receiver could be left isolated.
+        """
+        from factorio_display.composer import compose, PortConnection
+
+        def _make_driver(label: str, y: int) -> LogicalBlueprint:
+            lb = LogicalBlueprint(label=label)
+            lb.add_entity(
+                LogicalEntity(
+                    "a", "arithmetic-combinator", position=(0, y),
+                    properties={
+                        "first_operand": "signal-A", "operation": "+",
+                        "second_operand": 1, "output_signal": "signal-A",
+                    },
+                )
+            )
+            lb.add_network(Network("red_0", "red", {Endpoint("a", "output")}))
+            lb.set_output_port("data", "red_0")
+            return lb
+
+        def _make_receiver(label: str, y: int) -> LogicalBlueprint:
+            lb = LogicalBlueprint(label=label)
+            lb.add_entity(
+                LogicalEntity(
+                    "b", "arithmetic-combinator", position=(4, y),
+                    properties={
+                        "first_operand": "signal-B", "operation": "+",
+                        "second_operand": 1, "output_signal": "signal-B",
+                    },
+                )
+            )
+            lb.add_network(Network("red_0", "red", {Endpoint("b", "input")}))
+            lb.set_input_port("data", "red_0")
+            return lb
+
+        result = compose(
+            components=[
+                _make_driver("D1", 0), _make_driver("D2", 2),
+                _make_receiver("R1", 0), _make_receiver("R2", 2),
+            ],
+            connections=[
+                PortConnection("D1", "data", "R1", "data"),
+                PortConnection("D2", "data", "R2", "data"),
+            ],
+            output_name="SameNameInputMerge",
+            use_cache=False,
+        )
+
+        # Exactly one red network exists and contains all four endpoints
+        red_nets = [n for n in result.networks if n.color == "red"]
+        assert len(red_nets) == 1, (
+            f"Expected one red network, got {len(red_nets)}"
+        )
+        net = red_nets[0]
+        expected = {
+            Endpoint("d1_a", "output"),
+            Endpoint("d2_a", "output"),
+            Endpoint("r1_b", "input"),
+            Endpoint("r2_b", "input"),
+        }
+        assert net.endpoints == expected, (
+            f"Merged port endpoints mismatch:\n  got {net.endpoints}\n  expected {expected}"
+        )
+
+        # Every endpoint in the merged network must be reachable from every other
+        bp = to_draftsman(result)
+        conns = _iter_connections(bp)
+        graphs: dict[str, dict[str, set[str]]] = {}
+        for c in conns:
+            g = graphs.setdefault(c["color"], {})
+            g.setdefault(c["id1"], set()).add(c["id2"])
+            g.setdefault(c["id2"], set()).add(c["id1"])
+
+        g = graphs.get("red", {})
+        entities = {ep.entity_id for ep in net.endpoints}
+        for start in entities:
+            visited = set()
+            stack = [start]
+            while stack:
+                cur = stack.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                stack.extend(g.get(cur, set()) - visited)
+            assert visited >= entities, (
+                f"From {start!r} not all merged-port entities are reachable: "
+                f"missing {entities - visited}"
+            )
+
+    def test_merged_port_constraint_via_logical_reachability(self):
+        """All endpoints declared on a merged port network must be pairwise
+        reachable in the materialised blueprint (no stranded subnetworks)."""
+        from factorio_display.composer import compose, PortConnection
+
+        def _make_driver(label: str, y: int) -> LogicalBlueprint:
+            lb = LogicalBlueprint(label=label)
+            lb.add_entity(
+                LogicalEntity(
+                    "a", "arithmetic-combinator", position=(0, y),
+                    properties={
+                        "first_operand": "signal-A", "operation": "+",
+                        "second_operand": 1, "output_signal": "signal-A",
+                    },
+                )
+            )
+            lb.add_network(Network("red_0", "red", {Endpoint("a", "output")}))
+            lb.set_output_port("data", "red_0")
+            return lb
+
+        def _make_receiver(label: str, y: int) -> LogicalBlueprint:
+            lb = LogicalBlueprint(label=label)
+            lb.add_entity(
+                LogicalEntity(
+                    "b", "arithmetic-combinator", position=(4, y),
+                    properties={
+                        "first_operand": "signal-B", "operation": "+",
+                        "second_operand": 1, "output_signal": "signal-B",
+                    },
+                )
+            )
+            lb.add_network(Network("red_0", "red", {Endpoint("b", "input")}))
+            lb.set_input_port("data", "red_0")
+            return lb
+
+        result = compose(
+            components=[
+                _make_driver("D1", 0), _make_driver("D2", 2),
+                _make_receiver("R1", 0), _make_receiver("R2", 2),
+            ],
+            connections=[
+                PortConnection("D1", "data", "R1", "data"),
+                PortConnection("D2", "data", "R2", "data"),
+            ],
+            output_name="LogicalReachability",
+            use_cache=False,
+        )
+        vresult = validate_logical_connectivity(result)
+        assert not vresult["errors"], (
+            f"Merged-port network has logical connectivity errors: "
+            f"{vresult['errors']}"
+        )

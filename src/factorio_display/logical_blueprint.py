@@ -40,6 +40,17 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .debug_source import (
+    entity_origin,
+    entity_source,
+    EntityOrigin,
+    format_entity_source,
+    get_entity_origin,
+    is_trace_enabled,
+    set_entity_origin,
+    set_entity_source,
+)
+
 # ═══════════════════════════════════════════════════════════════════════
 # Data model
 # ═══════════════════════════════════════════════════════════════════════
@@ -113,12 +124,18 @@ class Network:
         uses these directly instead of running the materialisation algorithm.
         Used for grid-structured networks (e.g. lamp displays) where the
         wiring pattern is known at build time.
+    _debug_src : str | None
+        Optional source location where the network was created.
+    _debug_traceback : tuple[str, ...] | None
+        Optional short caller traceback where the network was created.
     """
 
     network_id: str
     color: str
     endpoints: set[Endpoint] = field(default_factory=set)
     prewired_pairs: list[tuple[Endpoint, Endpoint]] | None = None
+    _debug_src: str | None = None
+    _debug_traceback: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.color not in _VALID_COLORS:
@@ -191,10 +208,32 @@ class LogicalBlueprint:
 
     # ── entity helpers ──────────────────────────────────────────────
 
-    def add_entity(self, entity: LogicalEntity) -> None:
-        """Add an entity.  Raises if *entity_id* already exists."""
+    def add_entity(
+        self,
+        entity: LogicalEntity,
+        *,
+        src: str | None = None,
+    ) -> None:
+        """Add an entity.  Raises if *entity_id* already exists.
+
+        When *src* is omitted, the caller's source file, line number, and a
+        short caller traceback are recorded in ``entity.properties`` so the
+        final blueprint can report where each entity originated.
+
+        Existing source metadata on *entity* (e.g. from a TOML/draftsman
+        round-trip) is preserved.
+        """
+        if src is None:
+            if get_entity_origin(entity) is None:
+                set_entity_origin(entity)
+        else:
+            set_entity_source(entity, src)
         if entity.entity_id in self.entities:
-            raise ValueError(f"Duplicate entity_id {entity.entity_id!r}")
+            origin = get_entity_origin(entity)
+            src = origin.source if origin is not None else src or "unknown"
+            raise ValueError(
+                f"Duplicate entity_id {entity.entity_id!r} (created at {src})"
+            )
         self.entities[entity.entity_id] = entity
 
     def get_entity(self, entity_id: str) -> LogicalEntity:
@@ -203,10 +242,26 @@ class LogicalBlueprint:
 
     # ── network helpers ─────────────────────────────────────────────
 
-    def add_network(self, network: Network) -> None:
+    def add_network(
+        self,
+        network: Network,
+        *,
+        src: str | None = None,
+    ) -> None:
         """Add a network.  Raises if *network_id* already exists."""
+        if not is_trace_enabled():
+            src = src or network._debug_src or "unknown"
+        elif src is None:
+            origin = entity_origin()
+            src = origin.source
+            network._debug_src = src
+            network._debug_traceback = origin.traceback
+        elif network._debug_src is None:
+            network._debug_src = src
         if any(n.network_id == network.network_id for n in self.networks):
-            raise ValueError(f"Duplicate network_id {network.network_id!r}")
+            raise ValueError(
+                f"Duplicate network_id {network.network_id!r} (created at {src})"
+            )
         self.networks.append(network)
 
     def _find_network(self, color: str, endpoint: Endpoint) -> int | None:
@@ -510,7 +565,8 @@ class LogicalBlueprint:
             seen_in_net: set[tuple[str, str]] = set()
             for ep in net.endpoints:
                 # Must reference a known entity
-                if ep.entity_id not in entity_ids:
+                ent = self.entities.get(ep.entity_id)
+                if ent is None:
                     errors.append(
                         f"Network {net.network_id!r}: endpoint "
                         f"{ep.to_string()!r} references unknown entity "
@@ -519,9 +575,10 @@ class LogicalBlueprint:
                 # No duplicate within same network
                 key = (ep.entity_id, ep.port)
                 if key in seen_in_net:
+                    src = format_entity_source(ent) if ent is not None else f"id={ep.entity_id}"
                     errors.append(
                         f"Network {net.network_id!r}: duplicate endpoint "
-                        f"{ep.to_string()!r}"
+                        f"{ep.to_string()!r} ({src})"
                     )
                 seen_in_net.add(key)
 
@@ -538,9 +595,11 @@ class LogicalBlueprint:
                 colour_ep_count[key] = colour_ep_count.get(key, 0) + 1
         for (eid, port, colour), count in colour_ep_count.items():
             if count > 2:
+                ent = self.entities.get(eid)
+                src_hint = f" ({format_entity_source(ent)})" if ent is not None else ""
                 errors.append(
                     f"Endpoint {eid!r}:{port} appears in {count} "
-                    f"{colour} networks (max 2 in Factorio)"
+                    f"{colour} networks (max 2 in Factorio){src_hint}"
                 )
 
         # Note: port→network reference checks are intentionally NOT
@@ -695,8 +754,8 @@ class LogicalBlueprint:
                 f"{dst_port!r} ({len(dst_net.endpoints)} eps)"
             )
 
-        ep_src = src_net.endpoints[0]
-        ep_dst = dst_net.endpoints[0]
+        ep_src = next(iter(src_net.endpoints))
+        ep_dst = next(iter(dst_net.endpoints))
         return self.connect(src_net.color, ep_src, ep_dst)
 
 
@@ -1115,6 +1174,12 @@ def _parse_entity(raw: dict[str, Any]) -> LogicalEntity:
         if quality and quality != "normal":
             props["quality"] = quality
 
+    # Preserve debug source metadata from TOML/draftsman round-trips.
+    if "_debug_src" in raw:
+        props["_debug_src"] = raw["_debug_src"]
+    if "_debug_traceback" in raw:
+        props["_debug_traceback"] = list(raw["_debug_traceback"])
+
     return LogicalEntity(
         entity_id=entity_id,
         type=etype,
@@ -1320,6 +1385,16 @@ def _from_draftsman_impl(bp: Any) -> LogicalBlueprint:
             quality = getattr(ent, "quality", None)
             if quality and quality != "normal" and str(quality) != "normal":
                 props["quality"] = str(quality)
+
+        # Preserve source debug tags from the draftsman entity
+        tags = getattr(ent, "tags", None)
+        if isinstance(tags, dict):
+            src = tags.get("src")
+            tb = tags.get("traceback")
+            if src:
+                props["_debug_src"] = src
+            if tb:
+                props["_debug_traceback"] = list(tb)
 
         lb.add_entity(
             LogicalEntity(
@@ -1759,6 +1834,15 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                 direction=direction,
             )
 
+        # Propagate source debug tag into the draftsman entity so it
+        # survives blueprint export and helps locate assertion failures.
+        set_entity_source(de, entity.properties.get("_debug_src"))
+        # Also copy traceback when present.
+        origin = get_entity_origin(entity)
+        if origin is not None and origin.traceback:
+            if hasattr(de, "tags") and isinstance(de.tags, dict):
+                de.tags["traceback"] = list(origin.traceback)
+
         props = entity.properties
 
         if entity.type == "arithmetic-combinator":
@@ -2138,6 +2222,21 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
     seen_wires: set[tuple[str, str, str, str, str]] = set()
     wire_count_by_colour: dict[str, int] = {}
 
+    # Build a quick lookup from entity id → formatted source+traceback for
+    # richer error messages.
+    entity_by_id: dict[str, Any] = {}
+    if bp is not None and hasattr(bp, "entities"):
+        for ent in bp.entities:
+            eid = getattr(ent, "id", None)
+            if eid is not None:
+                entity_by_id[eid] = ent
+
+    def _fmt(eid: str) -> str:
+        ent = entity_by_id.get(eid)
+        if ent is not None:
+            return format_entity_source(ent, default=f"id={eid} (no src)")
+        return f"{eid!r}"
+
     for w in wires:
         assoc1, conn1, assoc2, conn2 = w
         e1 = assoc1() if callable(assoc1) else assoc1
@@ -2156,7 +2255,8 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
         # is a valid Factorio pattern (e.g. clock loopback) — process normally.
         if eid1 == eid2 and side1 == side2:
             errors.append(
-                f"Self-loop on same port: {eid1!r}:{side1} ↔ {eid2!r}:{side2} ({colour})"
+                f"Self-loop on same port: {_fmt(eid1)}:{side1} ↔ "
+                f"{_fmt(eid2)}:{side2} ({colour})"
             )
             continue
 
@@ -2165,7 +2265,7 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
         wire_key_rev = (eid2, eid1, colour, side2, side1)
         if wire_key in seen_wires or wire_key_rev in seen_wires:
             errors.append(
-                f"Duplicate wire: {eid1!r} ↔ {eid2!r} ({colour}, "
+                f"Duplicate wire: {_fmt(eid1)} ↔ {_fmt(eid2)} ({colour}, "
                 f"{side1}↔{side2})"
             )
         seen_wires.add(wire_key)
@@ -2187,7 +2287,7 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
         for (eid, side), d in colour_deg.items():
             if d > 2:
                 errors.append(
-                    f"Degree overflow: {eid!r} {side} on {colour} has "
+                    f"Degree overflow: {_fmt(eid)} {side} on {colour} has "
                     f"{d} connections (max 2)"
                 )
 
@@ -2217,9 +2317,20 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
 
         if len(components) > 1:
             sizes = [len(c) for c in components]
+            # Pick representative source hints from the components.
+            hints: list[str] = []
+            for c in components:
+                if not c:
+                    continue
+                rep = next(iter(c))
+                hints.append(_fmt(rep))
+                if len(", ".join(hints)) > 200:
+                    break
+            src_hints = ", ".join(hints)[:300]
+            hint = f" [examples: {src_hints}]" if src_hints else ""
             errors.append(
                 f"{colour} wires: {len(eids)} entities split into "
-                f"{len(components)} component(s) (sizes: {sizes})"
+                f"{len(components)} component(s) (sizes: {sizes}){hint}"
             )
 
     # ── Wire count sanity ─────────────────────────────────────────

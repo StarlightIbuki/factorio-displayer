@@ -823,11 +823,6 @@ class TestSmokeEncodeFrames:
         assert len(dcs) > 1  # multiple chunks → multiple DCs
         _check_bp(bp, label="vertical_chunks")
 
-    @pytest.mark.xfail(
-        reason="pre-existing: _wire_horizontal_first produces degree overflow "
-               "at rightmost lamp column when bridging video memory to display; "
-               "timer has pre-existing self-loop"
-    )
     def test_multi_chunk_compose_passes_topology(self):
         """All-in-one composition with a multi-chunk display must produce
         a fully connected blueprint — every red network must be one
