@@ -137,7 +137,10 @@ def _fix_conditions_in_dict(d: dict) -> None:
 
     This walks every decider combinator in the blueprint dict and ensures
     that within-range pairs carry ``"and"`` while inter-range boundaries
-    carry ``"or"``.
+    carry ``"or"``.  Conditions that already carry an explicit
+    ``compare_type`` are left untouched — e.g. the audio player's
+    ``match0`` t=0 fallback, which needs ``signal-M == 0 AND each == 60``
+    (two ``=`` conditions joined by AND, not OR).
     """
     for entity in d.get("blueprint", {}).get("entities", []):
         cb = entity.get("control_behavior", {})
@@ -153,9 +156,15 @@ def _fix_conditions_in_dict(d: dict) -> None:
             comp = cond_a.get("comparator", "")
 
             if comp == "=":
-                cond_a.setdefault("compare_type", "and")
-                if range_idx > 0:
-                    cond_a["compare_type"] = "or"
+                # Default: an "= x" condition starts a new range (AND for the
+                # first, OR thereafter).  But if the builder explicitly set a
+                # compare_type (e.g. the audio player's match0, which needs
+                # "signal-M == 0 AND each == 60"), honour it — overriding it
+                # to "or" makes match0 fire every tick (the t=0 beep).
+                if "compare_type" not in cond_a:
+                    cond_a["compare_type"] = "and"
+                    if range_idx > 0:
+                        cond_a["compare_type"] = "or"
                 i += 1
                 range_idx += 1
                 continue
@@ -172,7 +181,8 @@ def _fix_conditions_in_dict(d: dict) -> None:
                 i += 2
                 range_idx += 1
             else:
-                cond_a.setdefault("compare_type", "and")
+                if "compare_type" not in cond_a:
+                    cond_a["compare_type"] = "and"
                 i += 1
 
 
