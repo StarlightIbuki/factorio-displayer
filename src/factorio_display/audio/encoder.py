@@ -457,12 +457,34 @@ def encode_audio_auto(
     _AUDIO_EXTS = {"wav", "flac", "ogg", "aiff", "aif", "au", "caf", "mp3", "mp4", "m4a", "aac", "wma"}
 
     if ext in _AUDIO_EXTS:
+        # AI-driven transcription (optional Basic Pitch) is preferred for
+        # non-MIDI audio: it produces real musical notes instead of the dense
+        # FFT-noise the STFT path yields for loud tracks.  Falls back to the
+        # built-in STFT analysis when Basic Pitch is unavailable or disabled.
+        if bool(kwargs.get("use_basic_pitch", True)):
+            from .basic_pitch_transcriber import transcribe_audio  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+            midi_path = transcribe_audio(path)
+            if midi_path is not None:
+                sys.stderr.write(f"Using Basic Pitch transcription: {midi_path}\n")
+                return _encode_midi(midi_path, **kwargs)
         return _encode_audio_file(path, **kwargs)
 
     if ext not in ("mid", "midi"):
         sys.stderr.write(f"Audio auto-encode: unsupported format: {path}\n")
         return ""
 
+    return _encode_midi(path, **kwargs)
+
+
+def _encode_midi(
+    path: str,
+    **kwargs: object,
+) -> str:
+    """Encode a MIDI file (or a Basic Pitch transcription) into a blueprint.
+
+    Shared by the ``.mid`` / ``.midi`` input path and the AI-transcription
+    path (Basic Pitch produces a MIDI that is then fed through here).
+    """
     from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
     from .midi_translator import midi_to_multi_rail_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
     from .player_blueprint import build_multi_rail_decoder  # pylint: disable=relative-beyond-top-level

@@ -33,6 +33,14 @@ audio = [
     "mido>=1.3",
     "soundfile>=0.12",
 ]
+# AI transcription for non-MIDI audio (MP3/WAV/...).  Optional because it needs
+# TensorFlow, which only has wheels for Python ≤ 3.13 — install it in a
+# separate interpreter/venv and point FACTORIO_BASIC_PITCH_PYTHON at it.
+#   python3.11 -m venv .venv-bp
+#   .venv-bp/Scripts/python -m pip install basic-pitch
+basic-pitch = [
+    "basic-pitch>=0.4.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/factorio_display"]

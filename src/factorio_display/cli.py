@@ -865,6 +865,9 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                          help="Disable optimal global octave shift.")
 
     g5 = encode_parser.add_argument_group("Audio file encoding (non-MIDI)")
+    g5.add_argument("--no-ai-transcribe", action="store_true",
+                    help="Disable the optional AI transcription (Basic Pitch) for non-MIDI "
+                         "audio; always use the built-in STFT analysis instead.")
     g5.add_argument("--output-midi", type=str, default=None,
                     help="Export extracted audio as MIDI to PATH before encoding.")
     g5.add_argument("--activation-threshold", type=float, default=0.0,
@@ -1341,6 +1344,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         "midi_activation_threshold": getattr(args, "midi_threshold", 0.05),
         "condense_midi": not getattr(args, "no_condense", False),
         "max_polyphony": getattr(args, "max_polyphony", 0),
+        "use_basic_pitch": not getattr(args, "no_ai_transcribe", False),
     }
 
     # For now, encode the first audio file; multi-audio concatenation
