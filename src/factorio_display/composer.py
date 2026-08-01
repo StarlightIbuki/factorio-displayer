@@ -107,7 +107,9 @@ class PortConnection:
 # ═══════════════════════════════════════════════════════════════════════
 
 _CACHE_DIR = cache_namespace_dir("compose")
-_LAYOUT_CACHE_REV = "layout-v5"
+# Bump whenever composition layout/wiring changes (the cache key does not
+# include component versions, only caller hash parts + this revision).
+_LAYOUT_CACHE_REV = "layout-v6"
 
 
 def _cache_key(*parts: str) -> str:

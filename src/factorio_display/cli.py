@@ -404,17 +404,22 @@ def _build_timer_for_memory(memory_lb: LogicalBlueprint) -> LogicalBlueprint:
         bridge = build_clock_bridge("Clock Bridge")
         timer.merge(bridge, entity_prefix="bridge_", network_prefix="bridge_")
 
-        # Wire raw timer (RED) → bridge (RED input)
-        _connect_nets_by_color(
-            timer, "red",
-            entity_contains="_inc", port="output",
-            other_entity_contains="bridge_clock", other_port="input",
-        )
-        # Wire raw timer (RED) → mod timer (RED input)
+        # Wire raw timer (RED) → mod timer (RED input): the mod AC wraps the
+        # raw clock at the *song length* (max_tick_index + 1) so the audio
+        # loops back to the start when it reaches the end.
         _connect_nets_by_color(
             timer, "red",
             entity_contains="_inc", port="output",
             other_entity_contains="mod_sub", other_port="input",
+        )
+        # Wire mod timer (RED) → bridge (RED input): the GREEN clock that the
+        # memory pages and the player's sub-tick mod AC receive must be the
+        # *modded* (looping) clock, NOT the raw accumulator clock — otherwise
+        # the song never repeats and just goes silent after the last page.
+        _connect_nets_by_color(
+            timer, "red",
+            entity_contains="mod_sub", port="output",
+            other_entity_contains="bridge_clock", other_port="input",
         )
         # Bridge's "out" port is on GREEN — rename to "clock"
         timer.output_ports["clock"] = timer.output_ports.pop("out")
@@ -1028,7 +1033,8 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
 def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
     """Build a timer for combined video+audio, exposing:
     - ``"clock_red"`` — modded (wrapping) clock on RED (for video memory)
-    - ``"clock_green"`` — raw clock on GREEN (for audio memory + sub-tick)
+    - ``"clock_green"`` — modded (wrapping) clock on GREEN (for audio memory,
+      so the audio loops at the song length)
     - ``"sub_tick"`` — sub-tick on RED (for progress bar, from raw clock)
     """
     from .timer import build_raw_timer, build_mod_timer, build_clock_bridge
@@ -1064,10 +1070,11 @@ def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
         entity_contains="_inc", port="output",
         other_entity_contains="sub60_sub", other_port="input",
     )
-    # Wire raw timer (RED) → bridge (RED input)
+    # Wire mod timer (RED) → bridge (RED input): the GREEN clock for audio
+    # wraps at the song length so the audio loops.
     _connect_nets_by_color(
         timer, "red",
-        entity_contains="_inc", port="output",
+        entity_contains="mod_sub", port="output",
         other_entity_contains="bridge_clock", other_port="input",
     )
 
