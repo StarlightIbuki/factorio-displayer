@@ -304,6 +304,95 @@ def find_optimal_octave_shift(notes: list[int], instrument: str) -> int:
     return best_shift
 
 
+def _melodic_ranges() -> dict[str, dict[str, int]]:
+    """Real playable MIDI ranges of the melodic (non-drum) instruments."""
+    return {
+        k: v for k, v in FACTORIO_INSTRUMENTS.items() if k != 'drum'
+    }
+
+
+def _resolve_note_instrument(note: int, preferred: str) -> str | None:
+    """Return the instrument whose REAL range can actually play *note*.
+
+    Prefers *preferred* (the channel's GM instrument).  Falls back to the
+    melodic instrument whose range contains the note and is nearest in
+    register to *preferred*.  Returns ``None`` when no melodic instrument can
+    play the note (it lies outside the overall pitch range — fold it).
+    """
+    pref = FACTORIO_INSTRUMENTS.get(preferred)
+    if pref is not None and pref['min'] <= note <= pref['max']:
+        return preferred
+    pref_center = (pref['min'] + pref['max']) / 2 if pref else 0.0
+    best: str | None = None
+    best_d = float('inf')
+    for inst, rng in FACTORIO_INSTRUMENTS.items():
+        if inst == 'drum':
+            continue
+        if rng['min'] <= note <= rng['max']:
+            d = abs((rng['min'] + rng['max']) / 2 - pref_center)
+            if d < best_d:
+                best, best_d = inst, d
+    return best
+
+
+def _fold_to_nearest(note: int, preferred: str) -> tuple[int, str]:
+    """Fold *note* (which no instrument can play) into the nearest melodic
+    instrument's REAL range by octave, returning ``(folded_note, instrument)``.
+
+    "Nearest" is by register: a note below every range folds up into the
+    lowest instrument (real bass), and a note above every range folds down
+    into the highest instrument, so a very low note stays low instead of being
+    raised a full octave to a brighter instrument.  Folding targets the real
+    range, not the wider 48-note window — no placeholder pitches.
+    """
+    ranges = _melodic_ranges()
+    overall_min = min(r['min'] for r in ranges.values())
+    overall_max = max(r['max'] for r in ranges.values())
+    if note < overall_min:
+        low_insts = [i for i, r in ranges.items() if r['min'] == overall_min]
+        best_inst = preferred if preferred in low_insts else low_insts[0]
+    elif note > overall_max:
+        high_insts = [i for i, r in ranges.items() if r['max'] == overall_max]
+        best_inst = preferred if preferred in high_insts else high_insts[0]
+    else:
+        pref_center = (FACTORIO_INSTRUMENTS[preferred]['min']
+                       + FACTORIO_INSTRUMENTS[preferred]['max']) / 2
+        best_inst = min(
+            ranges,
+            key=lambda i: abs(
+                (FACTORIO_INSTRUMENTS[i]['min']
+                 + FACTORIO_INSTRUMENTS[i]['max']) / 2 - pref_center
+            ),
+        )
+    rng = FACTORIO_INSTRUMENTS[best_inst]
+    while note < rng['min']:
+        note += 12
+    while note > rng['max']:
+        note -= 12
+    return note, best_inst
+
+
+def _route_note(note: int, inst: str, map_drums: bool) -> tuple[str, int]:
+    """Return ``(target_instrument, folded_note)`` for a melodic note.
+
+    Priority (per design): the overall pitch range is decided first (the union
+    of every melodic instrument's real range), then each note goes to the
+    instrument whose real range actually fits it; only notes below/above EVERY
+    melodic instrument get folded into the nearest real range.
+
+    - ``--map-drums``: below-range melodic notes opt into the kick drum.
+    - Otherwise the note goes to the fitting melodic instrument; if none fits
+      it is folded into the nearest real range.
+    """
+    if map_drums and note < FACTORIO_INSTRUMENTS[inst]['min']:
+        return 'drum', note
+    target = _resolve_note_instrument(note, inst)
+    if target is None:
+        folded_note, best_inst = _fold_to_nearest(note, inst)
+        return best_inst, folded_note
+    return target, note
+
+
 def _adsr_shape(
     tick_in_note: int,
     note_duration: int,
@@ -661,10 +750,6 @@ def midi_to_multi_rail_tick_data(
     # Channel 9 is always drum
     channel_instrument[9] = 'drum'
 
-    # ── Collect note events per channel → rail ──────────────────────
-    # Build a mapping: (channel) → rail_idx
-    channel_rail: dict[int, int] = {}
-    rail_instruments: list[str] = []
     # Scan all tracks once to discover which channels have notes
     channels_with_notes: set[int] = set()
     for track in mid.tracks:
@@ -673,92 +758,41 @@ def midi_to_multi_rail_tick_data(
             if msg.type == 'note_on' and msg.velocity > 0 and ch >= 0:
                 channels_with_notes.add(ch)
 
+    # ── Decide the overall pitch range, then route notes ──────────
+    # The overall pitch range is the union of every melodic instrument's real
+    # playable range.  Each note is routed to the instrument whose real range
+    # actually fits it (preferring the channel's GM instrument); only notes
+    # below/above ALL instruments get folded into the nearest real range.
+    # We never place a pitch an instrument cannot produce (no placeholder
+    # pitches / useless speakers).  Dedicated percussion channels (channel 9,
+    # or a GM percussion-kit program) stay 'drum' and become a drum rail.
+    channel_rail: dict[int, int] = {}
+    rail_instruments: list[str] = []
     for ch in sorted(channels_with_notes):
         inst = channel_instrument.get(ch, 'piano')
         if inst not in rail_instruments:
-            # Check if we already have this instrument; merge if so
             rail_instruments.append(inst)
         channel_rail[ch] = rail_instruments.index(inst)
-
     num_rails = len(rail_instruments)
     if num_rails == 0:
         return [], []
 
-    # Re-index: merge duplicate instruments
-    inst_to_rail: dict[str, int] = {}
-    compact_instruments: list[str] = []
-    old_to_new: dict[int, int] = {}
-    for ri, inst in enumerate(rail_instruments):
+    # Dynamic rails: per-note routing may add target instruments (e.g. a piano
+    # channel's low notes land on bass).  Those are appended to
+    # *rail_instruments* as notes are collected.
+    inst_to_rail: dict[str, int] = {
+        inst: i for i, inst in enumerate(rail_instruments)
+    }
+    rail_notes: list[list[tuple[int, float, float, float]]] = [
+        [] for _ in range(num_rails)
+    ]
+
+    def _rail_for_inst(inst: str) -> int:
         if inst not in inst_to_rail:
-            inst_to_rail[inst] = len(compact_instruments)
-            compact_instruments.append(inst)
-        old_to_new[ri] = inst_to_rail[inst]
-
-    # When map_drums is on, dedicated percussion channels (channel 9, or a
-    # channel whose program is a GM percussion kit) are classified 'drum'
-    # above and routed to a drum rail by the channel_instrument logic below.
-    #
-    # In addition, for *melodic* channels we only treat notes that fall BELOW
-    # the instrument's lowest playable pitch (e.g. MIDI < 53 for piano) as
-    # drums.  Those very low notes cannot be played by the instrument and
-    # typically form a repeating bass/kick beat, so they are routed to a
-    # low drum (kick-1) to simulate the beat.
-    #
-    # We deliberately do NOT split notes from the GM drum range (24-81) that
-    # are still inside the instrument's range: that range overlaps melodic
-    # instruments, so a piano/bass track would otherwise be misclassified and
-    # fabricated into fake kick/snare/triangle sounds out of melody notes.
-    drum_channel_offset = 100  # virtual channel IDs for low-beat drum rails
-    if map_drums:
-        for ch in sorted(channels_with_notes):
-            inst = channel_instrument.get(ch, 'piano')
-            if inst == 'drum':
-                continue  # already a dedicated percussion channel
-            inst_min = FACTORIO_INSTRUMENTS[inst]['min']
-            has_low_beat = False
-            for track in mid.tracks:
-                for msg in track:
-                    if (getattr(msg, 'channel', -1) == ch
-                            and msg.type == 'note_on' and msg.velocity > 0
-                            and msg.note < inst_min):
-                        has_low_beat = True
-                        break
-                if has_low_beat:
-                    break
-            if has_low_beat:
-                virt_ch = drum_channel_offset + ch
-                channel_instrument[virt_ch] = 'drum'
-                channels_with_notes.add(virt_ch)
-                sys.stderr.write(
-                    f"[midi_translator] Channel {ch} ({inst}) has notes below "
-                    f"its range (<{inst_min}) — routing them to a low drum "
-                    f"({LOW_BEAT_DRUM}) to simulate the beat\n"
-                )
-
-    # Rebuild channel_rail with possibly new drum channels
-    channel_rail = {}
-    rail_instruments = []
-    for ch in sorted(channels_with_notes):
-        inst = channel_instrument.get(ch, 'piano')
-        if inst not in rail_instruments:
+            inst_to_rail[inst] = len(rail_instruments)
             rail_instruments.append(inst)
-        channel_rail[ch] = rail_instruments.index(inst)
-
-    # Deduplicate instrument list
-    inst_to_rail = {}
-    compact_instruments: list[str] = []
-    old_to_new: dict[int, int] = {}
-    for ri, inst in enumerate(rail_instruments):
-        if inst not in inst_to_rail:
-            inst_to_rail[inst] = len(compact_instruments)
-            compact_instruments.append(inst)
-        old_to_new[ri] = inst_to_rail[inst]
-    rail_instruments = compact_instruments
-    num_rails = len(rail_instruments)
-
-    # Remap channel_rail
-    for ch in list(channel_rail.keys()):
-        channel_rail[ch] = old_to_new[channel_rail[ch]]
+            rail_notes.append([])
+        return inst_to_rail[inst]
 
     # ── Melody detection (per instrument group) ─────────────────────
     melody_channel: dict[int, int] = {}  # inst_idx → channel
@@ -781,42 +815,17 @@ def midi_to_multi_rail_tick_data(
                     key=lambda c: c,
                 )
 
-    # ── Pre-scan: optimal global octave shift per instrument ─────
-    # Collect unique note pitches per non-drum rail to find the
-    # octave shift that minimises per-note folding for each instrument.
-    rail_global_shifts: dict[int, int] = {}
-    if use_global_shift:
-        rail_note_pitches: dict[int, list[int]] = {ri: [] for ri in range(num_rails)}
-        for track in mid.tracks:
-            for msg in track:
-                ch = getattr(msg, 'channel', -1)
-                if msg.type == 'note_on' and msg.velocity > 0 and ch in channel_rail:
-                    ri = channel_rail[ch]
-                    inst = rail_instruments[ri]
-                    if inst != 'drum' and not (map_drums
-                                               and channel_instrument.get(ch) != 'drum'
-                                               and msg.note < FACTORIO_INSTRUMENTS[
-                                                   channel_instrument.get(ch, 'piano')
-                                               ]['min']):
-                        rail_note_pitches[ri].append(msg.note)
-        for ri, pitches in rail_note_pitches.items():
-            shift = find_optimal_octave_shift(pitches, rail_instruments[ri])
-            rail_global_shifts[ri] = shift
-            if shift != 0:
-                sys.stderr.write(
-                    f"[midi_translator] Global octave shift: {shift:+d} semitones "
-                    f"({shift // 12:+d} octaves) [{rail_instruments[ri]}]\n"
-                )
+    # (A per-rail global octave shift is no longer applied: notes are routed to
+    # the instrument whose REAL range fits them, and only out-of-range notes
+    # are folded into the nearest real range, so placement is already exact.)
 
     # ── Collect note events per rail (by channel) ───────────────────
-    rail_notes: list[list[tuple[int, float, float, float]]] = [
-        [] for _ in range(num_rails)
-    ]
     fold_logged: set[str] = set()
 
     for track in mid.tracks:
-        # Track per-channel active notes within this track pass
-        active_notes: dict[int, dict[int, tuple[float, float]]] = {}  # ch → note → (start, loudness)
+        # Track per-channel active notes within this track pass.
+        # ch → note → (start_tick, loudness, target_inst, pitch_idx)
+        active_notes: dict[int, dict[int, tuple[float, float, str, int]]] = {}
         absolute_midi_tick = 0
 
         for msg in track:
@@ -826,18 +835,6 @@ def midi_to_multi_rail_tick_data(
                 continue
 
             ch = getattr(msg, 'channel', -1)
-            # Route very-low notes (below the instrument's playable range) to
-            # the virtual low-beat drum channel when map_drums is on.
-            if (map_drums
-                    and hasattr(msg, 'note')
-                    and channel_instrument.get(ch) != 'drum'
-                    and msg.note < FACTORIO_INSTRUMENTS[
-                        channel_instrument.get(ch, 'piano')
-                    ]['min']):
-                virt_ch = drum_channel_offset + ch
-                if virt_ch in channel_rail:
-                    ch = virt_ch
-
             if ch not in channel_rail:
                 continue
 
@@ -861,67 +858,67 @@ def midi_to_multi_rail_tick_data(
                 loudness = velocity / 127.0 * 100.0 * velocity_scale
 
                 if is_drum_mapped:
-                    if ch >= drum_channel_offset:
-                        # Virtual low-beat channel: simulate the beat with a
-                        # single low drum (kick), not a full GM drum map.
-                        pitch_idx = DRUM_NOTE_TO_PITCH[LOW_BEAT_DRUM]
-                    else:
-                        # Dedicated percussion channel: GM note → drum-kit name
-                        drum_name = GM_DRUM_MAP.get(msg.note)
-                        if drum_name is None:
-                            continue  # unmapped drum note, skip
-                        pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
-                        if pitch_idx is None:
-                            continue
-                else:
-                    folded_note, log_msg = _fold_note(
-                        msg.note, instrument=inst,
-                        global_shift=rail_global_shifts.get(ri, 0),
-                    )
-                    if log_msg and log_msg not in fold_logged:
-                        fold_logged.add(log_msg)
-                        sys.stderr.write(f"[midi_translator] {log_msg}\n")
-                    pitch_idx = midi_to_pitch_index(
-                        folded_note, midi_base=INSTRUMENT_MIDI_BASES.get(inst, MIDI_BASE),
-                    )
+                    # Dedicated percussion channel: GM note → drum-kit name
+                    drum_name = GM_DRUM_MAP.get(msg.note)
+                    if drum_name is None:
+                        continue  # unmapped drum note, skip
+                    pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
                     if pitch_idx is None:
                         continue
+                    target = 'drum'
+                else:
+                    # Route the note to the instrument whose REAL range fits it
+                    # (preferring this channel's instrument); only notes outside
+                    # EVERY instrument get folded into the nearest real range.
+                    target, folded_note = _route_note(msg.note, inst, map_drums)
+                    if target == 'drum':
+                        # --map-drums opt-in: below-range note → low kick
+                        pitch_idx = DRUM_NOTE_TO_PITCH[LOW_BEAT_DRUM]
+                    else:
+                        if folded_note != msg.note:
+                            log_msg = (
+                                f"Note MIDI {msg.note} is outside every "
+                                f"instrument's range — folded to MIDI "
+                                f"{folded_note} [{target}]"
+                            )
+                            if log_msg not in fold_logged:
+                                fold_logged.add(log_msg)
+                                sys.stderr.write(f"[midi_translator] {log_msg}\n")
+                        pitch_idx = midi_to_pitch_index(
+                            folded_note,
+                            midi_base=INSTRUMENT_MIDI_BASES.get(target, MIDI_BASE),
+                        )
+                        if pitch_idx is None:
+                            continue
 
-                active_notes[ch][msg.note] = (start_game_tick, loudness)
+                active_notes[ch][msg.note] = (
+                    start_game_tick, loudness, target, pitch_idx,
+                )
 
             elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
                 entry = active_notes[ch].pop(msg.note, None)
                 if entry is None:
                     continue
-                start_game_tick, loudness = entry
+                start_game_tick, loudness, target, pitch_idx = entry
                 tempo = _get_tempo_at(absolute_midi_tick)
                 end_game_tick = _midi_tick_to_game_tick(
                     absolute_midi_tick, mid.ticks_per_beat,
                     tempo, ticks_per_beat,
                 )
-                if is_drum_mapped:
-                    if ch >= drum_channel_offset:
-                        # Virtual low-beat channel: single low drum (kick)
-                        pitch_idx = DRUM_NOTE_TO_PITCH[LOW_BEAT_DRUM]
-                    else:
-                        drum_name = GM_DRUM_MAP.get(msg.note)
-                        if drum_name is None:
-                            continue
-                        pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
-                        if pitch_idx is None:
-                            continue
-                else:
-                    folded_note, _ = _fold_note(
-                        msg.note, instrument=inst,
-                        global_shift=rail_global_shifts.get(ri, 0),
-                    )
-                    pitch_idx = midi_to_pitch_index(
-                        folded_note, midi_base=INSTRUMENT_MIDI_BASES.get(inst, MIDI_BASE),
-                    )
-                    if pitch_idx is None:
-                        continue
+                target_ri = _rail_for_inst(target)
+                rail_notes[target_ri].append(
+                    (pitch_idx, start_game_tick, end_game_tick, loudness)
+                )
 
-                rail_notes[ri].append((pitch_idx, start_game_tick, end_game_tick, loudness))
+    num_rails = len(rail_instruments)
+
+    # Drop rails that received no notes (e.g. a channel's preferred instrument
+    # that every note re-routed away from) so unused speakers aren't emitted.
+    nonempty = [ri for ri, notes in enumerate(rail_notes) if notes]
+    if len(nonempty) != len(rail_notes):
+        rail_notes = [rail_notes[ri] for ri in nonempty]
+        rail_instruments = [rail_instruments[ri] for ri in nonempty]
+    num_rails = len(rail_instruments)
 
     # ── Build per-rail tick_data ────────────────────────────────────
     all_notes_flat = [n for rn in rail_notes for n in rn]
@@ -937,10 +934,11 @@ def midi_to_multi_rail_tick_data(
 
     def _build_one_rail(ri: int) -> list[list[float]]:
         """Build tick_data for a single rail (thread-safe, no shared state)."""
-        # Drums are percussive hits, not sustained tones: each hit keeps a
-        # FLAT loudness (its velocity) across its duration instead of a
-        # melodic ADSR ramp, so we never simulate a kick's loudness changing
-        # tick-by-tick.
+        # Drums are percussive HITS, not sustained tones: a kick maps to a
+        # signal directly and triggers once on its attack tick.  Holding a
+        # flat loudness across the note's duration would retrigger the speaker
+        # every tick (a machine-gun of kicks), so drums drive the speaker only
+        # on the hit tick and stay silent afterwards.
         is_drum_rail = rail_instruments[ri] == 'drum'
         td: list[list[float]] = [[0.0] * SPEAKER_COUNT for _ in range(num_ticks)]
         for pitch_idx, start_t, end_t, loudness in rail_notes[ri]:
@@ -951,7 +949,11 @@ def midi_to_multi_rail_tick_data(
                 continue
             for tick in range(max(0, start_i), min(num_ticks, end_i)):
                 tick_in_note = tick - start_i
-                if use_adsr and not is_drum_rail:
+                if is_drum_rail:
+                    if tick_in_note > 0:
+                        continue  # single transient — hit tick only
+                    shaped = loudness
+                elif use_adsr:
                     shaped = _adsr_shape(
                         tick_in_note, note_duration, loudness,
                         attack_ticks, decay_ticks, sustain_level, release_ticks,

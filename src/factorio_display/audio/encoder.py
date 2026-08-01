@@ -63,6 +63,12 @@ PACK_SHIFTS = [PACK_SHIFT * i for i in range(4)]  # [0, 7, 14, 21]
 TICKS_PER_PAGE = 60
 CELLS_PER_PAGE = TICKS_PER_PAGE * CHANNELS_PER_TICK  # = 720
 
+# Drum rails only record each used drum's loudness (1 cell/tick), so their
+# pages can cover far more ticks per DC than the 60-tick melodic pages —
+# shrinking the drum memory from one DC per second to one per ~10 seconds.
+# The exact value is clamped to the signal pool per rail (see cli.py).
+DRUM_TICKS_PER_PAGE = 600
+
 def pack_four(l1: int, l2: int, l3: int, l4: int) -> int:
     """Pack four 0–100 loudness values into one integer using 7-bit shifts.
 
@@ -267,6 +273,7 @@ def encode_audio_memory(
     x_offset: int = 0,
     id_prefix: str = "",
     grouping: Sequence[Sequence[int | None]] | None = None,
+    ticks_per_page: int = TICKS_PER_PAGE,
 ) -> str:
     """Encode tick→loudness data into an audio-memory blueprint string.
 
@@ -296,7 +303,7 @@ def encode_audio_memory(
     num_base = len(signal_pool)
     num_qual = len(qualities)
     cells_per_tick = len(grouping) if grouping is not None else CHANNELS_PER_TICK
-    cells_per_page = TICKS_PER_PAGE * cells_per_tick
+    cells_per_page = ticks_per_page * cells_per_tick
 
     if num_base == 0:
         raise ValueError("signal_pool must not be empty")
@@ -307,7 +314,7 @@ def encode_audio_memory(
         raise ValueError(
             f"signal_pool has {num_base} base signals × {num_qual} qualities = "
             f"{num_base * num_qual} unique pairs, but {cells_per_page} are needed "
-            f"for a {TICKS_PER_PAGE}-tick page.  Need at least {needed_base} base signals."
+            f"for a {ticks_per_page}-tick page.  Need at least {needed_base} base signals."
         )
 
     # 1. Pack
@@ -327,7 +334,7 @@ def encode_audio_memory(
         f"Audio: {total_ticks} ticks → {total_cells} cells → "
         f"{page_count} page(s) "
         f"({cells_per_page} cells/page = {needed_base} base × {num_qual} qual, "
-        f"{TICKS_PER_PAGE} ticks/page).\n"
+        f"{ticks_per_page} ticks/page).\n"
     )
 
     # 4. Collect non-empty pages — defer grid layout until wiring
@@ -816,6 +823,15 @@ def _encode_midi(
         ap = active_drum_pitches[ri]
         return drum_grouping(ap) if ap is not None else None
 
+    def _rail_ticks_per_page(ri: int) -> int:
+        """Per-rail page size — drums use large pages (fewer DCs)."""
+        if "drum" in instruments[ri].lower():
+            grp = _drum_grouping(ri)
+            cpt = len(grp) if grp else 1
+            max_page = (len(signal_pool) * len(qualities)) // max(1, cpt)
+            return max(TICKS_PER_PAGE, min(DRUM_TICKS_PER_PAGE, max_page))
+        return TICKS_PER_PAGE
+
     if not attach_player:
         # Memory-only: encode each rail, concatenate
         parts: list[str] = []
@@ -827,6 +843,7 @@ def _encode_midi(
                 qualities=qualities,
                 clock_signal=CLOCK_SIGNAL,
                 grouping=_drum_grouping(ri),
+                ticks_per_page=_rail_ticks_per_page(ri),
             )
             if mem:
                 parts.append(mem)
@@ -838,7 +855,7 @@ def _encode_midi(
     from draftsman.blueprintable import Blueprint
     from draftsman.entity import new_entity
     from .player_blueprint import (
-        RAIL_WIDTH, MOD_Y, TICKS_PER_PAGE, SUB_TICK_SIG,
+        RAIL_WIDTH, MOD_Y, SUB_TICK_SIG,
         INSTRUMENT_MIDI_BASES, _build_rail, _RailEndpoints,
     )
 
@@ -865,6 +882,7 @@ def _encode_midi(
                 debug_lamps=False,
                 midi_base=midi_base,
                 map_drums=map_drums,
+                ticks_per_page=_rail_ticks_per_page(ri),
             )
             endpoints.append(ep)
 
@@ -895,6 +913,7 @@ def _encode_midi(
                 x_offset=rail_x,
                 id_prefix=f"r{ri}_",
                 grouping=_drum_grouping(ri),
+                ticks_per_page=_rail_ticks_per_page(ri),
             )
             if isinstance(last_id, str) and last_id:
                 mem_last_ids.append(last_id)
@@ -912,44 +931,40 @@ def _encode_midi(
                         side_1="output", side_2="input",
                     )
 
-        # ── Shared modulo AC at the last rail's port column ──────
-        # Same X as the last rail's page_port, different Y — no overlap.
-        mod_x = (num_rails - 1) * RAIL_WIDTH + RAIL_WIDTH - 1
-        ac_mod = new_entity("arithmetic-combinator", id="mod",
-                            tile_position=(mod_x, MOD_Y))
-        ac_mod.set_arithmetic_condition(
-            first_operand=CLOCK_SIGNAL, operation="%",
-            second_operand=TICKS_PER_PAGE, output_signal=SUB_TICK_SIG,
-        )
-        combined.entities.append(ac_mod)
-
-        # ── Cross-rail wiring: sub_tick + clock only ─────────────
-        # Sub-tick (red): shared mod → all rails' match DCs
+        # ── Per-rail modulo ACs ────────────────────────────────────
+        # Each rail's page size may differ (drums use large pages), so every
+        # rail gets its own mod at its own port column feeding only its own
+        # match DCs (its own sub-tick red bus).
         import warnings as _w3
-        last_ep = endpoints[-1]
         with _w3.catch_warnings():
             _w3.simplefilter("ignore")
-            combined.add_circuit_connection(
-                "red", "mod", last_ep.first_match_id,
-                side_1="output", side_2="input",
-            )
-            for ri in range(num_rails - 1, 0, -1):
-                prev = endpoints[ri - 1]
+            for ri in range(num_rails):
+                mod_x = ri * RAIL_WIDTH + RAIL_WIDTH - 1
+                mod_id = f"mod_{ri}"
+                ac_mod = new_entity("arithmetic-combinator", id=mod_id,
+                                    tile_position=(mod_x, MOD_Y))
+                ac_mod.set_arithmetic_condition(
+                    first_operand=CLOCK_SIGNAL, operation="%",
+                    second_operand=_rail_ticks_per_page(ri),
+                    output_signal=SUB_TICK_SIG,
+                )
+                combined.entities.append(ac_mod)
                 combined.add_circuit_connection(
-                    "red", f"r{ri}_ch0_match", prev.first_match_id,
-                    side_1="input", side_2="input",
+                    "red", mod_id, endpoints[ri].first_match_id,
+                    side_1="output", side_2="input",
                 )
 
-            # Clock (green): chain ports across rails → mod
+            # Clock (green): chain ports across rails; each port → its own mod
             for ri in range(num_rails - 1):
                 combined.add_circuit_connection(
                     "green", endpoints[ri].port_id, endpoints[ri + 1].port_id,
                     side_1="input", side_2="input",
                 )
-            combined.add_circuit_connection(
-                "green", endpoints[-1].port_id, "mod",
-                side_1="input", side_2="input",
-            )
+            for ri in range(num_rails):
+                combined.add_circuit_connection(
+                    "green", endpoints[ri].port_id, f"mod_{ri}",
+                    side_1="input", side_2="input",
+                )
 
     return combined.to_string()
 
@@ -1112,6 +1127,7 @@ def encode_audio_to_logical(
     clock_signal: str = "signal-clock",
     id_prefix: str = "",
     grouping: Sequence[Sequence[int | None]] | None = None,
+    ticks_per_page: int = TICKS_PER_PAGE,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Encode tick→loudness data into a :class:`LogicalBlueprint`.
 
@@ -1153,7 +1169,7 @@ def encode_audio_to_logical(
     num_base = len(signal_pool)
     num_qual = len(qualities)
     cells_per_tick = len(grouping) if grouping is not None else CHANNELS_PER_TICK
-    cells_per_page = TICKS_PER_PAGE * cells_per_tick
+    cells_per_page = ticks_per_page * cells_per_tick
 
     if num_base == 0:
         raise ValueError("signal_pool must not be empty")
@@ -1163,7 +1179,7 @@ def encode_audio_to_logical(
         raise ValueError(
             f"signal_pool has {num_base} base signals × {num_qual} qualities = "
             f"{num_base * num_qual} unique pairs, but {cells_per_page} are needed "
-            f"for a {TICKS_PER_PAGE}-tick page.  Need at least {needed_base} base signals."
+            f"for a {ticks_per_page}-tick page.  Need at least {needed_base} base signals."
         )
 
     # 1. Pack
@@ -1183,7 +1199,7 @@ def encode_audio_to_logical(
         f"Audio (logical): {total_ticks} ticks → {total_cells} cells → "
         f"{page_count} page(s) "
         f"({cells_per_page} cells/page = {needed_base} base × {num_qual} qual, "
-        f"{TICKS_PER_PAGE} ticks/page).\n"
+        f"{ticks_per_page} ticks/page).\n"
     )
 
     lb = LogicalBlueprint(label=f"Audio Memory: {output_name}")

@@ -70,7 +70,7 @@ INSTRUMENT_MIDI_BASES: dict[str, int] = {
     "saw": 41,         # F2-E6  (41-88),  covers saw range F2-E5 (41-76)
     "square": 41,      # F2-E6  (41-88),  covers square range F2-E5 (41-76)
     "steel-drum": 53,  # F3-E7  (53-100), covers steel-drum range F3-E6 (53-88)
-    "celesta": 65,     # F4-E7  (65-112), best overlap with celesta F5-E8 (77-112)
+    "celesta": 77,     # F5-E9  (77-124), matches celesta range F5-E8 (77-112)
     "vibraphone": 77,  # F5-E9  (77-124), covers vibraphone range F5-E8 (77-112)
     "plucked": 65,     # F4-E7  (65-112), matches plucked range exactly
     "drum": 53,        # F3-E7  (53-100), covers drum range F3-E6 (53-88)
@@ -264,6 +264,7 @@ def _build_rail(
     debug_lamps: bool,
     midi_base: int = 53,
     map_drums: bool = False,
+    ticks_per_page: int = TICKS_PER_PAGE,
 ) -> _RailEndpoints:
     """Build one rail's 48-speaker decoder pipeline at the given X offset.
 
@@ -340,11 +341,12 @@ def _build_rail(
         cc = new_entity("constant-combinator", id=f"{base_id}_lut",
                         tile_position=(col, LUT_Y))
         slot = 0
-        for t in range(TICKS_PER_PAGE):
+        for t in range(ticks_per_page):
             cell_offset = t * 12 + ch
             sig_idx = cell_offset // num_qual
             qual_idx = cell_offset % num_qual
-            value = 60 if t == 0 else t
+            # Sub-tick 0 silent: stored value = page size (out of range).
+            value = ticks_per_page if t == 0 else t
             cc.set_signal(slot, signal_pool[sig_idx], value, qualities[qual_idx])
             slot += 1
         blueprint.entities.append(cc)
@@ -680,6 +682,7 @@ def _build_rail_logical(
     midi_base: int,
     clock_signal: str,
     active_drum_pitches: set[int] | None = None,
+    ticks_per_page: int = TICKS_PER_PAGE,
 ) -> "_RailEndpoints":  # noqa: F821
     """Build one rail's 48-speaker decoder into *lb* as logical entities/networks.
 
@@ -753,7 +756,7 @@ def _build_rail_logical(
         properties={
             "first_operand": clock_signal,
             "operation": "%",
-            "second_operand": TICKS_PER_PAGE,
+            "second_operand": ticks_per_page,
             "output_signal": "signal-M",
         },
         position=(port_x, MOD_Y),
@@ -830,11 +833,15 @@ def _build_rail_logical(
         # Lookup CC
         cc_id = f"{base_id}_lut"
         cc_signals: list[dict] = []
-        for t in range(TICKS_PER_PAGE):
+        for t in range(ticks_per_page):
             cell_offset = t * cells_per_tick + c
             sig_idx = cell_offset // num_qual
             qual_idx = cell_offset % num_qual
-            value = 60 if t == 0 else t
+            # Sub-tick 0 is deliberately silent: its stored value is the page
+            # size (out of the ``clock % ticks_per_page`` range), so the match
+            # DC never selects it.  All other values are 1..page-1 (non-zero,
+            # since Factorio drops 0-value signals).
+            value = ticks_per_page if t == 0 else t
             cc_signals.append({
                 "name": signal_pool[sig_idx],
                 "value": value,
@@ -983,6 +990,7 @@ def build_audio_decoder_logical(
     qualities: list[str] | None = None,
     map_drums: bool = False,
     active_drum_pitches: set[int] | None = None,
+    ticks_per_page: int = TICKS_PER_PAGE,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a single-rail 48-speaker audio decoder as a
     :class:`LogicalBlueprint` (no positions, networks instead of wires).
@@ -1024,6 +1032,7 @@ def build_audio_decoder_logical(
         lb, "", 0, instrument, signal_pool, qualities,
         map_drums, INSTRUMENT_MIDI_BASES.get(instrument, 53), clock_signal,
         active_drum_pitches=active_drum_pitches,
+        ticks_per_page=ticks_per_page,
     )
 
     for net in lb.networks:
@@ -1043,6 +1052,7 @@ def build_multi_rail_decoder_logical(
     qualities: list[str] | None = None,
     map_drums: bool = False,
     active_drum_pitches: list[set[int] | None] | None = None,
+    ticks_per_page: list[int] | None = None,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a **multi-rail** 48-speaker-per-rail audio decoder as a
     :class:`LogicalBlueprint`.
@@ -1082,6 +1092,7 @@ def build_multi_rail_decoder_logical(
             active_drum_pitches=(
                 active_drum_pitches[ri] if active_drum_pitches else None
             ),
+            ticks_per_page=(ticks_per_page[ri] if ticks_per_page else TICKS_PER_PAGE),
         )
         rail_info.append(info)
 

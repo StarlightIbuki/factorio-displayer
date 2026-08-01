@@ -693,6 +693,23 @@ class TestMultiRailMidi:
         drum_ri = instruments.index('drum')
         assert any(any(t) for t in rail_data[drum_ri]), "Drum rail should have activity"
 
+    def test_drum_hit_is_single_tick(self):
+        """A drum hit triggers only on its attack tick, not the whole note.
+
+        Holding a flat loudness across a kick's duration retriggers the
+        speaker every tick (a machine-gun of kicks).  A kick mapped to a
+        signal must fire once on the hit tick and then go silent.
+        """
+        mid = self._make_midi_with_channel([
+            (36, 100, 0, 240, 9),   # kick with a long 240-tick duration
+        ])
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        drum_ri = instruments.index("drum")
+        td = rail_data[drum_ri]
+        # Only the attack game tick (0) may carry any drum loudness
+        active = [t for t, tick in enumerate(td) if any(v > 0 for v in tick)]
+        assert active == [0], f"drum hit should fire once at tick 0, got {active}"
+
     def test_multi_instrument_auto_detect(self):
         """Different program changes → different instrument rails."""
         mid = mido.MidiFile(ticks_per_beat=480)
@@ -733,9 +750,14 @@ class TestMultiRailMidi:
             mid.tracks.append(t)
 
         instruments, _ = midi_to_multi_rail_tick_data(mid)
-        assert len(instruments) == 6
+        # The 6 channel instruments keep their own rails; notes that fall
+        # OUTSIDE a channel instrument's real range re-route to the nearest
+        # fitting instrument by register: celesta's 76 → plucked, and lead's
+        # 79/84 (above lead's E5) → steel-drum.
+        assert len(instruments) == 8
         assert set(instruments) == {
             "piano", "bass", "square", "celesta", "lead", "vibraphone",
+            "plucked", "steel-drum",
         }
 
     def test_low_instrument_keeps_low_octave(self):
@@ -743,11 +765,12 @@ class TestMultiRailMidi:
 
         ``midi_to_pitch_index`` must use the instrument's own base (41 for
         bass) so the F2-B2 octave piano can't play stays on the bass rail.
+        Notes below the overall range (F2=41) fold up into the bass range.
         """
         mid = mido.MidiFile(ticks_per_beat=480)
         t = mido.MidiTrack()
         t.append(mido.Message("program_change", program=32, channel=0, time=0))
-        for n in [36, 40, 43, 48]:  # C2-F2 — below piano's F3
+        for n in [38, 40, 43, 48]:  # C2-F2 — below piano's F3
             t.append(mido.Message("note_on", note=n, velocity=100, channel=0, time=0))
             t.append(mido.Message("note_off", note=n, velocity=0, channel=0, time=480))
         mid.tracks.append(t)
@@ -755,8 +778,8 @@ class TestMultiRailMidi:
         instruments, rail_data = midi_to_multi_rail_tick_data(mid)
         assert instruments == ["bass"]
         bass = rail_data[0]
-        # With the optimal +1 octave shift the notes land at MIDI 48-60,
-        # pitch 7-19 within the bass rail — none dropped.
+        # 38 and 40 (< 41) fold up +1 octave to 50/52, joined by 43 and 48 —
+        # all four land as distinct pitches within the bass rail, none dropped.
         used = [p for p in range(SPEAKER_COUNT) if any(tick[p] > 0 for tick in bass)]
         assert len(used) == 4, f"expected all 4 bass notes kept, got {used}"
 
@@ -795,6 +818,26 @@ class TestMultiRailMidi:
         used = [p for p in range(SPEAKER_COUNT)
                 if any(t[p] > 0 for t in rail_data[drum_ri])]
         assert used == [0], f"Low beat should be a single kick-1, got {used}"
+
+    def test_below_range_notes_route_to_bass_by_default(self):
+        """Below-range low notes map to a bass rail (accurate instruments).
+
+        By default (map_drums off) a piano channel playing a low note below
+        its range must become a real bass line — preserving the pitch — NOT a
+        kick drum.  The kick-drum map is only the opt-in alternative.
+        """
+        mid = self._make_midi_with_channel([
+            (36, 100, 0, 240, 0),    # low note, below piano range
+            (60, 100, 0, 480, 0),    # melody, in range
+        ])
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        assert instruments == ["piano", "bass"], f"got {instruments}"
+        assert "drum" not in instruments
+        bass_ri = instruments.index("bass")
+        # The low note's pitch is preserved on the bass rail (not converted).
+        used = [p for p in range(SPEAKER_COUNT)
+                if any(t[p] > 0 for t in rail_data[bass_ri])]
+        assert used, "bass rail should carry the low note, got empty"
 
     def test_no_drum_split_for_in_range_melody(self):
         """Notes inside the instrument's range never become drums.
@@ -861,12 +904,12 @@ class TestFindOptimalOctaveShift:
         assert find_optimal_octave_shift(notes, "piano") == -12
 
     def test_celesta_range(self):
-        """Celesta range F4-E7 (65-112) has different optimal shifts."""
+        """Celesta range F5-E9 (77-124) has different optimal shifts."""
         from factorio_display.audio.midi_translator import find_optimal_octave_shift
         # C3-E3 (48-52) — well below celesta range
         notes = [48, 50, 52]
-        # Shift +24: 72,74,76 — in celesta range
-        assert find_optimal_octave_shift(notes, "celesta") == 24
+        # Shift +36: 84,86,88 — in celesta range
+        assert find_optimal_octave_shift(notes, "celesta") == 36
 
     def test_bass_range(self):
         """Bass range F2-E5 (41-88)."""
@@ -917,7 +960,12 @@ class TestGlobalShiftIntegration:
         )
 
     def test_multi_rail_per_instrument_shift(self):
-        """Each instrument rail gets its own optimal global shift."""
+        """Notes outside a channel's real range re-route to a fitting rail.
+
+        Each note goes to the instrument whose real range actually fits it
+        (preferring the channel's instrument); a channel's preferred rail is
+        dropped if every note re-routed away from it.
+        """
         mid = mido.MidiFile(ticks_per_beat=480)
         # Track 0: bass (program 32), notes in C5-C6 (72-84)
         t0 = mido.MidiTrack()
@@ -933,21 +981,12 @@ class TestGlobalShiftIntegration:
             t1.append(mido.Message("note_off", note=n, velocity=0, channel=1, time=480))
         mid.tracks.extend([t0, t1])
 
-        buf = io.StringIO()
-        old_stderr = sys.stderr
-        sys.stderr = buf
-        try:
-            instruments, rail_data = midi_to_multi_rail_tick_data(mid)
-            log_output = buf.getvalue()
-        finally:
-            sys.stderr = old_stderr
-
-        assert len(instruments) == 2
-        # Bass range (41-88): C5-C6 already fits → shift=0
-        # Celesta range (65-112): C3-C4 needs +24 → shift=+24 logged
-        assert "Global octave shift" in log_output
-        # Celesta should have a +24 shift logged
-        assert "[celesta]" in log_output
+        instruments, _ = midi_to_multi_rail_tick_data(mid)
+        # bass 72/76 fit → bass; 79/84 (above E5) → steel-drum.
+        # celesta 48/52 (< F5) → bass; 55/60 → piano (nearest register).
+        # The celesta rail receives nothing and is dropped.
+        assert set(instruments) == {"bass", "steel-drum", "piano"}, \
+            f"got {instruments}"
 
     def test_drum_rail_skips_global_shift(self):
         """Drum rails should not get global shift (they use GM_DRUM_MAP)."""

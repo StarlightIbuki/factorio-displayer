@@ -1032,8 +1032,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                          help="Multi-rail mode: 'piano', 'all', 'auto[:threshold]' (default), or comma-separated instruments.")
     audio_g.add_argument("--instruments", type=str, default=None,
                          help="Deprecated alias for --rail-mode.")
-    audio_g.add_argument("--map-drums", action="store_true", default=True,
-                         help="Map GM drum notes (24-81) to Factorio drum-kit sounds (default: on).")
+    audio_g.add_argument("--map-drums", action="store_true", default=False,
+                         help="Route below-range low notes to a kick drum instead of covering them "
+                              "with the low-pitch bass instrument (default: off — accurate instrument "
+                              "mapping is preferred).")
     audio_g.add_argument("--drum-gain", type=float, default=0.25,
                          help="Volume scale for the drum rail (0-1; default 0.25 — drums sit low "
                          "in the mix and sound more dominating than pitched notes).")
@@ -1540,7 +1542,10 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         # player rail per instrument (multi-rail by default).  MIDI and
         # Basic-Pitch transcriptions may yield several rails (e.g. piano +
         # drum); plain audio falls back to a single piano rail.
-        from .audio.encoder import _audio_rails, encode_audio_to_logical
+        from .audio.encoder import (  # pylint: disable=import-outside-toplevel
+            DRUM_TICKS_PER_PAGE, TICKS_PER_PAGE,
+            _audio_rails, encode_audio_to_logical,
+        )
         from .audio.pitch_mapping import drum_grouping
         from .audio.player_blueprint import build_multi_rail_decoder_logical
         from . import SIGNAL_POOL, QUALITIES  # pylint: disable=import-outside-toplevel
@@ -1563,6 +1568,20 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             else:
                 active_drum_pitches.append(None)
 
+        # Drum rails only record each used drum's loudness (1 cell/tick), so
+        # their pages can span many more ticks per DC than the 60-tick melodic
+        # pages — far fewer DCs for the same song.  Clamp to the signal pool.
+        rail_ticks_per_page: list[int] = []
+        for ri, inst in enumerate(instruments):
+            if "drum" in inst.lower():
+                cpt = len(drum_grouping(active_drum_pitches[ri])) if active_drum_pitches[ri] else 1
+                max_page = (len(SIGNAL_POOL) * len(QUALITIES)) // max(1, cpt)
+                rail_ticks_per_page.append(
+                    max(TICKS_PER_PAGE, min(DRUM_TICKS_PER_PAGE, max_page))
+                )
+            else:
+                rail_ticks_per_page.append(TICKS_PER_PAGE)
+
         mem_lbs: list[LogicalBlueprint] = []
         for ri, int_data in enumerate(int_data_list):
             grouping = (
@@ -1574,6 +1593,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
                 signal_pool=list(SIGNAL_POOL), qualities=list(QUALITIES),
                 clock_signal="signal-clock", id_prefix=f"r{ri}_",
                 grouping=grouping,
+                ticks_per_page=rail_ticks_per_page[ri],
             )
             mem.label = f"Audio Memory {ri}"
             mem_lbs.append(mem)
@@ -1612,6 +1632,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             clock_signal="signal-clock",
             map_drums=getattr(args, "map_drums", True),
             active_drum_pitches=active_drum_pitches,
+            ticks_per_page=rail_ticks_per_page,
         )
         components.append(player_lb)
         connections.append(PortConnection("Timer", "clock", player_lb.label, "clock"))

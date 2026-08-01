@@ -40,7 +40,7 @@ INSTRUMENT_MIDI_BASES: dict[str, int] = {
     "saw": 41,         # F2-E6  (41-88)  — synth saw, low
     "square": 41,      # F2-E6  (41-88)  — synth square, low
     "steel-drum": 53,  # F3-E7  (53-100) — low-mid
-    "celesta": 65,     # F4-E7  (65-112)
+    "celesta": 77,     # F5-E9  (77-124) — high, covers celesta F5-E8
     "vibraphone": 77,  # F5-E9  (77-124) — high, above piano
     "plucked": 65,     # F4-E7  (65-112)
     "drum": 53,        # F3-E7  (53-100) — only first 17 slots used when map_drums
