@@ -123,7 +123,6 @@ Convenience wrapper around `build_multi_rail_decoder(instruments=[instrument])`.
 | 24     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
 | 22     | Lookup CCs       | sub-tick entries (t=0→60)      |
 | 20     | Match DCs        | `each==signal-M → signal=1`    |
-| 18     | Match0 DCs       | `signal-M==0 ∧ each==60 → 1`   |
 | 16     | Selector ACs     | `each(red)*each(green)→bell`   |
 | 16     | Page port (col12)| Constant combinator input      |
 | 14     | l1 AC            | `bell >> 21`                   |

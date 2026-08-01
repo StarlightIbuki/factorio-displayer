@@ -254,7 +254,7 @@ The audio decoder drives a 48-speaker matrix (12 semitones × 4 octaves, F3–E7
 
 1.  **Modulo AC:** `clock % 60 → signal-M` — produces a sub-tick index (0–59) that cycles every 60 ticks.
 2.  **Lookup CCs:** 12 constant combinators store the packed audio data for all 720 cells of the current page, keyed by sub-tick.
-3.  **Match DCs:** `each == signal-M → signal=1` — for sub-ticks 1–59, the cell whose signal matches the current sub-tick outputs 1. A separate set of match0 DCs handles sub-tick 0 (since Factorio drops 0-value signals).
+3.  **Match DCs:** `each == signal-M → signal=1` — the cell whose signal matches the current sub-tick outputs 1. Sub-tick 0 of each page plays nothing (its CC value would be 0, which Factorio drops from the network), so each page's first tick is silent by design.
 4.  **Selector ACs:** `each(red) × each(green) → bell` — multiplies the memory page data (red wire) by the match output (green wire), isolating the packed integer for the current sub-tick onto the `bell` bus.
 5.  **Unpacker AC chain (6 per channel):** Extracts the four 7-bit loudness values from the packed `bell` signal via bit-shifts and masks:
     - `l1 = bell >> 21`

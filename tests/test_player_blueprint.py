@@ -53,7 +53,7 @@ class TestBuildAudioDecoder:
         assert bp.label == "My Piano"
 
     def test_entity_counts(self, audio_decoder_bp_str, audio_decoder_bp):
-        """48 speakers + 85 ACs + 24 DCs + 13 CCs = 170 entities."""
+        """48 speakers + 85 ACs + 12 DCs + 13 CCs = 158 entities."""
         bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
         ariths = _get_entities_by_type(bp, "arithmetic-combinator")
@@ -61,9 +61,9 @@ class TestBuildAudioDecoder:
         ccs = _get_entities_by_type(bp, "constant-combinator")
         assert len(speakers) == 48
         assert len(ariths) == 85     # 7perCh×12 + 1mod
-        assert len(dcs) == 24        # 2perCh (match + match0)
+        assert len(dcs) == 12        # 1perCh (match only)
         assert len(ccs) == 13        # 1perCh lookup + 1 port
-        assert len(bp.entities) == 170
+        assert len(bp.entities) == 158
 
         # ── logical-blueprint validation ──────────────────────────
         from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
@@ -71,7 +71,7 @@ class TestBuildAudioDecoder:
         assert result["errors"] == [], (
             f"Logical-blueprint validation failed: {result['errors']}"
         )
-        assert result["entity_count"] == 170
+        assert result["entity_count"] == 158
 
     def test_unpacker_positions_compact(self, audio_decoder_bp):
         """Unpackers should be directly below match DCs at y>=4."""
@@ -191,10 +191,10 @@ class TestBuildAudioDecoder:
     def test_lut_cc_values_are_nonzero(self, audio_decoder_bp):
         """All lookup CC entries must have non-zero values.
 
-        Factorio drops signals with value 0 from the circuit network,
-        which would make sub_tick=0 CC entries invisible to match DCs.
-        The t=0 entry uses value 60 (non-zero) and is matched by the
-        match0 DC (sub_tick==0 AND each==60).
+        Factorio drops signals with value 0 from the circuit network, so the
+        lookup CC stores 1..60 (never 0).  Sub-tick 0 (page tick 0) is left
+        silent: with no match0 row, the normal match DC (each == signal-M)
+        selects ticks 1..59 and tick 0 simply plays nothing.
         """
         bp = audio_decoder_bp
         ccs = _get_entities_by_type(bp, "constant-combinator")

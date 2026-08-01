@@ -876,18 +876,10 @@ def _encode_midi(
                 "red", "mod", last_ep.first_match_id,
                 side_1="output", side_2="input",
             )
-            combined.add_circuit_connection(
-                "red", "mod", last_ep.first_match0_id,
-                side_1="output", side_2="input",
-            )
             for ri in range(num_rails - 1, 0, -1):
                 prev = endpoints[ri - 1]
                 combined.add_circuit_connection(
                     "red", f"r{ri}_ch0_match", prev.first_match_id,
-                    side_1="input", side_2="input",
-                )
-                combined.add_circuit_connection(
-                    "red", f"r{ri}_ch0_match0", prev.first_match0_id,
                     side_1="input", side_2="input",
                 )
 

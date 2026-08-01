@@ -6,7 +6,6 @@ Decoder pipeline (top → bottom, y descending)
   y=22   Modulo AC: sub_tick = clock % 60  (AC, 1×2)
   y=22   Lookup CCs (cols 0..11): all sub-ticks   (CC, 1×1)
   y=20   Match DCs: each(green) == sub_tick(red) → signal=1  (DC, 1×2)
-  y=18   Match0 DCs: sub_tick==0 ∧ each==60 → signal=1  (DC, 1×2) — t=0 fallback
   y=16   Page port + Selector ACs: each(red)*each(green) → bell  (AC, 1×2)
   y=14   Unpacker: l1 = bell >> 21  (AC, 1×2)
   y=12   Unpacker: s2 = bell >> 14  (AC, 1×2)
@@ -208,7 +207,6 @@ MOD_X = 12          # modulo AC X (relative to rail origin, or absolute for shar
 MOD_Y = 24          # modulo AC Y — separate row above LUT to avoid overlap
 LUT_Y = 22          # lookup CCs Y
 MATCH_Y = 20        # match DCs Y (each == sub_tick)
-MATCH0_Y = 18       # match0 DCs Y (sub_tick==0 ∧ each==60 — t=0 fallback)
 SEL_Y = 16          # selector ACs Y + page port
 UNP_L1_Y = 14       # l1 = bell >> 21
 UNP_S2_Y = 12       # s2 = bell >> 14
@@ -232,7 +230,6 @@ class _RailEndpoints:
     """Wiring endpoints produced by ``_build_rail`` for cross-rail chaining."""
     def __init__(self):
         self.first_match_id: str = ""     # ch11_match (receives sub_tick on red)
-        self.first_match0_id: str = ""    # ch11_match0 (receives sub_tick on red)
         self.first_sel_id: str = ""       # ch11_sel (receives page data on red)
         self.last_sel_id: str = ""        # ch0_sel (for daisy-chain out)
         self.port_id: str = ""            # page_port CC
@@ -352,26 +349,8 @@ def _build_rail(
         ]
         blueprint.entities.append(dc)
 
-        # -- Match0 DC --
-        dc0 = new_entity("decider-combinator", id=f"{base_id}_match0",
-                         tile_position=(col, MATCH0_Y))
-        dc0.conditions = [
-            dc0.Condition(
-                first_signal=SUB_TICK_SIG, comparator="=", constant=0,
-            ),
-            dc0.Condition(
-                first_signal="signal-each", comparator="=", constant=60,
-                compare_type="and",
-            ),
-        ]
-        dc0.outputs = [
-            dc0.Output(signal="signal-each", copy_count_from_input=False, constant=1)
-        ]
-        blueprint.entities.append(dc0)
-
-        # CC → both match DCs (green)
+        # CC → match DC (green)
         blueprint.add_circuit_connection("green", f"{base_id}_lut", f"{base_id}_match")
-        blueprint.add_circuit_connection("green", f"{base_id}_lut", f"{base_id}_match0")
 
         # -- Selector AC --
         ac_sel = new_entity("arithmetic-combinator", id=f"{base_id}_sel",
@@ -384,13 +363,9 @@ def _build_rail(
         )
         blueprint.entities.append(ac_sel)
 
-        # Match DCs → selector AC (green)
+        # Match DC → selector AC (green)
         blueprint.add_circuit_connection(
             "green", f"{base_id}_match", f"{base_id}_sel",
-            side_1="output", side_2="input",
-        )
-        blueprint.add_circuit_connection(
-            "green", f"{base_id}_match0", f"{base_id}_sel",
             side_1="output", side_2="input",
         )
 
@@ -500,16 +475,6 @@ def _build_rail(
             "red", f"{prefix}ch{ch}_match", f"{prefix}ch{ch-1}_match",
             side_1="input", side_2="input",
         )
-    # Same for match0
-    blueprint.add_circuit_connection(
-        "red", f"{prefix}ch11_match0", f"{prefix}ch10_match0",
-        side_1="input", side_2="input",
-    )
-    for ch in range(10, 0, -1):
-        blueprint.add_circuit_connection(
-            "red", f"{prefix}ch{ch}_match0", f"{prefix}ch{ch-1}_match0",
-            side_1="input", side_2="input",
-        )
 
     # Page data within this rail (red): port → ch11_sel → … → ch0_sel
     blueprint.add_circuit_connection(
@@ -523,7 +488,6 @@ def _build_rail(
 
     # Record endpoints
     ep.first_match_id = f"{prefix}ch11_match"
-    ep.first_match0_id = f"{prefix}ch11_match0"
     ep.first_sel_id = f"{prefix}ch11_sel"
     ep.last_sel_id = f"{prefix}ch0_sel"
     ep.last_speaker_id = ep.speaker_ids.get((rail_x + 11, SPK_Y + 0), "")
@@ -644,10 +608,6 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
         "red", "mod", last_ep.first_match_id,
         side_1="output", side_2="input",
     )
-    blueprint.add_circuit_connection(
-        "red", "mod", last_ep.first_match0_id,
-        side_1="output", side_2="input",
-    )
     # Chain sub_tick from rail R to rail R-1
     for ri in range(num_rails - 1, 0, -1):
         prev = endpoints[ri - 1]
@@ -655,10 +615,6 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
         # Connect ch0_match of rail R to ch11_match of rail R-1
         blueprint.add_circuit_connection(
             "red", f"r{ri}_ch0_match", prev.first_match_id,
-            side_1="input", side_2="input",
-        )
-        blueprint.add_circuit_connection(
-            "red", f"r{ri}_ch0_match0", prev.first_match0_id,
             side_1="input", side_2="input",
         )
 
@@ -827,29 +783,6 @@ def _build_rail_logical(
             position=(col, MATCH_Y),
         ))
 
-        # Match0 DC (handles sub_tick 0 — value-0 fallback)
-        # Both conditions are AND-ed: sub_tick == 0 AND each == 60.  The
-        # explicit compare_type is required because the draftsman default is
-        # 'or' and the serializer's condition fixer must not turn this into
-        # (sub_tick == 0) OR (each == 60) — which would fire every tick since
-        # the lookup CC always outputs value 60 for the t=0 slots (the beep).
-        match0_id = f"{base_id}_match0"
-        lb.add_entity(LogicalEntity(
-            entity_id=match0_id,
-            type="decider-combinator",
-            properties={
-                "conditions": [
-                    {"first": "signal-M", "op": "=", "constant": 0},
-                    {"first": "signal-each", "op": "=", "constant": 60,
-                     "compare_type": "and"},
-                ],
-                "outputs": [
-                    {"signal": "signal-each", "copy_count": False, "constant": 1},
-                ],
-            },
-            position=(col, MATCH0_Y),
-        ))
-
         # Selector AC: each(red) * each(green) → bell
         sel_id = f"{base_id}_sel"
         lb.add_entity(LogicalEntity(
@@ -897,13 +830,11 @@ def _build_rail_logical(
         out_order = [uid_l1, uid_l2, uid_l3, uid_l4]
 
         # ── Per-channel networks ──────────────────────────────
-        # CC → match DCs (green)
+        # CC → match DC (green)
         lb.connect("green", Endpoint(cc_id, "output"), Endpoint(match_id, "input"))
-        lb.connect("green", Endpoint(cc_id, "output"), Endpoint(match0_id, "input"))
 
-        # Match DCs → selector AC (green)
+        # Match DC → selector AC (green)
         lb.connect("green", Endpoint(match_id, "output"), Endpoint(sel_id, "input"))
-        lb.connect("green", Endpoint(match0_id, "output"), Endpoint(sel_id, "input"))
 
         # Selector → first unpacker (green, bell signal)
         lb.connect("green", Endpoint(sel_id, "output"), Endpoint(uid_l1, "input"))
@@ -933,7 +864,6 @@ def _build_rail_logical(
     # Sub-tick red bus: ch11_match → ch10_match → … → ch0_match
     for ch in range(11, 0, -1):
         lb.connect("red", Endpoint(f"{prefix}ch{ch}_match", "input"), Endpoint(f"{prefix}ch{ch-1}_match", "input"))
-        lb.connect("red", Endpoint(f"{prefix}ch{ch}_match0", "input"), Endpoint(f"{prefix}ch{ch-1}_match0", "input"))
 
     # Page data red bus: port → ch11_sel → … → ch0_sel
     lb.connect("red", Endpoint(port_id, "output"), Endpoint(f"{prefix}ch11_sel", "input"))
@@ -942,13 +872,11 @@ def _build_rail_logical(
 
     # Mod → last match (red, sub_tick injection)
     lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch11_match", "input"))
-    lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch11_match0", "input"))
 
     # Clock green bus: all ports → mod
     lb.connect("green", Endpoint(port_id, "input"), Endpoint(mod_id, "input"))
 
     ep.first_match_id = f"{prefix}ch11_match"
-    ep.first_match0_id = f"{prefix}ch11_match0"
     ep.last_sel_id = f"{prefix}ch0_sel"
     return ep
 

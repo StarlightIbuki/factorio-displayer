@@ -138,9 +138,8 @@ def _fix_conditions_in_dict(d: dict) -> None:
     This walks every decider combinator in the blueprint dict and ensures
     that within-range pairs carry ``"and"`` while inter-range boundaries
     carry ``"or"``.  Conditions that already carry an explicit
-    ``compare_type`` are left untouched — e.g. the audio player's
-    ``match0`` t=0 fallback, which needs ``signal-M == 0 AND each == 60``
-    (two ``=`` conditions joined by AND, not OR).
+    ``compare_type`` are left untouched — so a builder can express a
+    deliberate AND/OR combination and it is not rewritten by this pass.
     """
     for entity in d.get("blueprint", {}).get("entities", []):
         cb = entity.get("control_behavior", {})
