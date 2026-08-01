@@ -711,12 +711,24 @@ def _midi_rails(
                         for tick in float_data
                     ])
 
-    # Persist the freshly-computed tick data (only non-empty results).
+    # ── Persist the freshly-computed tick data (pre-gain, normalized) ──
     if _cached is None:
         cache_json_put("audio_encode", _ckey, {
             "instruments": instruments,
             "data": int_data_list,
         })
+
+    # ── Per-rail gain: drums are percussive and quickly mask melodic rails ──
+    # Applied AFTER cache retrieval so the cached data stays pre-gain and the
+    # gain is never double-applied on a cache hit.
+    drum_gain = float(kwargs.get("drum_gain", 0.6))
+    if drum_gain != 1.0:
+        for ri, inst in enumerate(instruments):
+            if "drum" in inst.lower():
+                int_data_list[ri] = [
+                    [max(0, min(100, int(round(v * drum_gain)))) for v in tick]
+                    for tick in int_data_list[ri]
+                ]
 
     return instruments, int_data_list
 

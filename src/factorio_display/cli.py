@@ -969,6 +969,8 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                          help="Deprecated alias for --rail-mode.")
     audio_g.add_argument("--map-drums", action="store_true", default=True,
                          help="Map GM drum notes (24-81) to Factorio drum-kit sounds (default: on).")
+    audio_g.add_argument("--drum-gain", type=float, default=0.6,
+                         help="Volume scale for the drum rail (0-1; default 0.6 so drums don't mask the melody).")
     audio_g.add_argument("--no-global-shift", action="store_true", default=False,
                          help="Disable optimal global octave shift.")
 
@@ -1433,6 +1435,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
     midi_kwargs: dict[str, object] = {
         "attach_player": not getattr(args, "no_attach_player", False),
         "map_drums": getattr(args, "map_drums", True),
+        "drum_gain": getattr(args, "drum_gain", 0.6),
         "rail_mode": rail_mode,
         "use_global_shift": not getattr(args, "no_global_shift", False),
         "ticks_per_beat": getattr(args, "ticks_per_beat", 30),

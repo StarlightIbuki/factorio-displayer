@@ -202,20 +202,20 @@ _patch_instrument_notes()
 TICKS_PER_PAGE = 60                      # decoder uses clock % 60
 
 PORT_X = 12         # page input port X (relative to rail origin)
-PORT_Y = 16         # page input port Y — same row as selectors
+PORT_Y = 18         # page input port Y — same row as selectors
 MOD_X = 12          # modulo AC X (relative to rail origin, or absolute for shared)
 MOD_Y = 24          # modulo AC Y — separate row above LUT to avoid overlap
 LUT_Y = 22          # lookup CCs Y
 MATCH_Y = 20        # match DCs Y (each == sub_tick)
-SEL_Y = 16          # selector ACs Y + page port
-UNP_L1_Y = 14       # l1 = bell >> 21
-UNP_S2_Y = 12       # s2 = bell >> 14
-UNP_L2_Y = 10       # l2 = s2 & 127
-UNP_S3_Y = 8        # s3 = bell >> 7
-UNP_L3_Y = 6        # l3 = s3 & 127
-UNP_L4_Y = 4        # l4 = bell & 127
-SPK_Y = 0           # speaker grid (4 rows: 0..3)
-DEBUG_Y = -4        # debug lamp row offset below speakers (4 rows: -4..-1)
+SEL_Y = 18          # selector ACs Y + page port
+UNP_L1_Y = 16       # l1 = bell >> 21
+UNP_S2_Y = 14       # s2 = bell >> 14
+UNP_L2_Y = 12       # l2 = s2 & 127
+UNP_S3_Y = 10       # s3 = bell >> 7
+UNP_L3_Y = 8        # l3 = s3 & 127
+UNP_L4_Y = 6        # l4 = bell & 127
+SPK_Y = 2           # speaker grid (4 rows: 2..5)
+DEBUG_Y = -2        # debug lamp row offset below speakers (4 rows: -2..1)
 
 SUB_TICK_SIG = "signal-M"
 BELL_SIG = "signal-B"

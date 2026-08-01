@@ -137,7 +137,8 @@ class TestBuildAudioDecoder:
             assert spk.volume_controlled_by_signal is True
 
     def test_speaker_grid_dimensions(self, audio_decoder_bp):
-        """Speakers should span 12 columns × 4 rows."""
+        """Speakers should span 12 columns × 4 rows (starting at SPK_Y)."""
+        from factorio_display.audio.player_blueprint import SPK_Y  # pylint: disable=import-outside-toplevel
         bp = audio_decoder_bp
         speakers = _get_entities_by_type(bp, "programmable-speaker")
 
@@ -145,8 +146,8 @@ class TestBuildAudioDecoder:
         ys = {spk.tile_position[1] for spk in speakers}
         assert min(xs) == 0
         assert max(xs) == 11  # 12 columns
-        assert min(ys) == 0
-        assert max(ys) == 3   # 4 rows
+        assert min(ys) == SPK_Y
+        assert max(ys) == SPK_Y + 3   # 4 rows
 
     @pytest.mark.parametrize("instrument,expected", [
         ("piano", "piano"),
