@@ -69,17 +69,71 @@ _MIDI_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", 
 RAIL_WIDTH = 13  # 12 channel columns + 1 page_port column
 
 
+def _extend_instrument_in_place(
+    inst_data: Any,
+    entity_name: str,
+    name: str,
+    missing_notes: list[str],
+) -> None:
+    """Append *missing_notes* to the existing *name* instrument entry.
+
+    Unlike :func:`draftsman.data.instruments.add_instrument` — which appends
+    a *brand-new* instrument entry at a fresh index (12+), breaking Factorio's
+    fixed 0-11 instrument IDs — this extends the existing entry's note list
+    and updates Draftsman's lookup tables in place, so the instrument keeps
+    its original index (piano=3, bass=4, celesta=8, plucked=10, drum-kit=2).
+    """
+    raw = inst_data.raw
+    entries = raw.get(entity_name, [])
+    idx = None
+    for i, e in enumerate(entries):
+        if isinstance(e, dict) and e.get("name") == name:
+            idx = i
+            break
+    if idx is None:
+        return
+
+    notes = entries[idx].setdefault("notes", [])
+    existing_names = {
+        n["name"] for n in notes if isinstance(n, dict) and "name" in n
+    }
+    new_notes = [n for n in missing_notes if n not in existing_names]
+    if not new_notes:
+        return
+
+    notes.extend({"name": n} for n in new_notes)
+
+    # Draftsman's note indices are 0..len(notes)-1 within the instrument.
+    start = len(notes) - len(new_notes)
+
+    io = dict(inst_data.index_of.get(entity_name, {}).get(name, {"self": idx}))
+    io["self"] = idx
+    for k, note in enumerate(new_notes, start=start):
+        io[note] = k
+    inst_data.index_of.setdefault(entity_name, {})[name] = io
+
+    no = dict(inst_data.name_of.get(entity_name, {}).get(idx, {"self": name}))
+    no["self"] = name
+    for k, note in enumerate(new_notes, start=start):
+        no[k] = note
+    inst_data.name_of.setdefault(entity_name, {})[idx] = no
+
+
 def _patch_instrument_notes() -> None:
     """Extend Draftsman's instrument note lists to cover the full 48-note
-    speaker window for each instrument we use.
+    speaker window for each instrument we use — *in place*, preserving each
+    instrument's original Factorio index (0-11).
 
-    Draftsman validates note names against each instrument's prototype
-    note list and silently rejects (sets to ``None``) any name not found.
-    Factorio itself allows any pitch on any instrument, so this patching
-    is safe — it just teaches Draftsman about the notes we need.
+    Draftsman validates note names against each instrument's prototype note
+    list and silently rejects (sets to ``None``) any name not found.
+    Factorio itself allows any pitch on any instrument, so extending the note
+    list is safe — it just teaches Draftsman about the notes we need.
 
-    Uses :func:`draftsman.data.instruments.add_instrument` to properly
-    reindex the internal lookup tables.
+    .. note::
+       Uses :func:`_extend_instrument_in_place` (not ``add_instrument``).
+       ``add_instrument`` appends a duplicate instrument at index 12+, which
+       Factorio does not recognise — speakers pointing at it silently fall
+       back to the default "alarm" sound.
     """
     import draftsman.data.instruments as _inst_data
 
@@ -100,18 +154,30 @@ def _patch_instrument_notes() -> None:
             if isinstance(n, dict) and "name" in n
         }
 
-        midi_base = INSTRUMENT_MIDI_BASES.get(name, 53)
-        all_needed = [
-            _pitch_index_to_factorio_note(pid, midi_base=midi_base)
-            for pid in range(SPEAKER_COUNT)
-        ]
+        if name == "drum-kit":
+            # Drum-rail speakers use drum-sound note names, but the
+            # map_drums=False fallback (build_audio_decoder(instrument="drum"))
+            # uses pitch notes — teach Draftsman both.
+            midi_base = INSTRUMENT_MIDI_BASES.get(name, 53)
+            all_needed = list(DRUM_KIT_NOTES) + [
+                _pitch_index_to_factorio_note(pid, midi_base=midi_base)
+                for pid in range(SPEAKER_COUNT)
+            ]
+        else:
+            midi_base = INSTRUMENT_MIDI_BASES.get(name, 53)
+            all_needed = [
+                _pitch_index_to_factorio_note(pid, midi_base=midi_base)
+                for pid in range(SPEAKER_COUNT)
+            ]
 
-        if set(all_needed) <= existing:
+        missing = [n for n in all_needed if n not in existing]
+        if not missing:
             continue  # already complete
 
-        _inst_data.add_instrument(
-            name, all_needed, entity_name="programmable-speaker",
+        _extend_instrument_in_place(
+            _inst_data, "programmable-speaker", name, missing,
         )
+
 
 
 def _pitch_index_to_factorio_note(pitch_idx: int, midi_base: int = 53) -> str:
