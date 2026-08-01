@@ -218,8 +218,12 @@ def validate_logical_connectivity(
     lb2 = from_draftsman(bp)
 
     # ── 2. Collect materialised wires by colour ───────────────────
-    # Build adjacency: (entity_id, colour) → set of (entity_id, port)
-    adj: dict[str, dict[str, set[tuple[str, str]]]] = {}  # eid → {colour: {(other_eid, port), …}}
+    # Build endpoint-aware adjacency: (colour, (entity_id, port)) → set of
+    # (other_entity_id, other_port).  A materialised wire always joins a
+    # specific endpoint (entity_id + port) on one colour.  Using entity ids
+    # alone would misattribute wires for entities that participate in
+    # multiple logical networks of the same colour via different ports.
+    adj: dict[tuple[str, tuple[str, str]], set[tuple[str, str]]] = {}
     wire_count = 0
 
     for w in getattr(bp, "wires", []):
@@ -232,11 +236,13 @@ def validate_logical_connectivity(
         wt1 = conn1.value if hasattr(conn1, "value") else int(conn1)
         wt2 = conn2.value if hasattr(conn2, "value") else int(conn2)
         colour = "red" if wt1 % 2 == 1 else "green"
-        side1 = "input" if wt1 <= 2 else "output"
-        side2 = "input" if wt2 <= 2 else "output"
+        side1 = "input" if wt1 in (1, 2) else "output"
+        side2 = "input" if wt2 in (1, 2) else "output"
 
-        adj.setdefault(eid1, {}).setdefault(colour, set()).add((eid2, side2))
-        adj.setdefault(eid2, {}).setdefault(colour, set()).add((eid1, side1))
+        ep1 = (eid1, side1)
+        ep2 = (eid2, side2)
+        adj.setdefault((colour, ep1), set()).add(ep2)
+        adj.setdefault((colour, ep2), set()).add(ep1)
         wire_count += 1
 
     # ── 3. Wire distance feasibility ─────────────────────────────
@@ -269,29 +275,29 @@ def validate_logical_connectivity(
         if net.color == "copper":
             continue  # power networks use neighbour lists, not circuit wires
 
-        # Collect entity IDs in this logical network
-        net_eids: set[str] = {ep.entity_id for ep in net.endpoints}
+        # A logical network is defined by its (entity_id, port) endpoints.
+        net_eps: set[tuple[str, str]] = {(ep.entity_id, ep.port) for ep in net.endpoints}
+        if not net_eps:
+            continue
 
-        # Find the connected component(s) covering these entities
-        # in the materialised wires
-        visited: set[str] = set()
-        components: list[set[str]] = []
+        visited: set[tuple[str, str]] = set()
+        components: list[set[tuple[str, str]]] = []
 
-        for eid in net_eids:
-            if eid in visited:
+        for ep in net_eps:
+            if ep in visited:
                 continue
-            # BFS
-            stack = [eid]
-            comp: set[str] = set()
+            # BFS over endpoint nodes
+            stack = [ep]
+            comp: set[tuple[str, str]] = set()
             while stack:
                 cur = stack.pop()
                 if cur in visited:
                     continue
                 visited.add(cur)
                 comp.add(cur)
-                for neighbour, _port in adj.get(cur, {}).get(net.color, set()):
-                    if neighbour not in visited:
-                        stack.append(neighbour)
+                for nb in adj.get((net.color, cur), set()):
+                    if nb in net_eps and nb not in visited:
+                        stack.append(nb)
             components.append(comp)
 
         if len(components) == 0:
@@ -310,11 +316,11 @@ def validate_logical_connectivity(
             )
 
     # ── 5. No cross-network wire leaks ───────────────────────────
-    # Build lookup: (eid, colour) → logical network id
-    eid_colour_to_net: dict[tuple[str, str], str] = {}
+    # Build lookup: (colour, entity_id, port) → logical network id
+    ep_colour_to_net: dict[tuple[str, str, str], str] = {}
     for net in lb.networks:
         for ep in net.endpoints:
-            eid_colour_to_net[(ep.entity_id, net.color)] = net.network_id
+            ep_colour_to_net[(net.color, ep.entity_id, ep.port)] = net.network_id
 
     for w in getattr(bp, "wires", []):
         assoc1, conn1, assoc2, conn2 = w
@@ -323,13 +329,16 @@ def validate_logical_connectivity(
         eid1 = getattr(e1, "id", None) or f"_e{id(e1)}"
         eid2 = getattr(e2, "id", None) or f"_e{id(e2)}"
         wt1 = conn1.value if hasattr(conn1, "value") else int(conn1)
+        wt2 = conn2.value if hasattr(conn2, "value") else int(conn2)
         colour = "red" if wt1 % 2 == 1 else "green"
+        side1 = "input" if wt1 in (1, 2) else "output"
+        side2 = "input" if wt2 in (1, 2) else "output"
 
-        net1 = eid_colour_to_net.get((eid1, colour))
-        net2 = eid_colour_to_net.get((eid2, colour))
+        net1 = ep_colour_to_net.get((colour, eid1, side1))
+        net2 = ep_colour_to_net.get((colour, eid2, side2))
         if net1 is not None and net2 is not None and net1 != net2:
             errors.append(
-                f"Wire {eid1!r} ↔ {eid2!r} ({colour}) leaks between "
+                f"Wire {eid1!r}:{side1} ↔ {eid2!r}:{side2} ({colour}) leaks between "
                 f"networks {net1!r} and {net2!r}"
             )
 

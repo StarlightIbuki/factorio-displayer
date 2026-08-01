@@ -164,6 +164,33 @@ class TestLogicalBlueprint:
         assert dst.entities["m_x"].position == (11, -1)
         assert dst.entities["m_y"].position is None
 
+    def test_merge_preserves_ports_and_network_prefix(self):
+        """Merging should preserve prefixed ports and remap their network ids."""
+        src = LogicalBlueprint()
+        src.add_entity(LogicalEntity("x", "arithmetic-combinator"))
+        src.add_network(Network(
+            "red_0", "red", endpoints={Endpoint("x", "output")}
+        ))
+        src.set_output_port("data", "red_0")
+
+        dst = LogicalBlueprint()
+        dst.merge(src, entity_prefix="m_", network_prefix="m_", port_prefix="m_")
+
+        assert dst.output_ports == {"m_data": "m_red_0"}
+        assert len(dst.networks) == 1
+        assert dst.networks[0].network_id == "m_red_0"
+        assert Endpoint("m_x", "output") in dst.networks[0].endpoints
+
+    def test_merge_raises_on_duplicate_entity_id(self):
+        """Merging with a prefix that collides with an existing entity id raises."""
+        dst = LogicalBlueprint()
+        dst.add_entity(LogicalEntity("x", "arithmetic-combinator"))
+        src = LogicalBlueprint()
+        src.add_entity(LogicalEntity("x", "arithmetic-combinator"))
+
+        with pytest.raises(ValueError, match="already exists after prefix"):
+            dst.merge(src, entity_prefix="")
+
     def test_connect_merge_preserves_prewired_with_single_bridge(self):
         lb = LogicalBlueprint()
         for eid in ("a0", "a1", "b0", "b1"):

@@ -293,3 +293,48 @@ class TestEncodeAudioToLogical:
         data_net = next(n for n in lb.networks if n.network_id == lb.output_ports["data"])
         assert clock_net.color == "green"
         assert data_net.color == "red"
+
+
+class TestEncodeAudioCache:
+    """The audio-analysis cache should skip re-translation and be correct."""
+
+    @pytest.fixture()
+    def tiny_midi(self, tmp_path):
+        """Create a small MIDI file with three simultaneous notes."""
+        import mido
+
+        mid = mido.MidiFile(ticks_per_beat=480)
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
+        track.append(mido.Message("program_change", program=0, time=0))
+        for note in [60, 64, 67]:
+            track.append(mido.Message("note_on", note=note, velocity=80, time=0))
+            track.append(mido.Message("note_off", note=note, velocity=0, time=480))
+        p = tmp_path / "cache_test.mid"
+        mid.save(str(p))
+        return p
+
+    def test_midi_auto_encode_hits_cache(self, tiny_midi, capsys):
+        """Re-encoding the same MIDI must hit the tick-data cache and return
+        an identical blueprint."""
+        from factorio_display.audio.encoder import encode_audio_auto
+
+        r1 = encode_audio_auto(str(tiny_midi), attach_player=False)
+        err1 = capsys.readouterr().err
+        assert r1, "first encode produced no output"
+
+        r2 = encode_audio_auto(str(tiny_midi), attach_player=False)
+        err2 = capsys.readouterr().err
+        assert r2 == r1, "cached re-encode produced a different blueprint"
+        assert "from cache" in err2
+        assert "from cache" not in err1
+
+    def test_cache_invalidated_when_options_change(self, tiny_midi):
+        """Changing a translation option must produce a different cache key."""
+        from factorio_display.audio.encoder import encode_audio_auto
+
+        r1 = encode_audio_auto(str(tiny_midi), attach_player=False,
+                               ticks_per_beat=30)
+        r2 = encode_audio_auto(str(tiny_midi), attach_player=False,
+                               ticks_per_beat=60)
+        assert r1 and r2

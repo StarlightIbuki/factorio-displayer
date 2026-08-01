@@ -249,14 +249,13 @@ class LogicalBlueprint:
         src: str | None = None,
     ) -> None:
         """Add a network.  Raises if *network_id* already exists."""
-        if not is_trace_enabled():
-            src = src or network._debug_src or "unknown"
-        elif src is None:
+        if src is None:
             origin = entity_origin()
             src = origin.source
-            network._debug_src = src
-            network._debug_traceback = origin.traceback
-        elif network._debug_src is None:
+            if is_trace_enabled():
+                network._debug_src = src
+                network._debug_traceback = origin.traceback
+        elif src is not None and network._debug_src is None:
             network._debug_src = src
         if any(n.network_id == network.network_id for n in self.networks):
             raise ValueError(
@@ -754,8 +753,8 @@ class LogicalBlueprint:
                 f"{dst_port!r} ({len(dst_net.endpoints)} eps)"
             )
 
-        ep_src = next(iter(src_net.endpoints))
-        ep_dst = next(iter(dst_net.endpoints))
+        ep_src = src_net.endpoints[0]
+        ep_dst = dst_net.endpoints[0]
         return self.connect(src_net.color, ep_src, ep_dst)
 
 
@@ -1428,6 +1427,30 @@ def _normalise_side(side: Any) -> str:
             return s
     if isinstance(side, int):
         return "input" if side == 0 else "output"
+    return "input"
+
+
+def _physical_wire_side(port: str, entity: Any | None) -> str:
+    """Map a logical *port* to the Factorio wire side for *entity*.
+
+    Dual-circuit entities (decider / arithmetic / selector combinators) have
+    two circuit connection points, so the logical ``"input"`` / ``"output"``
+    ports map to Draftsman's ``"input"`` / ``"output"`` sides (wire values
+    1/2 and 3/4 respectively).
+
+    Every other circuit entity (constant combinators, programmable speakers,
+    lamps, power poles) exposes only a *single* circuit connection point, so
+    both logical ports must map to the ``"input"`` side (wire values 1/2).
+    Writing wire values 3/4 on such an entity is invalid — Factorio silently
+    drops those wires, leaving the entity visually disconnected in-game even
+    though the blueprint data still lists the wire.
+
+    *entity* is the Draftsman entity (queried for its
+    ``dual_circuit_connectable`` property); when None the port is returned
+    unchanged.
+    """
+    if entity is None or getattr(entity, "dual_circuit_connectable", True):
+        return port
     return "input"
 
 
@@ -2112,6 +2135,18 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
         bp.entities.append(de)
 
     # ── 2. Materialise networks → pairwise connections ─────────────
+    # Map entity id → Draftsman entity once so non-dual entities (constant
+    # combinators, speakers, lamps, poles) can be wired on their single
+    # circuit connection point.  See _physical_wire_side().
+    _de_by_id: dict[Any, Any] = {}
+    for _e in bp.entities:
+        _eid = getattr(_e, "id", None)
+        if _eid is not None:
+            _de_by_id[_eid] = _e
+
+    def _wire_side(ep: Endpoint) -> str:
+        return _physical_wire_side(ep.port, _de_by_id.get(ep.entity_id))
+
     for net in lb.networks:
         eps = list(net.endpoints)
         if net.color == "copper":
@@ -2166,7 +2201,7 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
         for a, b in pairs:
             bp.add_circuit_connection(
                 net.color, a.entity_id, b.entity_id,
-                side_1=a.port, side_2=b.port,
+                side_1=_wire_side(a), side_2=_wire_side(b),
             )
 
     return bp
@@ -2187,26 +2222,57 @@ def _str_to_signal_ref(s: str | int) -> dict[str, str] | str | int:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
+def check_wire_topology(
+    bp: Any,
+    *,
+    label: str = "",
+    lb: "LogicalBlueprint | None" = None,
+) -> list[str]:
     """Check low-level wire invariants on a draftsman Blueprint.
 
     Verifies that the explicit ``bp.wires`` list is self-consistent and
     respects Factorio's circuit connection limits.
 
-    Returns a list of error strings.  An empty list means all checks pass.
+    Parameters
+    ----------
+    bp : Blueprint
+        The materialised draftsman blueprint to check.
+    label : str
+        Optional label included in error messages.
+    lb : LogicalBlueprint | None
+        If provided, connectivity is validated per *logical* network
+        instead of colour-globally.  This is important for complex
+        blueprints that contain many separate same-colour networks
+        (e.g. the audio player's column-local lookup buses) which are
+        correct as independent components.
+
+    Returns
+    -------
+    list[str]
+        Error strings.  An empty list means all checks pass.
 
     Invariants checked
     ------------------
-    * No self-loops (wire from an entity to itself).
+    * No self-loops (wire from an entity to itself on the same port).
     * No duplicate wires (same pair of entities, colour, and sides).
-    * Degree bound: each (entity, colour, side) port has ≤ 2 connections
-      (Factorio combinators have exactly two connection points per side
-      per colour).
-    * Wire count sanity: if the blueprint has *N* entities on a colour
-      network with no singleton islands, expect ≥ N−1 edges on that colour.
-    * Connectivity: for each colour, entities that share wire(s) form
-      exactly one connected component per connected subgraph (no orphan
-      islands within a colour unless unavoidable).
+    * Degree bound: each (entity, colour, side) port has ≤ 2 connections.
+    * Per-network connectivity: if *lb* is provided, every logical
+      network's endpoints appear in the materialised wires and form
+      exactly one connected component on that colour.
+    * Colour-global connectivity: if *lb* is not provided, every colour
+      must form exactly one connected component (legacy behaviour for
+      simple blueprints).
+    * Per-network connectivity: if *lb* is provided, every logical
+      network's endpoints appear in the materialised wires and form
+      exactly one connected component on that colour.
+    * Colour-global connectivity: if *lb* is not provided, every colour
+      must form exactly one connected component (legacy behaviour for
+      simple blueprints).
+    * Wire count sanity: if *lb* is not provided, expect at least N−1
+      edges for N connected entities of a colour, and warn on excessive
+      wiring.  When *lb* is provided this check is skipped because
+      intentional same-colour splits (e.g. the audio player) are
+      valid.
     """
     errors: list[str] = []
 
@@ -2214,13 +2280,13 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
     if not wires:
         return errors
 
-    # ── Build adjacency per colour ────────────────────────────────
-    # adj[colour][eid] = set of (other_eid, side_at_other)
-    adj: dict[str, dict[str, set[tuple[str, str]]]] = {}
-    # Degree counter: deg[colour][(eid, side)] = int
-    deg: dict[str, dict[tuple[str, str], int]] = {}
+    # Adjacency keyed by (colour, endpoint) where endpoint is
+    # (entity_id, port).  This is the finest granularity the checker
+    # needs: a logical endpoint is defined by (entity_id, port, colour).
+    adj: dict[tuple[str, tuple[str, str]], set[tuple[str, str]]] = {}
+    # Degree counter per (entity_id, port, colour)
+    deg: dict[tuple[str, str, str], int] = {}
     seen_wires: set[tuple[str, str, str, str, str]] = set()
-    wire_count_by_colour: dict[str, int] = {}
 
     # Build a quick lookup from entity id → formatted source+traceback for
     # richer error messages.
@@ -2247,8 +2313,11 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
         wt1 = conn1.value if hasattr(conn1, "value") else int(conn1)
         wt2 = conn2.value if hasattr(conn2, "value") else int(conn2)
         colour = "red" if wt1 % 2 == 1 else "green"
-        side1 = "input" if wt1 <= 2 else "output"
-        side2 = "input" if wt2 <= 2 else "output"
+        side1 = "input" if wt1 in (1, 2) else "output"
+        side2 = "input" if wt2 in (1, 2) else "output"
+
+        ep1 = (eid1, side1)
+        ep2 = (eid2, side2)
 
         # Self-loop on the *same port* is meaningless (input→input, output→output
         # on the same entity).  Same entity but *different ports* (output→input)
@@ -2271,94 +2340,213 @@ def check_wire_topology(bp: Any, *, label: str = "") -> list[str]:
         seen_wires.add(wire_key)
 
         # Adjacency
-        adj.setdefault(colour, {}).setdefault(eid1, set()).add((eid2, side2))
-        adj.setdefault(colour, {}).setdefault(eid2, set()).add((eid1, side1))
+        adj.setdefault((colour, ep1), set()).add(ep2)
+        adj.setdefault((colour, ep2), set()).add(ep1)
 
         # Degree tracking
-        deg.setdefault(colour, {}).setdefault((eid1, side1), 0)
-        deg.setdefault(colour, {}).setdefault((eid2, side2), 0)
-        deg[colour][(eid1, side1)] += 1
-        deg[colour][(eid2, side2)] += 1
-
-        wire_count_by_colour[colour] = wire_count_by_colour.get(colour, 0) + 1
+        deg_key1 = (eid1, side1, colour)
+        deg_key2 = (eid2, side2, colour)
+        deg[deg_key1] = deg.get(deg_key1, 0) + 1
+        deg[deg_key2] = deg.get(deg_key2, 0) + 1
 
     # ── Degree bound check (Factorio: ≤ 2 per port per colour) ────
-    for colour, colour_deg in deg.items():
-        for (eid, side), d in colour_deg.items():
-            if d > 2:
+    for (eid, side, colour), d in deg.items():
+        if d > 2:
+            errors.append(
+                f"Degree overflow: {_fmt(eid)} {side} on {colour} has "
+                f"{d} connections (max 2)"
+            )
+
+    # ── Connectivity check ───────────────────────────────────────
+    # Prefer network-aware validation when the LogicalBlueprint is
+    # available, because complex components (audio player, video
+    # encoder) intentionally contain many independent same-colour
+    # networks.  The colour-global check would report false positives.
+    if lb is not None:
+        # Map each logical endpoint to its network id.  An entity can be
+        # on multiple logical networks of the same colour via different
+        # ports, so the key is (network_id, entity_id, port) → network id
+        # is redundant; we look up (colour, entity_id, port).
+        ep_to_net: dict[tuple[str, str, str], str] = {}
+        for net in lb.networks:
+            for ep in net.endpoints:
+                # Non-dual entities (constant combinators, speakers, lamps,
+                # poles) expose a single physical connection point, so the
+                # logical port is normalised to the wire side they produce.
+                de = entity_by_id.get(ep.entity_id)
+                phys = _physical_wire_side(ep.port, de)
+                ep_to_net[(net.color, ep.entity_id, phys)] = net.network_id
+
+        # Group endpoint adjacency by logical network.  A wire is only
+        # relevant to network *net* if both of its endpoints belong to
+        # *net*.  If the two endpoints belong to different logical
+        # networks of the same colour, that is a wiring leak/error.
+        net_adj: dict[str, dict[tuple[str, str], set[tuple[str, str]]]] = {}
+        for (colour, ep1), neighbours in adj.items():
+            net1 = ep_to_net.get((colour, ep1[0], ep1[1]))
+            for ep2 in neighbours:
+                net2 = ep_to_net.get((colour, ep2[0], ep2[1]))
+                if net1 is None and net2 is None:
+                    # Neither endpoint is on a known logical network.
+                    # Legacy wire, ignore for the network-aware check.
+                    continue
+                if net1 != net2:
+                    errors.append(
+                        f"Wire leak: {_fmt(ep1[0])}:{ep1[1]} (network {net1!r}) "
+                        f"↔ {_fmt(ep2[0])}:{ep2[1]} (network {net2!r}) on {colour}"
+                    )
+                    continue
+                # Both endpoints belong to the same logical network.
+                sub = net_adj.setdefault(net1, {})
+                sub.setdefault(ep1, set()).add(ep2)
+                sub.setdefault(ep2, set()).add(ep1)
+
+        for net in lb.networks:
+            if net.color == "copper":
+                continue
+            net_id = net.network_id
+            net_eps = {
+                (ep.entity_id, _physical_wire_side(ep.port, entity_by_id.get(ep.entity_id)))
+                for ep in net.endpoints
+            }
+            if not net_eps:
+                continue
+            sub = net_adj.get(net_id, {})
+            visited: set[tuple[str, str]] = set()
+            wired_components: list[set[tuple[str, str]]] = []
+            isolated_eps: set[tuple[str, str]] = set()
+
+            for ep in net_eps:
+                if ep in visited:
+                    continue
+                if ep not in sub:
+                    # No materialised wire for this endpoint.  It is a
+                    # singleton component; only report a split if other
+                    # endpoints are separately wired.
+                    isolated_eps.add(ep)
+                    continue
+                stack = [ep]
+                comp: set[tuple[str, str]] = set()
+                while stack:
+                    cur = stack.pop()
+                    if cur in visited:
+                        continue
+                    visited.add(cur)
+                    comp.add(cur)
+                    for nb in sub.get(cur, set()):
+                        if nb in net_eps and nb not in visited:
+                            stack.append(nb)
+                wired_components.append(comp)
+
+            # More than one wired component means the network is split.
+            # A single wired component plus multiple isolated endpoints
+            # means some declared endpoints are missing wires.
+            if len(wired_components) > 1:
+                sizes = [len(c) for c in wired_components]
+                if isolated_eps:
+                    sizes.append(len(isolated_eps))
                 errors.append(
-                    f"Degree overflow: {_fmt(eid)} {side} on {colour} has "
-                    f"{d} connections (max 2)"
+                    f"Network {net_id!r} ({net.color}): "
+                    f"{len(net_eps)} endpoint(s) split into "
+                    f"{len(wired_components)} connected component(s) "
+                    f"(sizes: {sizes})"
+                )
+            elif wired_components and len(isolated_eps) > 1:
+                sizes = [len(wired_components[0]), len(isolated_eps)]
+                errors.append(
+                    f"Network {net_id!r} ({net.color}): "
+                    f"{len(net_eps)} endpoint(s) split into "
+                    f"2 connected component(s) (sizes: {sizes}) "
+                    f"— some endpoints have no materialised wires"
+                )
+    else:
+        # Legacy colour-global check (kept for callers without a LB).
+        # Reconstruct colour-global adjacency from endpoint adjacency.
+        colour_adj: dict[str, dict[str, set[str]]] = {}
+        for (colour, ep1), neighbours in adj.items():
+            eid1 = ep1[0]
+            sub = colour_adj.setdefault(colour, {})
+            for ep2 in neighbours:
+                sub.setdefault(eid1, set()).add(ep2[0])
+                sub.setdefault(ep2[0], set()).add(eid1)
+
+        for colour, colour_eid_adj in colour_adj.items():
+            if not colour_eid_adj:
+                continue
+            eids = set(colour_eid_adj.keys())
+            visited: set[str] = set()
+            components: list[set[str]] = []
+
+            for eid in sorted(eids):
+                if eid in visited:
+                    continue
+                stack = [eid]
+                comp: set[str] = set()
+                while stack:
+                    cur = stack.pop()
+                    if cur in visited:
+                        continue
+                    visited.add(cur)
+                    comp.add(cur)
+                    for neighbour in colour_eid_adj.get(cur, set()):
+                        if neighbour not in visited:
+                            stack.append(neighbour)
+                components.append(comp)
+
+            if len(components) > 1:
+                sizes = [len(c) for c in components]
+                hints: list[str] = []
+                for c in components:
+                    if not c:
+                        continue
+                    rep = next(iter(c))
+                    hints.append(_fmt(rep))
+                    if len(", ".join(hints)) > 200:
+                        break
+                src_hints = ", ".join(hints)[:300]
+                hint = f" [examples: {src_hints}]" if src_hints else ""
+                errors.append(
+                    f"{colour} wires: {len(eids)} entities split into "
+                    f"{len(components)} component(s) (sizes: {sizes}){hint}"
                 )
 
-    # ── Connectivity check per colour ─────────────────────────────
-    for colour, colour_adj in adj.items():
-        if not colour_adj:
-            continue
-        eids = set(colour_adj.keys())
-        visited: set[str] = set()
-        components: list[set[str]] = []
-
-        for eid in sorted(eids):
-            if eid in visited:
-                continue
-            stack = [eid]
-            comp: set[str] = set()
-            while stack:
-                cur = stack.pop()
-                if cur in visited:
-                    continue
-                visited.add(cur)
-                comp.add(cur)
-                for neighbour, _ in colour_adj.get(cur, set()):
-                    if neighbour not in visited:
-                        stack.append(neighbour)
-            components.append(comp)
-
-        if len(components) > 1:
-            sizes = [len(c) for c in components]
-            # Pick representative source hints from the components.
-            hints: list[str] = []
-            for c in components:
-                if not c:
-                    continue
-                rep = next(iter(c))
-                hints.append(_fmt(rep))
-                if len(", ".join(hints)) > 200:
-                    break
-            src_hints = ", ".join(hints)[:300]
-            hint = f" [examples: {src_hints}]" if src_hints else ""
-            errors.append(
-                f"{colour} wires: {len(eids)} entities split into "
-                f"{len(components)} component(s) (sizes: {sizes}){hint}"
-            )
-
-    # ── Wire count sanity ─────────────────────────────────────────
-    for colour, eid_set_adj in adj.items():
-        n_entities = len(eid_set_adj)
-        n_wires = wire_count_by_colour.get(colour, 0)
-        # A connected graph needs at least n-1 edges.  More edges
-        # than 2(n-1) suggests redundant wiring (cycles).
-        if n_entities >= 2 and n_wires < n_entities - 1:
-            errors.append(
-                f"{colour}: {n_wires} wire(s) for {n_entities} entities "
-                f"(need ≥ {n_entities - 1} for connectivity)"
-            )
-        if n_wires > 2 * (n_entities - 1) and n_entities >= 3:
-            errors.append(
-                f"{colour}: {n_wires} wire(s) for {n_entities} entities "
-                f"(excessive; ≤ {2 * (n_entities - 1)} expected for simple "
-                f"chains/trees)"
-            )
+            # Wire count sanity for colour-global mode
+            n_entities = len(eids)
+            n_wires = 0
+            for eid, neighbours in colour_eid_adj.items():
+                n_wires += len(neighbours)
+            n_wires //= 2
+            if n_entities >= 2 and n_wires < n_entities - 1:
+                errors.append(
+                    f"{colour}: {n_wires} wire(s) for {n_entities} entities "
+                    f"(need ≥ {n_entities - 1} for connectivity)"
+                )
+            if n_wires > 2 * (n_entities - 1) and n_entities >= 3:
+                errors.append(
+                    f"{colour}: {n_wires} wire(s) for {n_entities} entities "
+                    f"(excessive; ≤ {2 * (n_entities - 1)} expected for simple "
+                    f"chains/trees)"
+                )
 
     return errors
 
 
-def assert_wire_topology(bp: Any, *, label: str = "") -> None:
-    """Assert that *bp* has valid wire topology (no-op when ``__debug__`` is False)."""
+def assert_wire_topology(
+    bp: Any,
+    *,
+    label: str = "",
+    lb: "LogicalBlueprint | None" = None,
+) -> None:
+    """Assert that *bp* has valid wire topology (no-op when ``__debug__`` is False).
+
+    If *lb* is supplied, the connectivity check is performed per logical
+    network rather than per colour, avoiding false positives for blueprints
+    that intentionally contain multiple independent networks of the same
+    colour.
+    """
     if not __debug__:
         return
-    errs = check_wire_topology(bp, label=label)
+    errs = check_wire_topology(bp, label=label, lb=lb)
     if errs:
         prefix = f" [{label}]" if label else ""
         raise AssertionError(

@@ -107,7 +107,7 @@ class PortConnection:
 # ═══════════════════════════════════════════════════════════════════════
 
 _CACHE_DIR = cache_namespace_dir("compose")
-_LAYOUT_CACHE_REV = "layout-v2"
+_LAYOUT_CACHE_REV = "layout-v5"
 
 
 def _cache_key(*parts: str) -> str:
@@ -318,6 +318,9 @@ def _apply_connections(
 
         src_ep = next(iter(src_net.endpoints))
         dst_ep = next(iter(dst_net.endpoints))
+        pair = _find_closest_pair({src_ep}, dst_net.endpoints, merged)
+        if pair is not None:
+            src_ep, dst_ep = pair
         merged.connect(src_net.color, src_ep, dst_ep)
         # After merging, one of the two networks was popped.
         # Update port registries so they point to the surviving network.
@@ -756,6 +759,119 @@ def _layout_components(
                 x, y = ent.position
                 ent.position = (x + dx, y + dy)
 
+    # ── Port-band alignment ──────────────────────────────────────
+    # Nudge each source group so the output-port endpoints that connect
+    # directly to the sink are aligned (on the stacking axis) with the
+    # sink's corresponding input-port endpoints.  This keeps the
+    # cross-component bridge wire within Factorio's 9-tile limit even
+    # when the sink's input port sits far from its top/left edge (e.g.
+    # the audio player's page-data selectors live at y=16, far below
+    # the speaker rows where sources would otherwise be stacked).
+    #
+    # For left/right placement the stacking axis is Y (sources stack
+    # vertically); for top/bottom it is X.  The whole group is shifted
+    # so its port band center matches the sink's port band center.
+    # A shift is only applied when it does not overlap the sink or any
+    # other already-aligned source group (fall back to the base layout
+    # otherwise).
+    if best_side in ("left", "right"):
+        _align_axis = 1  # shift y
+    else:
+        _align_axis = 0  # shift x
+
+    def _group_box(grp_prefix: str) -> tuple[int, int, int, int] | None:
+        xs0: list[int] = []
+        ys0: list[int] = []
+        xs1: list[int] = []
+        ys1: list[int] = []
+        for _eid, ent in groups.get(grp_prefix, []):
+            if ent.position is None:
+                continue
+            x, y = ent.position
+            fw, fh = _entity_footprint(ent)
+            xs0.append(x)
+            ys0.append(y)
+            xs1.append(x + fw - 1)
+            ys1.append(y + fh - 1)
+        if not xs0:
+            return None
+        return (min(xs0), min(ys0), max(xs1), max(ys1))
+
+    def _boxes_overlap(b1: tuple[int, int, int, int], b2: tuple[int, int, int, int]) -> bool:
+        return not (
+            b1[2] < b2[0] or b2[2] < b1[0]
+            or b1[3] < b2[1] or b2[3] < b1[1]
+        )
+
+    sink_box = _group_box(sink_prefix)
+    aligned_boxes: dict[str, tuple[int, int, int, int]] = {
+        p: b for p, b in ((p, _group_box(p)) for p, *_ in source_meta) if b is not None
+    }
+
+    for conn in connections or []:
+        src_p = label_to_prefix.get(conn.from_component)
+        if src_p is None or src_p not in aligned_boxes:
+            continue
+        if label_to_prefix.get(conn.to_component) != sink_prefix:
+            continue
+        src_out = merged.output_ports.get(src_p + conn.from_port)
+        dst_in = merged.input_ports.get(conn.to_port)
+        if src_out is None or dst_in is None:
+            continue
+
+        def _band(net_id: str, grp_prefix: str, axis: int) -> list[int]:
+            coords: list[int] = []
+            for net in merged.networks:
+                if net.network_id != net_id:
+                    continue
+                for ep in net.endpoints:
+                    ent = merged.entities.get(ep.entity_id)
+                    if ent is None or ent.position is None:
+                        continue
+                    if not ep.entity_id.startswith(grp_prefix):
+                        continue
+                    coords.append(ent.position[axis])
+            return coords
+
+        src_band = _band(src_out, src_p, _align_axis)
+        dst_band = _band(dst_in, sink_prefix, _align_axis)
+        if not src_band or not dst_band:
+            continue
+        src_c = sum(src_band) / len(src_band)
+        dst_c = sum(dst_band) / len(dst_band)
+        shift = int(round(dst_c - src_c))
+        if shift == 0:
+            continue
+
+        # Reject the shift if it would collide with the sink or another group.
+        box = aligned_boxes[src_p]
+        shifted_box = (
+            box[0] + shift if _align_axis == 0 else box[0],
+            box[1] + shift if _align_axis == 1 else box[1],
+            box[2] + shift if _align_axis == 0 else box[2],
+            box[3] + shift if _align_axis == 1 else box[3],
+        )
+        collides = (sink_box is not None and _boxes_overlap(shifted_box, sink_box))
+        if not collides:
+            for other_p, other_box in aligned_boxes.items():
+                if other_p == src_p:
+                    continue
+                if _boxes_overlap(shifted_box, other_box):
+                    collides = True
+                    break
+        if collides:
+            continue
+
+        for _eid, ent in groups.get(src_p, []):
+            if ent.position is None:
+                continue
+            x, y = ent.position
+            if _align_axis == 1:
+                ent.position = (x, y + shift)
+            else:
+                ent.position = (x + shift, y)
+        aligned_boxes[src_p] = shifted_box
+
 
 def compose(
     components: list[LogicalBlueprint],
@@ -831,6 +947,45 @@ def compose(
     else:
         sys.stderr.write(f"  Connected {connected} port pair(s).\n")
 
+    # ── Verify every declared port connection was realized ────────
+    # Use the per-component port_map because the global input_ports dict is
+    # overwritten when components share input port names (e.g. both memory and
+    # player have a "clock" input).  After _apply_connections, port_map
+    # entries have been updated to the surviving merged network id.
+    missing: list[str] = []
+    for conn in connections:
+        src_pfx = prefixes.get(conn.from_component, "")
+        src_info = port_map.get(conn.from_component, {})
+        dst_info = port_map.get(conn.to_component, {})
+        src_net_id = src_info.get("output_ports", {}).get(src_pfx + conn.from_port)
+        dst_net_id = dst_info.get("input_ports", {}).get(conn.to_port)
+        if src_net_id is None:
+            missing.append(
+                f"{conn.from_component!r}:{conn.from_port!r} has no output network"
+            )
+            continue
+        if dst_net_id is None:
+            missing.append(
+                f"{conn.to_component!r}:{conn.to_port!r} has no input network"
+            )
+            continue
+        # A connection may legitimately change colour when a clock bridge is
+        # involved.  Compare the surviving network ids using both global and
+        # per-component port maps, and accept either.
+        src_survivor = merged.output_ports.get(src_pfx + conn.from_port, src_net_id)
+        dst_survivor = merged.input_ports.get(conn.to_port, dst_net_id)
+        if src_survivor != dst_survivor:
+            missing.append(
+                f"{conn.from_component!r}:{conn.from_port!r} "
+                f"({src_net_id!r}) is not wired to "
+                f"{conn.to_component!r}:{conn.to_port!r} ({dst_net_id!r})"
+            )
+    if missing:
+        raise ValueError(
+            f"Composition failed: {len(missing)} declared connection(s) not realized:\n"
+            + "\n".join(f"  - {m}" for m in missing)
+        )
+
     # ── Validate wiring distances ────────────────────────────────
     unreachable = _validate_network_reachability(merged, prefixes)
     if unreachable > 0:
@@ -852,6 +1007,45 @@ def compose(
         sys.stderr.write(
             "Warning: --power is not yet implemented; "
             "power poles will not be added.\n"
+        )
+
+    # ── Verify every declared port connection was realized ────────
+    # Use the per-component port_map because the global input_ports dict is
+    # overwritten when components share input port names (e.g. both memory and
+    # player have a "clock" input).  After _apply_connections, port_map
+    # entries have been updated to the surviving merged network id.
+    missing: list[str] = []
+    for conn in connections:
+        src_pfx = prefixes.get(conn.from_component, "")
+        src_info = port_map.get(conn.from_component, {})
+        dst_info = port_map.get(conn.to_component, {})
+        src_net_id = src_info.get("output_ports", {}).get(src_pfx + conn.from_port)
+        dst_net_id = dst_info.get("input_ports", {}).get(conn.to_port)
+        if src_net_id is None:
+            missing.append(
+                f"{conn.from_component!r}:{conn.from_port!r} has no output network"
+            )
+            continue
+        if dst_net_id is None:
+            missing.append(
+                f"{conn.to_component!r}:{conn.to_port!r} has no input network"
+            )
+            continue
+        # A connection may legitimately change colour when a clock bridge is
+        # involved.  Compare the surviving network ids using both global and
+        # per-component port maps, and accept either.
+        src_survivor = merged.output_ports.get(src_pfx + conn.from_port, src_net_id)
+        dst_survivor = merged.input_ports.get(conn.to_port, dst_net_id)
+        if src_survivor != dst_survivor:
+            missing.append(
+                f"{conn.from_component!r}:{conn.from_port!r} "
+                f"({src_net_id!r}) is not wired to "
+                f"{conn.to_component!r}:{conn.to_port!r} ({dst_net_id!r})"
+            )
+    if missing:
+        raise ValueError(
+            f"Composition failed: {len(missing)} declared connection(s) not realized:\n"
+            + "\n".join(f"  - {m}" for m in missing)
         )
 
     # ── Cache ─────────────────────────────────────────────────────

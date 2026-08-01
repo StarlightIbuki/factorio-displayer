@@ -455,7 +455,7 @@ def _connect_data_ports(
         connections.append(PortConnection(video_lb.label, vp, display_lb.label, dp))
 
 
-def _declare_memory_ports(lb: LogicalBlueprint) -> None:
+def _declare_memory_ports(lb: LogicalBlueprint, clock_color: str | None = None) -> None:
     """Declare ``clock`` and ``data`` ports on a memory LogicalBlueprint
     parsed from a draftsman string.
 
@@ -465,7 +465,9 @@ def _declare_memory_ports(lb: LogicalBlueprint) -> None:
     data on the unified signal bus).
 
     When there are no networks (single-frame video with one DC and no
-    wires), networks are created from the DC's endpoints directly.
+    wires), networks are created from the DC's endpoints directly.  In that
+    case *clock_color* lets the caller force the expected colour (``"green"``
+    for audio, ``"red"`` for video).  If omitted it defaults to red.
     """
     from .logical_blueprint import Endpoint, Network
 
@@ -476,24 +478,27 @@ def _declare_memory_ports(lb: LogicalBlueprint) -> None:
 
     # ── Clock input port — detect actual colour from DC inputs ────
     clock_net_id: str | None = None
-    clock_color: str = "red"  # default for video memory (all-red bus)
+    detected_color: str | None = None
     for net in lb.networks:
         for ep in net.endpoints:
             if ep.port == "input":
                 ent = lb.entities.get(ep.entity_id)
                 if ent is not None and ent.type == "decider-combinator":
                     clock_net_id = net.network_id
-                    clock_color = net.color
+                    detected_color = net.color
                     break
         if clock_net_id is not None:
             break
 
     if clock_net_id is None:
         # No network at all — create a clock network containing
-        # ALL DC inputs (not just the first one).
+        # ALL DC inputs (not just the first one).  Use the caller-supplied
+        # colour when available so single-page audio memory still gets a
+        # green clock bus.
+        color = clock_color or "red"
         clock_net = Network(
-            network_id=f"{clock_color}_clock",
-            color=clock_color,
+            network_id=f"{color}_clock",
+            color=color,
             endpoints={Endpoint(dc_id, "input") for dc_id, _ in dcs},
         )
         lb.add_network(clock_net)
@@ -562,15 +567,27 @@ def _restore_memory_prewiring(lb: LogicalBlueprint) -> None:
     """
     from .logical_blueprint import Endpoint
 
-    def _endpoint_sort_key(ep: Endpoint) -> tuple[int, int, str]:
+    def _pos(ep: Endpoint) -> tuple[int, int]:
         ent = lb.entities.get(ep.entity_id)
         if ent is None or ent.position is None:
-            return (0, 0, ep.entity_id)
-        x, y = ent.position
-        return (y, x, ep.entity_id)
+            return (0, 0)
+        return ent.position
 
-    def _chain_pairs(eps: list[Endpoint]) -> list[tuple[Endpoint, Endpoint]]:
-        ordered = sorted(eps, key=_endpoint_sort_key)
+    def _snake_pairs(eps: list[Endpoint]) -> list[tuple[Endpoint, Endpoint]]:
+        """Chain endpoints as a row-snake: each row left→right, alternating
+        direction per row.  This mirrors the draftsman audio-memory grid and
+        keeps every wire short (a naive (y, x) sort would wrap the rightmost
+        column back to the leftmost column of the next row with an 11-tile
+        jump for a 12-wide bank)."""
+        by_row: dict[int, list[Endpoint]] = {}
+        for ep in eps:
+            by_row.setdefault(_pos(ep)[1], []).append(ep)
+        ordered: list[Endpoint] = []
+        for i, y in enumerate(sorted(by_row)):
+            row = sorted(by_row[y], key=lambda e: _pos(e)[0])
+            if i % 2 == 1:
+                row = list(reversed(row))
+            ordered.extend(row)
         return [(ordered[i], ordered[i + 1]) for i in range(len(ordered) - 1)]
 
     for net in lb.networks:
@@ -591,9 +608,181 @@ def _restore_memory_prewiring(lb: LogicalBlueprint) -> None:
 
         # Prefer output-bus prewiring when present (memory→display bridge path).
         if len(out_eps) >= 2:
-            net.prewired_pairs = _chain_pairs(out_eps)
+            net.prewired_pairs = _snake_pairs(out_eps)
         elif len(in_eps) >= 2:
-            net.prewired_pairs = _chain_pairs(in_eps)
+            net.prewired_pairs = _snake_pairs(in_eps)
+
+
+def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
+    """Post-compose fix-up for the composed audio blueprint.
+
+    The generic composer lays the large audio-memory bank out to the right of
+    the player and bridges it to the decoder using whichever endpoints happen
+    to be spare in each network's pre-wired chain.  For a tall bank (hundreds
+    of pages) those spare endpoints sit at the bank's extremes, far (> 9
+    tiles) from the player's page-data / clock inputs — Factorio silently
+    drops such wires, leaving the memory and timer unconnected to the decoder.
+
+    This pass makes the geometry and wiring deterministic:
+
+    1. Shift the memory bank so its *top* row aligns with the player's
+       page-port row — its row-snake then starts 1 tile from the player's
+       page port.
+    2. Shift the timer so its clock output sits just above the memory bank.
+    3. Rebuild the merged clock (green) and data (red) buses as a row-snake
+       over the memory endpoints, splicing the timer output, the player's mod
+       AC and the player's page port into the *nearest* snake edge (which
+       keeps every wire ≤ 9 tiles and every port ≤ 2 wires).  For the data
+       bus the player's page port is bridged to the snake start and the
+       player's internal selector chain is preserved.
+    """
+    from .logical_blueprint import Endpoint, _chebyshev, _endpoint_position
+
+    mem_ids = [eid for eid in lb.entities if "__ent" in eid]
+    timer_ids = [eid for eid in lb.entities if eid.startswith("timer_")]
+    player_ids = [eid for eid in lb.entities if eid.startswith("audio_player_")]
+    if not mem_ids or not timer_ids or not player_ids:
+        return
+
+    page_port_id = next(
+        (e for e in player_ids if e.endswith("page_port")), None
+    )
+    if page_port_id is None or lb.entities[page_port_id].position is None:
+        return
+    pp_x, pp_y = lb.entities[page_port_id].position  # type: ignore[misc]
+
+    def _bbox(ids: list[str]) -> tuple[int, int, int, int] | None:
+        xs = [lb.entities[e].position[0] for e in ids if lb.entities[e].position]
+        ys = [lb.entities[e].position[1] for e in ids if lb.entities[e].position]
+        if not xs:
+            return None
+        return min(xs), min(ys), max(xs), max(ys)
+
+    # ── 1. Reposition the memory bank so its top-left sits just right of
+    #        the player's page port, top-aligned with the page-port row.
+    #        The generic composer may stack it left or right of the player
+    #        and align it with the player's top edge; forcing it here makes
+    #        the row-snake start 1 tile from the page port on every run.
+    mem_box = _bbox(mem_ids)
+    if mem_box is None:
+        return
+    mem_dx = (pp_x + 1) - mem_box[0]
+    mem_dy = pp_y - mem_box[1]
+    if mem_dx or mem_dy:
+        for e in mem_ids:
+            ent = lb.entities[e]
+            if ent.position:
+                x, y = ent.position
+                ent.position = (x + mem_dx, y + mem_dy)
+
+    # ── 2. Move the timer just above the memory bank (its clock output
+    #        then sits ~2 tiles from the memory's clock bus). ─────────
+    timer_box = _bbox(timer_ids)
+    if timer_box is not None:
+        t_dx = (pp_x + 1) - timer_box[0]
+        t_dy = (pp_y - 2) - timer_box[1]
+        if t_dx or t_dy:
+            for e in timer_ids:
+                ent = lb.entities[e]
+                if ent.position:
+                    x, y = ent.position
+                    ent.position = (x + t_dx, y + t_dy)
+
+    lb._network_bounds_cache.clear()  # pylint: disable=protected-access
+
+    def _pos(ep: Endpoint) -> tuple[int, int]:
+        return _endpoint_position(ep, lb)
+
+    def _row_snake(eps: list[Endpoint]) -> list[tuple[Endpoint, Endpoint]]:
+        by_row: dict[int, list[Endpoint]] = {}
+        for ep in eps:
+            by_row.setdefault(_pos(ep)[1], []).append(ep)
+        ordered: list[Endpoint] = []
+        for i, y in enumerate(sorted(by_row)):
+            row = sorted(by_row[y], key=lambda e: _pos(e)[0])
+            if i % 2 == 1:
+                row = list(reversed(row))
+            ordered.extend(row)
+        return [
+            (ordered[i], ordered[i + 1]) for i in range(len(ordered) - 1)
+        ], ordered
+
+    def _splice(attach: Endpoint, pairs: list[tuple[Endpoint, Endpoint]]) -> None:
+        """Splice *attach* into the pair of consecutive nodes nearest to it."""
+        pa = _pos(attach)
+        best_i = -1
+        best_d = 1 << 30
+        for i, (a, b) in enumerate(pairs):
+            d = max(_chebyshev(_pos(a), pa), _chebyshev(_pos(b), pa))
+            if d < best_d:
+                best_d = d
+                best_i = i
+        if best_i < 0:
+            return
+        a, b = pairs[best_i]
+        pairs[best_i] = (a, attach)
+        pairs.insert(best_i + 1, (attach, b))
+
+    # ── 3a. Rebuild the green clock bus ──────────────────────────────
+    for net in lb.networks:
+        if net.color != "green":
+            continue
+        mem_eps = [
+            ep for ep in net.endpoints
+            if ep.entity_id in mem_ids and ep.port == "input"
+        ]
+        if len(mem_eps) < 2:
+            continue
+        # timer clock output + player clock inputs
+        attach_eps = [
+            ep for ep in net.endpoints
+            if (ep.entity_id in timer_ids and ep.port == "output")
+            or (ep.entity_id in player_ids and ep.port == "input")
+            and ep.entity_id.endswith(("mod", "page_port"))
+        ]
+        if not attach_eps:
+            continue
+        pairs, _ordered = _row_snake(mem_eps)
+        for at in attach_eps:
+            _splice(at, pairs)
+        net.prewired_pairs = pairs
+
+    # ── 3b. Rebuild the red data bus ─────────────────────────────────
+    for net in lb.networks:
+        if net.color != "red":
+            continue
+        mem_eps = [
+            ep for ep in net.endpoints
+            if ep.entity_id in mem_ids and ep.port == "output"
+        ]
+        if len(mem_eps) < 2:
+            continue
+        sel_eps = [
+            ep for ep in net.endpoints
+            if ep.entity_id in player_ids and (
+                ep.entity_id.endswith("_sel") or ep.entity_id.endswith("page_port")
+            )
+        ]
+        if not sel_eps:
+            continue
+        pairs, ordered = _row_snake(mem_eps)
+        # Player internal selector chain: page_port → ch11_sel → … → ch0_sel
+        page_port_out = next(
+            (ep for ep in sel_eps if ep.entity_id.endswith("page_port")), None
+        )
+        sels = sorted(
+            (ep for ep in sel_eps if ep.entity_id.endswith("_sel")),
+            key=lambda e: int(e.entity_id.rsplit("ch", 1)[1].rsplit("_", 1)[0]),
+            reverse=True,  # ch11 → ch0
+        )
+        if page_port_out is not None:
+            chain: list[Endpoint] = [page_port_out] + sels
+            for i in range(len(chain) - 1):
+                pairs.append((chain[i], chain[i + 1]))
+            # Bridge: snake start ↔ page port (they are now 1 tile apart)
+            start = ordered[0]
+            pairs.append((start, page_port_out))
+        net.prewired_pairs = pairs
 
 
 # ── Main CLI ───────────────────────────────────────────────────────────
@@ -1075,7 +1264,7 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
         _debug_dump_toml(result, "05_merged", debug_dir)
     final_bp = to_draftsman(result)
     from .logical_blueprint import assert_wire_topology
-    assert_wire_topology(final_bp, label=args.name)
+    assert_wire_topology(final_bp, label=args.name, lb=result)
     sys.stdout.write(_to_fixed_string(final_bp) + "\n")
 
 
@@ -1166,7 +1355,8 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
 
         audio_lb = from_draftsman(Blueprint.from_string(audio_bp_str))
         audio_lb.label = f"Audio Memory: {args.name}"
-        _declare_memory_ports(audio_lb)
+        _declare_memory_ports(audio_lb, clock_color="green")
+        _restore_memory_prewiring(audio_lb)
         if debug_dir:
             _debug_dump_toml(audio_lb, "01_audio_memory", debug_dir)
 
@@ -1221,11 +1411,15 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             cache_key_parts=("audio", args.name,
                              hashlib.sha256(audio_bp_str.encode("utf-8")).hexdigest()[:16] if audio_bp_str else ""),
         )
+        # Deterministically re-align the memory/timer and re-wire the
+        # clock/data buses so every wire stays within Factorio's 9-tile
+        # limit even for large (multi-hundred-page) audio memory banks.
+        _finalize_audio_composition(result)
         if debug_dir:
             _debug_dump_toml(result, "04_merged", debug_dir)
         final_bp2 = to_draftsman(result)
         from .logical_blueprint import assert_wire_topology
-        assert_wire_topology(final_bp2, label=args.name)
+        assert_wire_topology(final_bp2, label=args.name, lb=result)
         output = _to_fixed_string(final_bp2) + "\n"
     else:
         output = encode_audio_auto(audio_paths[0], **midi_kwargs)
@@ -1344,7 +1538,8 @@ def _encode_audio_for_composition(
         return None, None, 0
 
     audio_mem_lb.label = f"Audio Memory: {args.name}"
-    _declare_memory_ports(audio_mem_lb)
+    _declare_memory_ports(audio_mem_lb, clock_color="green")
+    _restore_memory_prewiring(audio_mem_lb)
 
     # Build player
     player_lb = build_audio_decoder_logical(

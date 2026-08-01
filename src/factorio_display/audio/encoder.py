@@ -25,11 +25,29 @@ from __future__ import annotations
 
 import math
 import sys
+from pathlib import Path
 from typing import Sequence
 
 import mido
 
+from ..cache_paths import (
+    cache_json_get,
+    cache_json_put,
+    cache_key,
+)  # pylint: disable=relative-beyond-top-level
 from .pitch_mapping import SPEAKER_COUNT  # pylint: disable=relative-beyond-top-level
+
+
+def _file_identity(path: str) -> str:
+    """Return a stable identity for an input file: resolved path + mtime + size.
+
+    Used to invalidate audio-analysis caches when the source file changes.
+    """
+    try:
+        st = Path(path).stat()
+        return f"{Path(path).resolve()}|{st.st_mtime_ns}|{st.st_size}"
+    except OSError:
+        return path
 
 
 # ── packing / unpacking constants ──────────────────────────────────────
@@ -488,6 +506,7 @@ def encode_audio_auto(
     instruments: list[str] = []
     threshold: float = 0.05  # default threshold for auto mode
     multi_data: list[list[list[float]]] = []
+    int_data_list: list[list[list[int]]] = []
 
     # Allowed kwargs for midi_to_multi_rail_tick_data
     _multi_kwargs = {k: v for k, v in midi_kwargs.items()
@@ -496,116 +515,143 @@ def encode_audio_auto(
                               "release_ticks", "attack_curve", "decay_curve",
                               "release_curve", "use_global_shift")}
 
-    if rail_mode == "piano":
-        # Default: single piano rail, ignore everything else
-        instruments = ["piano"]
-    elif rail_mode == "all":
-        # Use all detected instruments
-        instruments, multi_data = midi_to_multi_rail_tick_data(
-            mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
-        )
-    elif rail_mode.startswith("auto"):
-        # auto[:threshold] — auto-detect, filter below threshold
-        if ":" in rail_mode:
-            try:
-                threshold = float(rail_mode.split(":", 1)[1])
-            except ValueError:
-                pass
-        instruments, multi_data = midi_to_multi_rail_tick_data(
-            mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
-        )
-        # Filter: drop rails with too few note events vs total
-        if len(instruments) > 1:
-            # Count note events per rail from multi_data
-            total_ticks = max((len(td) for td in multi_data), default=0)
-            kept_instruments: list[str] = []
-            kept_data: list[list[list[float]]] = []
-            for ri, inst in enumerate(instruments):
-                td = multi_data[ri]
-                active_ticks = sum(1 for tick in td if any(v > 0 for v in tick))
-                ratio = active_ticks / max(1, total_ticks)
-                if ratio >= threshold:
-                    kept_instruments.append(inst)
-                    kept_data.append(td)
-                else:
-                    sys.stderr.write(
-                        f"Dropping rail '{inst}' ({active_ticks}/{total_ticks} "
-                        f"active ticks, {ratio:.1%} < {threshold:.1%})\n"
-                    )
-            if kept_instruments:
-                instruments = kept_instruments
-                multi_data = kept_data
-            # If everything got filtered, keep the most active one
-            if not instruments:
-                best = max(range(len(multi_data)), key=lambda i: sum(
-                    1 for t in multi_data[i] if any(v > 0 for v in t)
-                ))
-                instruments = [instruments[best]]  # type: ignore[index] — will be overridden below
-                # Need to re-fetch just that one
-                instruments = [instruments[0]]
-    else:
-        # Comma-separated instrument names: "piano,bass,drum"
-        instruments = [s.strip() for s in rail_mode.split(",") if s.strip()]
-        if not instruments:
-            instruments = ["piano"]
-
-    if not instruments:
-        sys.stderr.write("No instruments selected.\n")
-        return ""
-
-    sys.stderr.write(
-        f"Using {len(instruments)} rail(s): {', '.join(instruments)}\n"
+    # ── Cache: reuse the translated tick data when inputs are unchanged ──
+    # The key covers the source file identity plus every translation option
+    # that affects the output, so any change invalidates the cache.  This
+    # skips the expensive MIDI → tick-data translation on re-encodes.
+    _mkw_sorted = ",".join(
+        f"{k}={_multi_kwargs.get(k)}" for k in sorted(_multi_kwargs)
     )
+    _ckey = cache_key(
+        "midi_tickdata", _file_identity(path), rail_mode,
+        f"map_drums={map_drums}",
+        f"nt={kwargs.get('normalize_target', 100.0)}",
+        _mkw_sorted,
+    )
+    _cached = cache_json_get("audio_encode", _ckey)
 
-    # ── Generate tick_data per rail ──────────────────────────────────
-    int_data_list: list[list[list[int]]] = []
-
-    if multi_data:
-        # Data already came from multi-rail translator
-        for float_data in multi_data:
-            normalize_target = float(kwargs.get("normalize_target", 100.0))
-            float_data = normalize_tick_data(float_data, target_max=normalize_target)
-            int_data = [
-                [max(0, min(100, int(round(v)))) for v in tick]
-                for tick in float_data
-            ]
-            int_data_list.append(int_data)
+    if _cached is not None:
+        instruments = list(_cached["instruments"])
+        int_data_list = _cached["data"]
+        sys.stderr.write(
+            f"Using {len(instruments)} rail(s) from cache: {', '.join(instruments)}\n"
+        )
     else:
-        # Need to generate tick_data for manual instruments
-        # For single piano, use the simple translator; for multi, use multi-rail
-        if len(instruments) == 1 and instruments[0] == "piano" and not map_drums:
-            from .midi_translator import midi_to_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
-            float_data = midi_to_tick_data(mid, **midi_kwargs)  # type: ignore[arg-type]
-            normalize_target = float(kwargs.get("normalize_target", 100.0))
-            float_data = normalize_tick_data(float_data, target_max=normalize_target)
-            int_data_list.append([
-                [max(0, min(100, int(round(v)))) for v in tick]
-                for tick in float_data
-            ])
-        else:
-            # Use multi-rail translator for manual instruments
-            all_inst, all_data = midi_to_multi_rail_tick_data(
+        if rail_mode == "piano":
+            # Default: single piano rail, ignore everything else
+            instruments = ["piano"]
+        elif rail_mode == "all":
+            # Use all detected instruments
+            instruments, multi_data = midi_to_multi_rail_tick_data(
                 mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
             )
-            # Pick only the requested instruments
-            for inst in instruments:
-                if inst in all_inst:
-                    ri = all_inst.index(inst)
-                    float_data = all_data[ri]
-                else:
-                    # Instrument not found in MIDI, create empty data
-                    max_ticks = max((len(td) for td in all_data), default=0)
-                    float_data = [[0.0] * 48 for _ in range(max_ticks)] if max_ticks > 0 else []
+        elif rail_mode.startswith("auto"):
+            # auto[:threshold] — auto-detect, filter below threshold
+            if ":" in rail_mode:
+                try:
+                    threshold = float(rail_mode.split(":", 1)[1])
+                except ValueError:
+                    pass
+            instruments, multi_data = midi_to_multi_rail_tick_data(
+                mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
+            )
+            # Filter: drop rails with too few note events vs total
+            if len(instruments) > 1:
+                # Count note events per rail from multi_data
+                total_ticks = max((len(td) for td in multi_data), default=0)
+                kept_instruments: list[str] = []
+                kept_data: list[list[list[float]]] = []
+                for ri, inst in enumerate(instruments):
+                    td = multi_data[ri]
+                    active_ticks = sum(1 for tick in td if any(v > 0 for v in tick))
+                    ratio = active_ticks / max(1, total_ticks)
+                    if ratio >= threshold:
+                        kept_instruments.append(inst)
+                        kept_data.append(td)
+                    else:
+                        sys.stderr.write(
+                            f"Dropping rail '{inst}' ({active_ticks}/{total_ticks} "
+                            f"active ticks, {ratio:.1%} < {threshold:.1%})\n"
+                        )
+                if kept_instruments:
+                    instruments = kept_instruments
+                    multi_data = kept_data
+                # If everything got filtered, keep the most active one
+                if not instruments:
+                    best = max(range(len(multi_data)), key=lambda i: sum(
+                        1 for t in multi_data[i] if any(v > 0 for v in t)
+                    ))
+                    instruments = [instruments[best]]  # type: ignore[index] — will be overridden below
+                    # Need to re-fetch just that one
+                    instruments = [instruments[0]]
+        else:
+            # Comma-separated instrument names: "piano,bass,drum"
+            instruments = [s.strip() for s in rail_mode.split(",") if s.strip()]
+            if not instruments:
+                instruments = ["piano"]
+
+        if not instruments:
+            sys.stderr.write("No instruments selected.\n")
+            return ""
+
+        sys.stderr.write(
+            f"Using {len(instruments)} rail(s): {', '.join(instruments)}\n"
+        )
+
+        # ── Generate tick_data per rail ──────────────────────────
+        if multi_data:
+            # Data already came from multi-rail translator
+            for float_data in multi_data:
+                normalize_target = float(kwargs.get("normalize_target", 100.0))
+                float_data = normalize_tick_data(float_data, target_max=normalize_target)
+                int_data = [
+                    [max(0, min(100, int(round(v)))) for v in tick]
+                    for tick in float_data
+                ]
+                int_data_list.append(int_data)
+        else:
+            # Need to generate tick_data for manual instruments
+            # For single piano, use the simple translator; for multi, use multi-rail
+            if len(instruments) == 1 and instruments[0] == "piano" and not map_drums:
+                from .midi_translator import midi_to_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+                float_data = midi_to_tick_data(mid, **midi_kwargs)  # type: ignore[arg-type]
                 normalize_target = float(kwargs.get("normalize_target", 100.0))
                 float_data = normalize_tick_data(float_data, target_max=normalize_target)
                 int_data_list.append([
                     [max(0, min(100, int(round(v)))) for v in tick]
                     for tick in float_data
                 ])
+            else:
+                # Use multi-rail translator for manual instruments
+                all_inst, all_data = midi_to_multi_rail_tick_data(
+                    mid, **_multi_kwargs, map_drums=map_drums,  # type: ignore[arg-type]
+                )
+                # Pick only the requested instruments
+                for inst in instruments:
+                    if inst in all_inst:
+                        ri = all_inst.index(inst)
+                        float_data = all_data[ri]
+                    else:
+                        # Instrument not found in MIDI, create empty data
+                        max_ticks = max((len(td) for td in all_data), default=0)
+                        float_data = [[0.0] * 48 for _ in range(max_ticks)] if max_ticks > 0 else []
+                    normalize_target = float(kwargs.get("normalize_target", 100.0))
+                    float_data = normalize_tick_data(float_data, target_max=normalize_target)
+                    int_data_list.append([
+                        [max(0, min(100, int(round(v)))) for v in tick]
+                        for tick in float_data
+                    ])
 
     if not int_data_list or not any(any(any(v for v in tick) for tick in td) for td in int_data_list):
         sys.stderr.write("No notes found in MIDI.\n")
         return ""
+
+    # Persist the freshly-computed tick data (only non-empty results).
+    if _cached is None:
+        cache_json_put("audio_encode", _ckey, {
+            "instruments": instruments,
+            "data": int_data_list,
+        })
 
     # ── debug JSON dump ──────────────────────────────────────────────
     debug_json_path = kwargs.get("debug_json_path")
@@ -814,47 +860,69 @@ def _encode_audio_file(
     max_polyphony = int(kwargs.get("max_polyphony", 0))
     normalize_target = float(kwargs.get("normalize_target", 100.0))
 
-    # 1. Read audio → full-spectrum loudness (128 MIDI notes)
-    sys.stderr.write(f"Loading audio: {path}\n")
-    full_loudness = audio_file_to_loudness(
-        path, activation_threshold=activation_threshold,
+    # ── Cache: reuse the STFT → normalized tick-data analysis ──
+    # The key covers the source file identity plus every analysis option
+    # that affects the result, so any change invalidates the cache.  MIDI
+    # export needs the pre-fold full spectrum, so it bypasses the cache.
+    _ckey = cache_key(
+        "audio_file_tickdata", _file_identity(path),
+        f"at={activation_threshold}", f"nt={normalize_target}",
     )
+    int_data: list[list[int]] | None = None
+    if not (output_midi and isinstance(output_midi, str)):
+        _cached = cache_json_get("audio_encode", _ckey)
+        if isinstance(_cached, list):
+            int_data = _cached
 
-    if not full_loudness:
-        sys.stderr.write("No audio data extracted.\n")
-        return ""
-
-    total_ticks = len(full_loudness)
-    sys.stderr.write(
-        f"  {total_ticks} ticks ({total_ticks / 60:.1f}s) extracted.\n"
-    )
-
-    # 2. Export MIDI (before octave folding — full MIDI range)
-    if output_midi and isinstance(output_midi, str):
-        sys.stderr.write(f"Exporting MIDI to: {output_midi}\n")
-        loudness_to_midi_file(
-            full_loudness, output_midi,
-            activation_threshold=midi_activation_threshold,
-            condense=condense_midi,
-            max_polyphony=max_polyphony if max_polyphony > 0 else 0,
+    if int_data is None:
+        # 1. Read audio → full-spectrum loudness (128 MIDI notes)
+        sys.stderr.write(f"Loading audio: {path}\n")
+        full_loudness = audio_file_to_loudness(
+            path, activation_threshold=activation_threshold,
         )
 
-    # 3. Fold to game range (F3–E7, 48 pitches)
-    game_loudness = fold_loudness_array(full_loudness)
+        if not full_loudness:
+            sys.stderr.write("No audio data extracted.\n")
+            return ""
 
-    # 4. Scale to 0–100 int for the encoder
-    # Normalize: find global max, scale to normalize_target
-    global_max = 0.0
-    for tick in game_loudness:
-        for v in tick:
-            if v > global_max:
-                global_max = v
-    scale = normalize_target / global_max if global_max > 0 else 1.0
+        total_ticks = len(full_loudness)
+        sys.stderr.write(
+            f"  {total_ticks} ticks ({total_ticks / 60:.1f}s) extracted.\n"
+        )
 
-    int_data: list[list[int]] = []
-    for tick in game_loudness:
-        int_tick = [max(0, min(100, int(round(v * scale)))) for v in tick]
-        int_data.append(int_tick)
+        # 2. Export MIDI (before octave folding — full MIDI range)
+        if output_midi and isinstance(output_midi, str):
+            sys.stderr.write(f"Exporting MIDI to: {output_midi}\n")
+            loudness_to_midi_file(
+                full_loudness, output_midi,
+                activation_threshold=midi_activation_threshold,
+                condense=condense_midi,
+                max_polyphony=max_polyphony if max_polyphony > 0 else 0,
+            )
+
+        # 3. Fold to game range (F3–E7, 48 pitches)
+        game_loudness = fold_loudness_array(full_loudness)
+
+        # 4. Scale to 0–100 int for the encoder
+        # Normalize: find global max, scale to normalize_target
+        global_max = 0.0
+        for tick in game_loudness:
+            for v in tick:
+                if v > global_max:
+                    global_max = v
+        scale = normalize_target / global_max if global_max > 0 else 1.0
+
+        int_data = []
+        for tick in game_loudness:
+            int_tick = [max(0, min(100, int(round(v * scale)))) for v in tick]
+            int_data.append(int_tick)
+
+        if not (output_midi and isinstance(output_midi, str)):
+            cache_json_put("audio_encode", _ckey, int_data)
+    else:
+        sys.stderr.write(
+            f"Loaded {len(int_data)} ticks of audio from cache: {path}\n"
+        )
 
     signal_pool = list(SIGNAL_POOL)
     qualities = list(QUALITIES)

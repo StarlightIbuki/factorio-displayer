@@ -375,33 +375,29 @@ def _build_rail(
             side_1="output", side_2="input",
         )
 
-        # Red chain: l1→l2→l3→l4 output side → l4 → first speaker
+        # Red chain: l1→l2→l3→l4 output side, then down the column's four
+        # speakers.  Column-local red network keeps every speaker ≤ 2 red
+        # wires and all wires ≤ 4 tiles (a cross-column grid snake would
+        # over-connect the column-head speakers beyond Factorio's limit).
         for i in range(len(out_order) - 1):
             blueprint.add_circuit_connection(
                 "red", out_order[i], out_order[i + 1],
                 side_1="output", side_2="output",
             )
-        first_spk = ep.col_speakers[ch][0]
+        col_spks = ep.col_speakers[ch]  # ascending pitch: y=3,2,1,0
         blueprint.add_circuit_connection(
-            "red", out_order[-1], first_spk,
+            "red", out_order[-1], col_spks[0],
             side_1="output", side_2="input",
         )
+        for i in range(len(col_spks) - 1):
+            blueprint.add_circuit_connection(
+                "red", col_spks[i], col_spks[i + 1],
+                side_1="input", side_2="input",
+            )
 
     # ── Per-rail internal wiring ───────────────────────────────────
-    # Speaker grid: daisy-chain red horizontally + vertically
-    for row_off in range(4):
-        row = SPK_Y + row_off
-        for c in range(rail_x, rail_x + 11):
-            curr = ep.speaker_ids.get((c, row))
-            nxt = ep.speaker_ids.get((c + 1, row))
-            if curr and nxt:
-                blueprint.add_circuit_connection("red", curr, nxt)
-    for row_off in range(3):
-        row = SPK_Y + row_off
-        curr = ep.speaker_ids.get((rail_x + 11, row))
-        nxt = ep.speaker_ids.get((rail_x + 11, row + 1))
-        if curr and nxt:
-            blueprint.add_circuit_connection("red", curr, nxt)
+    # NOTE: no cross-column speaker grid — each column's four speakers are
+    # chained to its unpacker outputs above.
 
     # Debug lamp grid wiring
     if debug_lamps:
@@ -691,10 +687,14 @@ def build_audio_decoder_logical(
 
     # ── Page input port ──────────────────────────────────────────
     port_id = "page_port"
+    # The page port's red output is connected to the upstream audio memory
+    # data bus, so it must not emit any non-audio signal.  Keep it as an
+    # empty constant combinator; its input side still receives the clock
+    # (green) from the timer.
     lb.add_entity(LogicalEntity(
         entity_id=port_id,
         type="constant-combinator",
-        properties={"signals": [{"name": "signal-info", "value": 1}]},
+        properties={"signals": []},
         position=(PORT_X, PORT_Y),
     ))
 
@@ -867,11 +867,19 @@ def build_audio_decoder_logical(
         lb.connect("green", Endpoint(uid_s2, "output"), Endpoint(uid_l2, "input"))
         lb.connect("green", Endpoint(uid_s3, "output"), Endpoint(uid_l3, "input"))
 
-        # Red output chain: l1→l2→l3→l4 (output side) → first speaker
+        # Red output chain: l1→l2→l3→l4 steps the four octave volume
+        # signals down to speaker level in short hops, then continues down
+        # the column's four speakers (pitch ch, ch+12, ch+24, ch+36 at
+        # y=3,2,1,0).  Each column is an independent red network, so every
+        # wire stays ≤ 4 tiles and no speaker exceeds Factorio's 2-wire
+        # per-port limit (a cross-column grid snake would over-connect
+        # the column-head speakers and produce wires > 9 tiles).
         for i in range(len(out_order) - 1):
             lb.connect("red", Endpoint(out_order[i], "output"), Endpoint(out_order[i + 1], "output"))
-        first_spk = col_speakers[ch][0]
-        lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(first_spk, "input"))
+        col_spks = col_speakers[ch]  # ascending pitch: y=3,2,1,0
+        lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(col_spks[0], "input"))
+        for i in range(len(col_spks) - 1):
+            lb.connect("red", Endpoint(col_spks[i], "input"), Endpoint(col_spks[i + 1], "input"))
 
     # ── Cross-channel networks ─────────────────────────────────
     # Sub-tick red bus: ch11_match → ch10_match → … → ch0_match
@@ -884,18 +892,10 @@ def build_audio_decoder_logical(
     for ch in range(11, 0, -1):
         lb.connect("red", Endpoint(f"ch{ch}_sel", "input"), Endpoint(f"ch{ch-1}_sel", "input"))
 
-    # Speaker grid: daisy-chain red horizontally + vertically
-    for row_off in range(4):
-        for c in range(11):
-            curr = speaker_ids.get(c + row_off * 12)
-            nxt = speaker_ids.get((c + 1) + row_off * 12)
-            if curr and nxt:
-                lb.connect("red", Endpoint(curr, "input"), Endpoint(nxt, "input"))
-    for row_off in range(3):
-        curr = speaker_ids.get(11 + row_off * 12)
-        nxt = speaker_ids.get(11 + (row_off + 1) * 12)
-        if curr and nxt:
-            lb.connect("red", Endpoint(curr, "input"), Endpoint(nxt, "input"))
+    # NOTE: no cross-column speaker grid.  Each column's four speakers are
+    # already chained to its unpacker outputs above (column-local red
+    # network), which keeps every speaker within 2 red wires and all wires
+    # short.
 
     # Mod → last match (red, sub_tick injection)
     lb.connect("red", Endpoint(mod_id, "output"), Endpoint("ch11_match", "input"))

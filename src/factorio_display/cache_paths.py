@@ -6,6 +6,8 @@ workspace tidy and avoid cross-version contamination.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -46,3 +48,30 @@ def cache_file(namespace: str, stem: str, suffix: str) -> Path:
 def cache_dir(namespace: str, stem: str) -> Path:
     """Return a version-prefixed cache directory path under *namespace*."""
     return cache_namespace_dir(namespace) / f"{version_prefix()}_{stem}"
+
+
+def cache_key(*parts: str) -> str:
+    """Deterministic short hash key from string parts."""
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:20]
+
+
+def cache_json_put(namespace: str, stem: str, data: object) -> Path:
+    """Write *data* as JSON to a version-prefixed cache file.
+
+    *stem* should already be a stable cache key (e.g. from :func:`cache_key`).
+    Returns the written path.
+    """
+    path = cache_file(namespace, stem, ".json")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def cache_json_get(namespace: str, stem: str) -> object | None:
+    """Read a JSON cache file, or return None on miss / corruption."""
+    path = cache_file(namespace, stem, ".json")
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
