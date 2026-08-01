@@ -65,6 +65,48 @@ def _midi_tick_to_game_tick(
     return seconds / seconds_per_beat * game_ticks_per_beat
 
 
+# ── GM → Factorio instrument mapping ──────────────────────────────────
+
+class TestMapGmToFactorio:
+    """GM programs map to Factorio instruments as separate tracks."""
+
+    def test_piano_family(self):
+        from factorio_display.audio.midi_translator import map_gm_to_factorio
+        assert map_gm_to_factorio(0, 0) == "piano"
+        assert map_gm_to_factorio(7, 0) == "piano"
+
+    def test_high_chromatic_percussion(self):
+        from factorio_display.audio.midi_translator import map_gm_to_factorio
+        # celesta / glockenspiel / music box → celesta (high)
+        assert map_gm_to_factorio(8, 0) == "celesta"
+        assert map_gm_to_factorio(10, 0) == "celesta"
+        # vibraphone / marimba / xylophone / bells / dulcimer → vibraphone (higher)
+        assert map_gm_to_factorio(11, 0) == "vibraphone"
+        assert map_gm_to_factorio(15, 0) == "vibraphone"
+
+    def test_low_instruments(self):
+        from factorio_display.audio.midi_translator import map_gm_to_factorio
+        assert map_gm_to_factorio(32, 0) == "bass"       # bass family
+        assert map_gm_to_factorio(40, 0) == "lead"       # strings → sustained lead
+        assert map_gm_to_factorio(80, 0) == "lead"       # synth lead
+        assert map_gm_to_factorio(88, 0) == "saw"        # synth pad
+        assert map_gm_to_factorio(16, 0) == "square"     # organ → square
+        assert map_gm_to_factorio(96, 0) == "square"     # synth fx
+
+    def test_mid_high_instruments(self):
+        from factorio_display.audio.midi_translator import map_gm_to_factorio
+        assert map_gm_to_factorio(24, 0) == "plucked"    # guitars
+        assert map_gm_to_factorio(72, 0) == "celesta"    # flute → celesta
+        assert map_gm_to_factorio(56, 0) == "steel-drum" # brass
+        assert map_gm_to_factorio(112, 0) == "steel-drum"  # percussive
+
+    def test_drum_channels(self):
+        from factorio_display.audio.midi_translator import map_gm_to_factorio
+        assert map_gm_to_factorio(0, 9) == "drum"        # channel 9 always drum
+        assert map_gm_to_factorio(120, 0) == "drum"      # GM percussion kits
+        assert map_gm_to_factorio(128, 0) == "drum"
+
+
 # ── basic conversion ───────────────────────────────────────────────────
 
 class TestMidiToTickDataBasic:
@@ -669,6 +711,54 @@ class TestMultiRailMidi:
         instruments, rail_data = midi_to_multi_rail_tick_data(mid)
         assert len(instruments) == 2
         assert set(instruments) == {"piano", "bass"}
+
+    def test_many_instruments_become_separate_tracks(self):
+        """Piano, bass, organ, flute, synth lead and vibraphone → 6 rails."""
+        mid = mido.MidiFile(ticks_per_beat=480)
+        progs = [0, 32, 19, 73, 80, 11]
+        notes = {
+            0: [60, 64, 67, 72],
+            32: [36, 40, 43, 48],
+            19: [48, 55, 60],
+            73: [76, 79, 84, 88],
+            80: [60, 64, 67, 72, 79, 84],
+            11: [77, 81, 84, 88, 91, 96],
+        }
+        for ch, prog in enumerate(progs):
+            t = mido.MidiTrack()
+            t.append(mido.Message("program_change", program=prog, channel=ch, time=0))
+            for n in notes[prog]:
+                t.append(mido.Message("note_on", note=n, velocity=100, channel=ch, time=0))
+                t.append(mido.Message("note_off", note=n, velocity=0, channel=ch, time=480))
+            mid.tracks.append(t)
+
+        instruments, _ = midi_to_multi_rail_tick_data(mid)
+        assert len(instruments) == 6
+        assert set(instruments) == {
+            "piano", "bass", "square", "celesta", "lead", "vibraphone",
+        }
+
+    def test_low_instrument_keeps_low_octave(self):
+        """Bass notes below MIDI 53 must not be dropped (regression).
+
+        ``midi_to_pitch_index`` must use the instrument's own base (41 for
+        bass) so the F2-B2 octave piano can't play stays on the bass rail.
+        """
+        mid = mido.MidiFile(ticks_per_beat=480)
+        t = mido.MidiTrack()
+        t.append(mido.Message("program_change", program=32, channel=0, time=0))
+        for n in [36, 40, 43, 48]:  # C2-F2 — below piano's F3
+            t.append(mido.Message("note_on", note=n, velocity=100, channel=0, time=0))
+            t.append(mido.Message("note_off", note=n, velocity=0, channel=0, time=480))
+        mid.tracks.append(t)
+
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid)
+        assert instruments == ["bass"]
+        bass = rail_data[0]
+        # With the optimal +1 octave shift the notes land at MIDI 48-60,
+        # pitch 7-19 within the bass rail — none dropped.
+        used = [p for p in range(SPEAKER_COUNT) if any(tick[p] > 0 for tick in bass)]
+        assert len(used) == 4, f"expected all 4 bass notes kept, got {used}"
 
     def test_single_rail_when_all_same_instrument(self):
         """All notes on same instrument → single rail."""

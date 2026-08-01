@@ -35,7 +35,7 @@ from ..cache_paths import (
     cache_json_put,
     cache_key,
 )  # pylint: disable=relative-beyond-top-level
-from .pitch_mapping import SPEAKER_COUNT  # pylint: disable=relative-beyond-top-level
+from .pitch_mapping import SPEAKER_COUNT, drum_grouping  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
 
 
 def _file_identity(path: str) -> str:
@@ -798,6 +798,24 @@ def _encode_midi(
 
     num_rails = len(instruments)
 
+    # Compact drum rails: a drum track only records each used drum type's
+    # loudness (0-100 ceiling) — there is no pitch dimension.  Store just
+    # those raw tick→volume cells (one per used drum type) instead of the
+    # 12-cell-per-tick pitched layout, so the drum memory stays tiny.
+    active_drum_pitches: list[set[int] | None] = []
+    for ri, inst in enumerate(instruments):
+        if "drum" in inst.lower():
+            active_drum_pitches.append({
+                p for p in range(SPEAKER_COUNT)
+                if any(td[p] > 0 for td in int_data_list[ri])
+            })
+        else:
+            active_drum_pitches.append(None)
+
+    def _drum_grouping(ri: int) -> object | None:
+        ap = active_drum_pitches[ri]
+        return drum_grouping(ap) if ap is not None else None
+
     if not attach_player:
         # Memory-only: encode each rail, concatenate
         parts: list[str] = []
@@ -808,6 +826,7 @@ def _encode_midi(
                 signal_pool=signal_pool,
                 qualities=qualities,
                 clock_signal=CLOCK_SIGNAL,
+                grouping=_drum_grouping(ri),
             )
             if mem:
                 parts.append(mem)
@@ -875,6 +894,7 @@ def _encode_midi(
                 y_offset=memory_y,
                 x_offset=rail_x,
                 id_prefix=f"r{ri}_",
+                grouping=_drum_grouping(ri),
             )
             if isinstance(last_id, str) and last_id:
                 mem_last_ids.append(last_id)
@@ -1125,7 +1145,7 @@ def encode_audio_to_logical(
     LogicalBlueprint
         The logical blueprint with entities and networks, no positions.
     """
-    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity, Network  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
 
     if not tick_data:
         return LogicalBlueprint(label=f"Audio Memory: {output_name}")
@@ -1229,6 +1249,19 @@ def encode_audio_to_logical(
         first_out = dc_ids[0]
         for dc_id in dc_ids[1:]:
             lb.connect("red", Endpoint(first_out, "output"), Endpoint(dc_id, "output"))
+    elif len(dc_ids) == 1:
+        # A single page has no connect() calls to form a bus — create the
+        # red/green networks explicitly so the clock/data ports exist for the
+        # composer to merge (a tiny clip or a single-drum rail can be just
+        # one page).
+        lb.add_network(Network(
+            network_id=f"{id_prefix}red", color="red",
+            endpoints={Endpoint(dc_ids[0], "output")},
+        ))
+        lb.add_network(Network(
+            network_id=f"{id_prefix}green", color="green",
+            endpoints={Endpoint(dc_ids[0], "input")},
+        ))
 
     _layout_and_prewire_audio_bank(lb, dc_ids)
 

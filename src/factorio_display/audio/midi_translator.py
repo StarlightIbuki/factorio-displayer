@@ -22,7 +22,12 @@ from .pitch_mapping import (  # pylint: disable=relative-beyond-top-level
 FACTORIO_INSTRUMENTS = {
     'piano': {'min': 53, 'max': 100},          # F3-E7
     'bass': {'min': 41, 'max': 76},            # F2-E5
+    'lead': {'min': 41, 'max': 76},            # F2-E5
+    'saw': {'min': 41, 'max': 76},             # F2-E5
+    'square': {'min': 41, 'max': 76},          # F2-E5
+    'steel-drum': {'min': 53, 'max': 88},      # F3-E6
     'celesta': {'min': 77, 'max': 112},        # F5-E8
+    'vibraphone': {'min': 77, 'max': 112},     # F5-E8
     'plucked': {'min': 65, 'max': 100},        # F4-E7
     'drum': {'min': 53, 'max': 88}             # F3-E6
 }
@@ -35,7 +40,14 @@ LOW_BEAT_DRUM = "kick-1"
 
 # --- 2. AUTOMATED INSTRUMENT ROUTING ---
 def map_gm_to_factorio(program, channel):  # pylint: disable=too-many-return-statements
-    """Map a GM program number and channel to a Factorio instrument name."""
+    """Map a GM program number and channel to a Factorio instrument name.
+
+    Factorio has 9 usable melodic/tuned instruments; this routes each GM
+    program family to the closest one so multi-instrument MIDI files become
+    separate tracks.  The instruments deliberately spread across octaves
+    (synths low, vibraphone high) so the tracks together cover far more of
+    the song than piano alone.
+    """
     if channel == 9:
         return 'drum'
     # GM2 percussion kits live at programs 120-127 (and some files use 128).
@@ -43,14 +55,34 @@ def map_gm_to_factorio(program, channel):  # pylint: disable=too-many-return-sta
         return 'drum'
     if 0 <= program <= 7:
         return 'piano'
-    if 8 <= program <= 15:
+    if 8 <= program <= 10:       # celesta, glockenspiel, music box
         return 'celesta'
-    if 24 <= program <= 31:
+    if 11 <= program <= 15:      # vibraphone, marimba, xylophone, bells, dulcimer
+        return 'vibraphone'
+    if 16 <= program <= 23:      # organs (drawbar / church / reed organ)
+        return 'square'
+    if 24 <= program <= 31:      # guitars
         return 'plucked'
-    if 32 <= program <= 39:
+    if 32 <= program <= 39:      # basses
         return 'bass'
-    if 80 <= program <= 87:
-        return 'bass'
+    if 40 <= program <= 47:      # strings (sustained)
+        return 'lead'
+    if 48 <= program <= 55:      # ensembles / choir
+        return 'saw'
+    if 56 <= program <= 71:      # brass + reeds (saxes, clarinets)
+        return 'steel-drum'
+    if 72 <= program <= 79:      # flutes / pipes (airy, high)
+        return 'celesta'
+    if 80 <= program <= 87:      # synth leads
+        return 'lead'
+    if 88 <= program <= 95:      # synth pads
+        return 'saw'
+    if 96 <= program <= 103:     # synth effects
+        return 'square'
+    if 104 <= program <= 111:    # ethnic (sitar, banjo, koto, kalimba...)
+        return 'plucked'
+    if 112 <= program <= 119:    # percussive (incl. steel drums)
+        return 'steel-drum'
     return 'piano'
 
 # --- 3. CONTEXT-AWARE OCTAVE FOLDING ---
@@ -849,7 +881,9 @@ def midi_to_multi_rail_tick_data(
                     if log_msg and log_msg not in fold_logged:
                         fold_logged.add(log_msg)
                         sys.stderr.write(f"[midi_translator] {log_msg}\n")
-                    pitch_idx = midi_to_pitch_index(folded_note)
+                    pitch_idx = midi_to_pitch_index(
+                        folded_note, midi_base=INSTRUMENT_MIDI_BASES.get(inst, MIDI_BASE),
+                    )
                     if pitch_idx is None:
                         continue
 
@@ -881,7 +915,9 @@ def midi_to_multi_rail_tick_data(
                         msg.note, instrument=inst,
                         global_shift=rail_global_shifts.get(ri, 0),
                     )
-                    pitch_idx = midi_to_pitch_index(folded_note)
+                    pitch_idx = midi_to_pitch_index(
+                        folded_note, midi_base=INSTRUMENT_MIDI_BASES.get(inst, MIDI_BASE),
+                    )
                     if pitch_idx is None:
                         continue
 

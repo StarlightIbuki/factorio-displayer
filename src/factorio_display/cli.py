@@ -718,17 +718,20 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
                     ent = lb.entities[eid]
                     if ent.position:
                         ent.position = (ent.position[0] + dx0, ent.position[1])
-        # Stack: rail 0 stays; each later rail is moved into rail 0's x column
-        # (x = [0,12]) and dropped so its page port sits 4 tiles below the
-        # previous bank (the gap the clock snake hops across).
-        last_bottom: int | None = None
+        # Stack: each later rail is moved into rail 0's x column (x = [0,12])
+        # and dropped below the previous rail by the LARGER of the decoder
+        # height (~24) or that rail's memory height — so a rail with a short
+        # memory never lets the next decoder overlap the previous one.  For
+        # long songs the memory height dominates (unchanged from before).
+        prev_rows: int = 12
+        prev_port_y: int | None = None
         for ri in rail_indices:
             pp_id = _page_port(ri)
             pp_ent = lb.entities.get(pp_id)
             if pp_ent is None or pp_ent.position is None:
                 continue
-            if ri > 0:
-                target_y = (last_bottom + 4) if last_bottom is not None else 0
+            if ri > 0 and prev_port_y is not None:
+                target_y = prev_port_y + max(24, 2 * (prev_rows - 1) + 4)
                 dy = target_y - pp_ent.position[1]  # type: ignore[index]
                 dxr = -(ri * 13)  # built at x = ri*13 → back to x = [0,12]
                 for eid in player_ids:
@@ -740,9 +743,8 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
                             ent.position = (x + dxr, y + dy)
             pp_x, pp_y = pp_ent.position  # type: ignore[misc]
             mem_ri = _rail_mem(ri)
-            if mem_ri:
-                rows = (len(mem_ri) + 11) // 12
-                last_bottom = pp_y + 2 * (rows - 1)
+            prev_rows = (len(mem_ri) + 11) // 12 if mem_ri else 1
+            prev_port_y = pp_y
 
     # Place each rail's memory bank in a 12-column grid just right of its
     # page port, top-aligned with the page-port row.  (For multi-rail the
@@ -823,6 +825,67 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
             deg[b] = deg.get(b, 0) + 1
         return [ep for ep, d in deg.items() if d < 2]
 
+    def _nearest_free(px: int, py: int, occ: set[tuple[int, int]]) -> tuple[int, int]:
+        """Return the nearest unoccupied tile to (px, py)."""
+        if (px, py) not in occ:
+            return px, py
+        for r in range(1, 6):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    if abs(dx) == r or abs(dy) == r:
+                        cand = (px + dx, py + dy)
+                        if cand not in occ:
+                            return cand
+        return (px, py + 8)
+
+    def _bridge_with_poles(pairs: list[tuple[Endpoint, Endpoint]], net) -> list[tuple[Endpoint, Endpoint]]:
+        """Split any clock-bus pair longer than 9 tiles with power-pole nodes.
+
+        Short clips with many rails can leave a gap between stacked memory
+        banks wider than Factorio's 9-tile wire limit (the decoders force a
+        ~24-tile stride while a tiny memory is only a few rows tall).  Insert
+        ``small-electric-pole`` nodes at ~8-tile intervals along such pairs.
+        Realistic (long) songs keep every hop ≤ 9 and need no poles.
+        """
+        from .logical_blueprint import LogicalEntity  # pylint: disable=import-outside-toplevel
+
+        # Combinators are 1×2 tiles, everything else (poles, speakers) 1×1.
+        occ = set()
+        for e in lb.entities.values():
+            if e.position is None:
+                continue
+            occ.add((e.position[0], e.position[1]))
+            if e.type in ("arithmetic-combinator", "decider-combinator", "constant-combinator"):
+                occ.add((e.position[0], e.position[1] + 1))
+        pole_n = [0]
+        out: list[tuple[Endpoint, Endpoint]] = []
+        for a, b in pairs:
+            pa = _pos(a)
+            pb = _pos(b)
+            d = max(abs(pa[0] - pb[0]), abs(pa[1] - pb[1]))
+            if d <= 9:
+                out.append((a, b))
+                continue
+            steps = (d + 8) // 9
+            prev = a
+            for s in range(1, steps + 1):
+                t = s / steps
+                px = round(pa[0] + (pb[0] - pa[0]) * t)
+                py = round(pa[1] + (pb[1] - pa[1]) * t)
+                px, py = _nearest_free(px, py, occ)
+                pid = f"clock_bus_pole_{pole_n[0]}"
+                pole_n[0] += 1
+                lb.add_entity(LogicalEntity(
+                    pid, "small-electric-pole", {}, (px, py),
+                ))
+                occ.add((px, py))
+                p_ep = Endpoint(pid, "input")
+                net.endpoints.add(p_ep)
+                out.append((prev, p_ep))
+                prev = p_ep
+            out.append((prev, b))
+        return out
+
     # ── 3a. Rebuild the shared green clock bus ─────────────────────────
     # The banks are stacked in one column, so ONE row-snake over every memory
     # page keeps the whole clock bus a single connected component.  Each
@@ -857,7 +920,9 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
                 ends, key=lambda ep: _chebyshev(_pos(ep), _pos(timer_out))
             )
             pairs.append((timer_out, nearest))
+        pairs = _bridge_with_poles(pairs, net)
         net.prewired_pairs = pairs
+        lb._network_bounds_cache.clear()  # pylint: disable=protected-access
 
     # ── 3b. Rebuild each rail's red data bus ───────────────────────────
     for net in lb.networks:

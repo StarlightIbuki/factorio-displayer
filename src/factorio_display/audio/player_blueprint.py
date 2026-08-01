@@ -49,19 +49,31 @@ from .pitch_mapping import (
 INSTRUMENT_MAP: dict[str, str] = {
     "piano": "piano",
     "bass": "bass",
+    "lead": "lead",
+    "saw": "saw",
+    "square": "square",
     "celesta": "celesta",
+    "vibraphone": "vibraphone",
     "plucked": "plucked",
+    "steel-drum": "steel-drum",
     "drum": "drum-kit",
 }
 
 # MIDI base per instrument — the F-aligned start of each 4-octave speaker window.
-# Each rail's 48 speakers cover midi_base .. midi_base+47.
+# Each rail's 48 speakers cover midi_base .. midi_base+47.  The melodic
+# instruments spread across octaves (synths low, vibraphone high) so separate
+# tracks together cover far more of the song than piano alone.
 INSTRUMENT_MIDI_BASES: dict[str, int] = {
-    "piano": 53,     # F3-E7  (53-100), matches instrument range exactly
-    "bass": 41,      # F2-E6  (41-88),  covers bass range F2-E5 (41-76)
-    "celesta": 65,   # F4-E7  (65-112), best overlap with celesta F5-E8 (77-112)
-    "plucked": 65,   # F4-E7  (65-100), matches plucked range exactly
-    "drum": 53,      # F3-E7  (53-100), covers drum range F3-E6 (53-88)
+    "piano": 53,       # F3-E7  (53-100), matches instrument range exactly
+    "bass": 41,        # F2-E6  (41-88),  covers bass range F2-E5 (41-76)
+    "lead": 41,        # F2-E6  (41-88),  covers lead range F2-E5 (41-76)
+    "saw": 41,         # F2-E6  (41-88),  covers saw range F2-E5 (41-76)
+    "square": 41,      # F2-E6  (41-88),  covers square range F2-E5 (41-76)
+    "steel-drum": 53,  # F3-E7  (53-100), covers steel-drum range F3-E6 (53-88)
+    "celesta": 65,     # F4-E7  (65-112), best overlap with celesta F5-E8 (77-112)
+    "vibraphone": 77,  # F5-E9  (77-124), covers vibraphone range F5-E8 (77-112)
+    "plucked": 65,     # F4-E7  (65-112), matches plucked range exactly
+    "drum": 53,        # F3-E7  (53-100), covers drum range F3-E6 (53-88)
 }
 
 _MIDI_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -137,7 +149,8 @@ def _patch_instrument_notes() -> None:
     """
     import draftsman.data.instruments as _inst_data
 
-    _INST_NAMES = {"piano", "bass", "celesta", "plucked", "drum-kit"}
+    _INST_NAMES = {"piano", "bass", "lead", "saw", "square",
+                    "celesta", "vibraphone", "plucked", "steel-drum", "drum-kit"}
 
     raw = _inst_data.raw
     ps_list = raw.get("programmable-speaker")

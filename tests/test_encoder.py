@@ -338,6 +338,21 @@ class TestEncodeAudioToLogical:
         assert all(o.get("constant") == 40 for o in outs)
         assert len(outs) == 60  # one output per tick (60 cells)
 
+    def test_single_dc_memory_declares_ports(self):
+        """A memory with a single DC page still declares clock/data ports.
+
+        Regression: with one page there were no connect() calls to form the
+        red/green buses, so the ports were never declared and the composed
+        path failed with ``'<memory>':'data' has no output network``.
+        """
+        data = [[0] * SPEAKER_COUNT for _ in range(10)]
+        data[0][0] = 30
+        lb = encode_audio_to_logical(data, "TinyMem", self.pool, self.qual)
+        dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        assert len(dcs) == 1
+        assert "clock" in lb.input_ports, "single-DC memory must declare clock port"
+        assert "data" in lb.output_ports, "single-DC memory must declare data port"
+
 
 class TestEncodeAudioCache:
     """The audio-analysis cache should skip re-translation and be correct."""

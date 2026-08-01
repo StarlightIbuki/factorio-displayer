@@ -28,12 +28,22 @@ MIDI_BASE: int = 53
 SPEAKER_COUNT: int = 48
 
 # MIDI base per Factorio instrument — the F-aligned start of each 4-octave window
+# The melodic instruments deliberately spread across octaves so a multi-track
+# song can cover far more than piano's F3-E7: the synth family sits LOW
+# (F2-E6), steel-drum low-mid (F3-E7), plucked/celesta mid-high (F4-E7),
+# and vibraphone HIGH (F5-E9) — each rail still has 48 pitches, but the
+# instruments as a group reach F2..E9.
 INSTRUMENT_MIDI_BASES: dict[str, int] = {
-    "piano": 53,     # F3-E7  (53-100)
-    "bass": 41,      # F2-E6  (41-88)
-    "celesta": 65,   # F4-E7  (65-112)
-    "plucked": 65,   # F4-E7  (65-100)
-    "drum": 53,      # F3-E7  (53-100) — only first 17 slots used when map_drums
+    "piano": 53,       # F3-E7  (53-100)
+    "bass": 41,        # F2-E6  (41-88)
+    "lead": 41,        # F2-E6  (41-88)  — synth lead, low
+    "saw": 41,         # F2-E6  (41-88)  — synth saw, low
+    "square": 41,      # F2-E6  (41-88)  — synth square, low
+    "steel-drum": 53,  # F3-E7  (53-100) — low-mid
+    "celesta": 65,     # F4-E7  (65-112)
+    "vibraphone": 77,  # F5-E9  (77-124) — high, above piano
+    "plucked": 65,     # F4-E7  (65-112)
+    "drum": 53,        # F3-E7  (53-100) — only first 17 slots used when map_drums
 }
 
 # GM drum note → Factorio drum-kit note name mapping
