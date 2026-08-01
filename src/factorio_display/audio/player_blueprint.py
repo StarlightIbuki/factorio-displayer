@@ -665,8 +665,14 @@ def _build_rail_logical(
     map_drums: bool,
     midi_base: int,
     clock_signal: str,
+    active_drum_pitches: set[int] | None = None,
 ) -> "_RailEndpoints":  # noqa: F821
     """Build one rail's 48-speaker decoder into *lb* as logical entities/networks.
+
+    *active_drum_pitches* — for a drum rail, only these pitch slots get a
+    speaker (the drum types the song actually uses).  When ``None`` the full
+    48-speaker grid is emitted (used by the standalone exporters, which have
+    no audio data to know which drums are used).
 
     Entity ids are prefixed with *prefix* (e.g. ``"r0_"``) and positions are
     offset by *rail_x* so multiple rails can sit side by side.  Returns the
@@ -716,6 +722,11 @@ def _build_rail_logical(
 
     is_drum = instrument_proto == "drum-kit" and map_drums
     for pitch_idx, sig in iter_speaker_signals():
+        # For a drum rail we only emit the drum TYPES the song actually uses
+        # (drums are a fixed set of sounds, not 48 pitches) — skip the rest
+        # instead of placing inert kick-1 placeholder speakers.
+        if is_drum and active_drum_pitches is not None and pitch_idx not in active_drum_pitches:
+            continue
         col = rail_x + (pitch_idx % 12)
         row = SPK_Y + (3 - pitch_idx // 12)
         spk_id = f"{prefix}spk_{pitch_idx}"
@@ -856,9 +867,10 @@ def _build_rail_logical(
         for i in range(len(out_order) - 1):
             lb.connect("red", Endpoint(out_order[i], "output"), Endpoint(out_order[i + 1], "output"))
         col_spks = col_speakers[ch]  # ascending pitch: y=3,2,1,0
-        lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(col_spks[0], "input"))
-        for i in range(len(col_spks) - 1):
-            lb.connect("red", Endpoint(col_spks[i], "input"), Endpoint(col_spks[i + 1], "input"))
+        if col_spks:
+            lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(col_spks[0], "input"))
+            for i in range(len(col_spks) - 1):
+                lb.connect("red", Endpoint(col_spks[i], "input"), Endpoint(col_spks[i + 1], "input"))
 
     # ── Cross-channel networks ─────────────────────────────────
     # Sub-tick red bus: ch11_match → ch10_match → … → ch0_match
@@ -888,6 +900,7 @@ def build_audio_decoder_logical(
     signal_pool: list[str] | None = None,
     qualities: list[str] | None = None,
     map_drums: bool = False,
+    active_drum_pitches: set[int] | None = None,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a single-rail 48-speaker audio decoder as a
     :class:`LogicalBlueprint` (no positions, networks instead of wires).
@@ -928,6 +941,7 @@ def build_audio_decoder_logical(
     _build_rail_logical(
         lb, "", 0, instrument, signal_pool, qualities,
         map_drums, INSTRUMENT_MIDI_BASES.get(instrument, 53), clock_signal,
+        active_drum_pitches=active_drum_pitches,
     )
 
     for net in lb.networks:
@@ -946,6 +960,7 @@ def build_multi_rail_decoder_logical(
     signal_pool: list[str] | None = None,
     qualities: list[str] | None = None,
     map_drums: bool = False,
+    active_drum_pitches: list[set[int] | None] | None = None,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a **multi-rail** 48-speaker-per-rail audio decoder as a
     :class:`LogicalBlueprint`.
@@ -953,6 +968,10 @@ def build_multi_rail_decoder_logical(
     One rail is built per instrument, side by side (each 13 columns wide).
     Every rail has its own mod AC (``clock % 60``) reading the **shared**
     green clock, its own page-data red bus, and its own 48 speakers.
+
+    *active_drum_pitches* — one entry per rail (``None`` = full grid).  For
+    a drum rail this is the set of pitch slots (0..16 = the 17 Factorio drum
+    types) that the song actually uses, so only those speakers are placed.
 
     Ports
     -----
@@ -978,6 +997,9 @@ def build_multi_rail_decoder_logical(
                 inst.lower().replace("programmable-speaker-instrument-", ""), 53,
             ),
             clock_signal,
+            active_drum_pitches=(
+                active_drum_pitches[ri] if active_drum_pitches else None
+            ),
         )
         rail_info.append(info)
 

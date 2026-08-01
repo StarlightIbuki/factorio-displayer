@@ -1520,11 +1520,24 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             components.append(mem)
             connections.append(PortConnection("Timer", "clock", mem.label, "clock"))
 
+        # For drum rails, only place the drum TYPES the song actually uses
+        # (at most the 17 Factorio drum-kit sounds — not 48 placeholders).
+        active_drum_pitches: list[set[int] | None] = []
+        for ri, inst in enumerate(instruments):
+            if "drum" in inst.lower():
+                active_drum_pitches.append({
+                    p for p in range(48)
+                    if any(td[p] > 0 for td in int_data_list[ri])
+                })
+            else:
+                active_drum_pitches.append(None)
+
         player_lb = build_multi_rail_decoder_logical(
             name=f"Audio Player: {args.name}",
             instruments=instruments,
             clock_signal="signal-clock",
             map_drums=getattr(args, "map_drums", True),
+            active_drum_pitches=active_drum_pitches,
         )
         components.append(player_lb)
         connections.append(PortConnection("Timer", "clock", player_lb.label, "clock"))

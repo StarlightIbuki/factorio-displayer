@@ -687,6 +687,41 @@ class TestMultiRailMidi:
         assert instruments == []
         assert rail_data == []
 
+    def test_low_beat_split_maps_to_kick(self):
+        """map_drums routes notes below the instrument's range to a low kick.
+
+        A piano channel playing a very low beat (MIDI 36 < piano's F3=53)
+        plus in-range melody yields two rails: the melody stays on piano and
+        the low beat is simulated with a single kick-1 drum.
+        """
+        mid = self._make_midi_with_channel([
+            (36, 100, 0, 240, 0),    # low beat, below piano range
+            (60, 100, 0, 480, 0),    # melody, in range
+        ])
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid, map_drums=True)
+        assert instruments == ["piano", "drum"]
+        drum_ri = instruments.index("drum")
+        # Only kick-1 (pitch 0) is used — no GM drum map spread.
+        used = [p for p in range(SPEAKER_COUNT)
+                if any(t[p] > 0 for t in rail_data[drum_ri])]
+        assert used == [0], f"Low beat should be a single kick-1, got {used}"
+
+    def test_no_drum_split_for_in_range_melody(self):
+        """Notes inside the instrument's range never become drums.
+
+        Regression: the old split treated any note in the GM drum range
+        (24-81) as a drum, fabricating fake kick/snare/triangle rails out of
+        piano melody.  A piano playing C4-G4 (60-67) must stay a single rail.
+        """
+        mid = self._make_midi_with_channel([
+            (60, 100, 0, 480, 0),
+            (64, 80, 0, 480, 0),
+            (67, 80, 0, 480, 0),
+        ])
+        instruments, rail_data = midi_to_multi_rail_tick_data(mid, map_drums=True)
+        assert instruments == ["piano"]
+        assert 'drum' not in instruments
+
 
 # ── optimal global octave shift tests ─────────────────────────────────
 

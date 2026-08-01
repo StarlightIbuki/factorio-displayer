@@ -27,10 +27,19 @@ FACTORIO_INSTRUMENTS = {
     'drum': {'min': 53, 'max': 88}             # F3-E6
 }
 
+# Very low notes that fall BELOW a melodic instrument's playable range
+# (e.g. MIDI < 53 for piano) cannot be played by that instrument.  When they
+# repeat like a beat, ``--map-drums`` routes them to a single low drum to
+# simulate the beat instead of dropping them or folding them up into melody.
+LOW_BEAT_DRUM = "kick-1"
+
 # --- 2. AUTOMATED INSTRUMENT ROUTING ---
 def map_gm_to_factorio(program, channel):  # pylint: disable=too-many-return-statements
     """Map a GM program number and channel to a Factorio instrument name."""
     if channel == 9:
+        return 'drum'
+    # GM2 percussion kits live at programs 120-127 (and some files use 128).
+    if 120 <= program <= 128:
         return 'drum'
     if 0 <= program <= 7:
         return 'piano'
@@ -653,32 +662,45 @@ def midi_to_multi_rail_tick_data(
             compact_instruments.append(inst)
         old_to_new[ri] = inst_to_rail[inst]
 
-    # When map_drums is on, split mixed channels into piano + drum rails
-    # instead of promoting (which loses non-drum notes).
-    drum_channel_offset = 100  # virtual channel IDs for drum-split rails
+    # When map_drums is on, dedicated percussion channels (channel 9, or a
+    # channel whose program is a GM percussion kit) are classified 'drum'
+    # above and routed to a drum rail by the channel_instrument logic below.
+    #
+    # In addition, for *melodic* channels we only treat notes that fall BELOW
+    # the instrument's lowest playable pitch (e.g. MIDI < 53 for piano) as
+    # drums.  Those very low notes cannot be played by the instrument and
+    # typically form a repeating bass/kick beat, so they are routed to a
+    # low drum (kick-1) to simulate the beat.
+    #
+    # We deliberately do NOT split notes from the GM drum range (24-81) that
+    # are still inside the instrument's range: that range overlaps melodic
+    # instruments, so a piano/bass track would otherwise be misclassified and
+    # fabricated into fake kick/snare/triangle sounds out of melody notes.
+    drum_channel_offset = 100  # virtual channel IDs for low-beat drum rails
     if map_drums:
         for ch in sorted(channels_with_notes):
-            if channel_instrument.get(ch) == 'drum':
-                continue  # already a dedicated drum channel
-            # Count drum vs non-drum notes on this channel
-            drum_notes = 0
-            total_notes = 0
+            inst = channel_instrument.get(ch, 'piano')
+            if inst == 'drum':
+                continue  # already a dedicated percussion channel
+            inst_min = FACTORIO_INSTRUMENTS[inst]['min']
+            has_low_beat = False
             for track in mid.tracks:
                 for msg in track:
                     if (getattr(msg, 'channel', -1) == ch
-                            and msg.type == 'note_on' and msg.velocity > 0):
-                        total_notes += 1
-                        if hasattr(msg, 'note') and msg.note in GM_DRUM_MAP:
-                            drum_notes += 1
-            # If this channel has a significant mix of drum notes, split it
-            if drum_notes > 0 and total_notes > 0 and drum_notes < total_notes:
-                # Create a virtual drum channel
+                            and msg.type == 'note_on' and msg.velocity > 0
+                            and msg.note < inst_min):
+                        has_low_beat = True
+                        break
+                if has_low_beat:
+                    break
+            if has_low_beat:
                 virt_ch = drum_channel_offset + ch
                 channel_instrument[virt_ch] = 'drum'
                 channels_with_notes.add(virt_ch)
                 sys.stderr.write(
-                    f"[midi_translator] Split channel {ch}: "
-                    f"{drum_notes}/{total_notes} drum notes → separate drum rail\n"
+                    f"[midi_translator] Channel {ch} ({inst}) has notes below "
+                    f"its range (<{inst_min}) — routing them to a low drum "
+                    f"({LOW_BEAT_DRUM}) to simulate the beat\n"
                 )
 
     # Rebuild channel_rail with possibly new drum channels
@@ -739,8 +761,11 @@ def midi_to_multi_rail_tick_data(
                 if msg.type == 'note_on' and msg.velocity > 0 and ch in channel_rail:
                     ri = channel_rail[ch]
                     inst = rail_instruments[ri]
-                    if inst != 'drum' and not (map_drums and msg.note in GM_DRUM_MAP
-                                               and channel_instrument.get(ch) != 'drum'):
+                    if inst != 'drum' and not (map_drums
+                                               and channel_instrument.get(ch) != 'drum'
+                                               and msg.note < FACTORIO_INSTRUMENTS[
+                                                   channel_instrument.get(ch, 'piano')
+                                               ]['min']):
                         rail_note_pitches[ri].append(msg.note)
         for ri, pitches in rail_note_pitches.items():
             shift = find_optimal_octave_shift(pitches, rail_instruments[ri])
@@ -769,11 +794,14 @@ def midi_to_multi_rail_tick_data(
                 continue
 
             ch = getattr(msg, 'channel', -1)
-            # Route drum-range notes to virtual drum channel when split
+            # Route very-low notes (below the instrument's playable range) to
+            # the virtual low-beat drum channel when map_drums is on.
             if (map_drums
                     and hasattr(msg, 'note')
-                    and msg.note in GM_DRUM_MAP
-                    and channel_instrument.get(ch) != 'drum'):
+                    and channel_instrument.get(ch) != 'drum'
+                    and msg.note < FACTORIO_INSTRUMENTS[
+                        channel_instrument.get(ch, 'piano')
+                    ]['min']):
                 virt_ch = drum_channel_offset + ch
                 if virt_ch in channel_rail:
                     ch = virt_ch
@@ -801,13 +829,18 @@ def midi_to_multi_rail_tick_data(
                 loudness = velocity / 127.0 * 100.0 * velocity_scale
 
                 if is_drum_mapped:
-                    # Map GM drum note → Factorio drum-kit note name → pitch_index
-                    drum_name = GM_DRUM_MAP.get(msg.note)
-                    if drum_name is None:
-                        continue  # unmapped drum note, skip
-                    pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
-                    if pitch_idx is None:
-                        continue
+                    if ch >= drum_channel_offset:
+                        # Virtual low-beat channel: simulate the beat with a
+                        # single low drum (kick), not a full GM drum map.
+                        pitch_idx = DRUM_NOTE_TO_PITCH[LOW_BEAT_DRUM]
+                    else:
+                        # Dedicated percussion channel: GM note → drum-kit name
+                        drum_name = GM_DRUM_MAP.get(msg.note)
+                        if drum_name is None:
+                            continue  # unmapped drum note, skip
+                        pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
+                        if pitch_idx is None:
+                            continue
                 else:
                     folded_note, log_msg = _fold_note(
                         msg.note, instrument=inst,
@@ -833,12 +866,16 @@ def midi_to_multi_rail_tick_data(
                     tempo, ticks_per_beat,
                 )
                 if is_drum_mapped:
-                    drum_name = GM_DRUM_MAP.get(msg.note)
-                    if drum_name is None:
-                        continue
-                    pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
-                    if pitch_idx is None:
-                        continue
+                    if ch >= drum_channel_offset:
+                        # Virtual low-beat channel: single low drum (kick)
+                        pitch_idx = DRUM_NOTE_TO_PITCH[LOW_BEAT_DRUM]
+                    else:
+                        drum_name = GM_DRUM_MAP.get(msg.note)
+                        if drum_name is None:
+                            continue
+                        pitch_idx = DRUM_NOTE_TO_PITCH.get(drum_name)
+                        if pitch_idx is None:
+                            continue
                 else:
                     folded_note, _ = _fold_note(
                         msg.note, instrument=inst,
