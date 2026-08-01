@@ -439,16 +439,17 @@ class TestLogicalBlueprintDecoder:
         speakers = [e for e in lb.entities.values()
                      if e.type == "programmable-speaker"]
         assert len(speakers) == 48
-        for i, spk in enumerate(speakers):
+        for spk in speakers:
+            pitch = int(spk.entity_id.rsplit("_", 1)[1])
             note = spk.properties.get("note", "")
-            if i < len(DRUM_KIT_NOTES):
-                assert note == DRUM_KIT_NOTES[i], (
-                    f"Speaker {i}: expected {DRUM_KIT_NOTES[i]!r}, got {note!r}"
+            if pitch < len(DRUM_KIT_NOTES):
+                assert note == DRUM_KIT_NOTES[pitch], (
+                    f"Speaker {pitch}: expected {DRUM_KIT_NOTES[pitch]!r}, got {note!r}"
                 )
             else:
                 # Remaining speakers use placeholder (first drum note)
                 assert note == DRUM_KIT_NOTES[0], (
-                    f"Speaker {i}: expected placeholder {DRUM_KIT_NOTES[0]!r}, got {note!r}"
+                    f"Speaker {pitch}: expected placeholder {DRUM_KIT_NOTES[0]!r}, got {note!r}"
                 )
 
     def test_drum_kit_note_names_without_map_drums(self):
@@ -461,11 +462,12 @@ class TestLogicalBlueprintDecoder:
         speakers = [e for e in lb.entities.values()
                      if e.type == "programmable-speaker"]
         assert len(speakers) == 48
-        for i, spk in enumerate(speakers):
+        for spk in speakers:
+            pitch = int(spk.entity_id.rsplit("_", 1)[1])
             note = spk.properties.get("note", "")
-            expected = _pitch_index_to_factorio_note(i)
+            expected = _pitch_index_to_factorio_note(pitch)
             assert note == expected, (
-                f"Speaker {i}: expected {expected!r}, got {note!r}"
+                f"Speaker {pitch}: expected {expected!r}, got {note!r}"
             )
 
     def test_piano_uses_midi_note_names(self):
@@ -479,13 +481,61 @@ class TestLogicalBlueprintDecoder:
             speakers = [e for e in lb.entities.values()
                          if e.type == "programmable-speaker"]
             assert len(speakers) == 48
-            for i, spk in enumerate(speakers):
+            for spk in speakers:
+                pitch = int(spk.entity_id.rsplit("_", 1)[1])
                 note = spk.properties.get("note", "")
-                expected = _pitch_index_to_factorio_note(i)
+                expected = _pitch_index_to_factorio_note(pitch)
                 assert note == expected, (
-                    f"Speaker {i} (map_drums={map_drums}): "
+                    f"Speaker {pitch} (map_drums={map_drums}): "
                     f"expected {expected!r}, got {note!r}"
                 )
+
+    def test_compact_drum_rail_only_builds_used_types(self):
+        """A drum rail with active_drum_pitches builds only used drum types.
+
+        Drums are a fixed set of sounds (not 48 pitches): a rail that only
+        plays kick-1 stores a raw tick→volume cell — one speaker, one LUT,
+        one match DC, one selector (no unpacker), port and mod.
+        """
+        lb = build_audio_decoder_logical(
+            name="Drum Test",
+            instrument="drum",
+            map_drums=True,
+            active_drum_pitches={0},
+        )
+        # page port + mod + LUT + match + sel + speaker = 6 (no unpacker)
+        assert len(lb.entities) == 6
+        speakers = [e for e in lb.entities.values()
+                     if e.type == "programmable-speaker"]
+        assert len(speakers) == 1
+        assert speakers[0].properties["note"] == "kick-1"
+        assert speakers[0].properties["instrument"] == "drum-kit"
+        dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        ccs = [e for e in lb.entities.values() if e.type == "constant-combinator"]
+        acs = [e for e in lb.entities.values() if e.type == "arithmetic-combinator"]
+        assert len(dcs) == 1   # match
+        assert len(ccs) == 2   # page port + LUT
+        assert len(acs) == 2   # mod + selector (no unpacker)
+
+    def test_compact_drum_three_types(self):
+        """Three used drums use raw cells: 3 speakers, no unpackers."""
+        lb = build_audio_decoder_logical(
+            name="Drum Test",
+            instrument="drum",
+            map_drums=True,
+            active_drum_pitches={0, 2, 5},
+        )
+        speakers = sorted(
+            (e for e in lb.entities.values() if e.type == "programmable-speaker"),
+            key=lambda e: e.entity_id,
+        )
+        assert [e.properties["note"] for e in speakers] == [
+            "kick-1", "snare-1", "hat-1",
+        ]
+        # 3 raw channels (LUT+match+sel each) + mod + port, no unpackers
+        acs = [e for e in lb.entities.values() if e.type == "arithmetic-combinator"]
+        assert len(acs) == 4  # mod + 3 selectors
+        assert len(lb.entities) == 14  # 3*(LUT+match+sel+spk) + port + mod
 
 
 # ── display builder tests ─────────────────────────────────────────────

@@ -294,6 +294,50 @@ class TestEncodeAudioToLogical:
         assert clock_net.color == "green"
         assert data_net.color == "red"
 
+    def test_drum_grouping_uses_raw_volume_cells(self):
+        """drum_grouping stores each used drum as a RAW tick→volume cell.
+
+        Drums have no pitch, so up to 12 used types get one cell per drum
+        whose value IS the loudness (no packing, no unpacker).
+        """
+        from factorio_display.audio.pitch_mapping import drum_grouping  # pylint: disable=import-outside-toplevel
+        tick = [[0] * SPEAKER_COUNT]
+        tick[0][0] = 100   # kick-1
+        tick[0][2] = 80    # snare-1
+        tick[0][5] = 60    # hat-1
+        grouping = drum_grouping({0, 2, 5})
+        assert grouping == [[0], [2], [5]]  # one raw cell per drum
+        packed = loudness_to_packed(tick, grouping=grouping)
+        assert packed[0] == [100, 80, 60]  # raw values, no pack_four
+
+    def test_drum_grouping_packs_13_plus(self):
+        """13+ drum types fall back to 4-per-cell packing (pool limit)."""
+        from factorio_display.audio.pitch_mapping import drum_grouping  # pylint: disable=import-outside-toplevel
+        grouping = drum_grouping(set(range(13)))
+        assert len(grouping) == 4  # ceil(13/4) cells
+        assert grouping[0] == [0, 1, 2, 3]
+
+    def test_encode_drum_grouping_single_page(self):
+        """A single-kick drum rail stores 1 RAW cell/tick → 60 cells/page.
+
+        The compact memory is 12× smaller than the generic 12-cell/tick
+        layout and each cell holds the kick loudness directly.
+        """
+        from factorio_display.audio.pitch_mapping import drum_grouping  # pylint: disable=import-outside-toplevel
+        data = [[0] * SPEAKER_COUNT for _ in range(60)]
+        for t in range(60):
+            data[t][0] = 40  # kick-1 every tick
+        grouping = drum_grouping({0})
+        lb = encode_audio_to_logical(
+            data, "DrumMem", self.pool, self.qual, grouping=grouping,
+        )
+        dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        assert len(dcs) == 1  # one 60-tick page
+        outs = dcs[0].properties["outputs"]
+        # raw volume per cell (not packed)
+        assert all(o.get("constant") == 40 for o in outs)
+        assert len(outs) == 60  # one output per tick (60 cells)
+
 
 class TestEncodeAudioCache:
     """The audio-analysis cache should skip re-translation and be correct."""

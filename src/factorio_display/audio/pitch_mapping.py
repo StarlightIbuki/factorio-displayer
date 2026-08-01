@@ -13,7 +13,7 @@ Semitone layout (starting from F)::
 
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Iterator, Sequence
 
 # 4-octave range: octaves 3, 4, 5, 6
 AUDIO_OCTAVES: list[int] = [3, 4, 5, 6]
@@ -100,6 +100,35 @@ DRUM_KIT_NOTES: list[str] = [
 DRUM_NOTE_TO_PITCH: dict[str, int] = {
     name: i for i, name in enumerate(DRUM_KIT_NOTES)
 }
+
+
+def drum_grouping(used_pitches: Sequence[int]) -> list[list[int | None]]:
+    """Group used drum pitch indices into per-tick cells.
+
+    Drums are a fixed set of sounds, not 48 pitches, and every drum type is
+    just a loudness — there is no pitch dimension to encode.  So for up to 12
+    used drum types each tick stores ONE **raw** volume per cell (one lane
+    per cell): every bit of the cell directly encodes tick→volume, and the
+    decoder needs no unpacker at all.
+
+    For 13+ types a raw layout would exceed the 720-signal page pool, so we
+    fall back to packing 4 volumes per cell (lanes 0..3; ``None`` = unused
+    lane in the final cell).
+    """
+    used = sorted(used_pitches)
+    if len(used) <= 12:
+        return [[p] for p in used]  # raw: one volume per cell, no packing
+    grouping: list[list[int | None]] = []
+    for c in range(0, len(used), 4):
+        grouping.append(
+            [used[c + l] if c + l < len(used) else None for l in range(4)]
+        )
+    return grouping
+
+
+def drum_cells_per_tick(used_pitches: Sequence[int]) -> int:
+    """Number of packed cells per tick for a drum rail using *used_pitches*."""
+    return len(drum_grouping(used_pitches))
 
 
 def _semitone_to_letter(semitone: int) -> str:

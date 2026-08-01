@@ -40,6 +40,7 @@ from draftsman.entity import new_entity
 
 from .pitch_mapping import (
     DRUM_KIT_NOTES,
+    drum_grouping,
     iter_speaker_signals,
     pitch_index_to_signal,
     SPEAKER_COUNT,
@@ -687,6 +688,36 @@ def _build_rail_logical(
     )
     ep = _RailEndpoints()
 
+    # ── Layout: cells per tick + which speakers each cell drives ──
+    # A rail is a row of *cells_per_tick* decoder channels; every channel
+    # unpacks one packed cell (up to 4 lane loudnesses) into up to 4
+    # speakers.  The generic 48-speaker rail uses 12 cells/tick (one per
+    # semitone, lanes = the 4 octaves).  A compact drum rail uses only the
+    # drum TYPES the song actually plays, packed 4-per-cell — so a song with
+    # a single kick uses 1 cell/tick, 1 speaker and a tiny decoder.
+    is_drum = instrument_proto == "drum-kit" and map_drums
+    if is_drum and active_drum_pitches is not None:
+        grouping = drum_grouping(active_drum_pitches)
+        cells_per_tick = len(grouping)
+        channels: list[list[tuple[int, int]]] = [
+            [(lane, p) for lane, p in enumerate(cell) if p is not None]
+            for cell in grouping
+        ]
+    else:
+        cells_per_tick = 12
+        channels = [
+            [(oct_idx, ch + oct_idx * 12) for oct_idx in range(4)]
+            for ch in range(12)
+        ]
+
+    # The page port and mod AC always sit at the rail's rightmost column
+    # (rail_x + PORT_X).  A compact rail right-aligns its channels so the
+    # last channel is directly under the port/mod — keeping port → ch0_sel
+    # and mod → ch0_match short (Factorio silently drops wires > 9 tiles)
+    # and leaving the shared memory column (pp_x+1) untouched for all rails.
+    port_x = rail_x + PORT_X
+    channel_x = rail_x + PORT_X - cells_per_tick  # channels at channel_x + c
+
     # ── Page input port ──────────────────────────────────────────
     port_id = f"{prefix}page_port"
     # The page port's red output is connected to the upstream audio memory
@@ -697,7 +728,7 @@ def _build_rail_logical(
         entity_id=port_id,
         type="constant-combinator",
         properties={"signals": []},
-        position=(rail_x + PORT_X, PORT_Y),
+        position=(port_x, PORT_Y),
     ))
     ep.port_id = port_id
 
@@ -712,57 +743,82 @@ def _build_rail_logical(
             "second_operand": TICKS_PER_PAGE,
             "output_signal": "signal-M",
         },
-        position=(rail_x + MOD_X, MOD_Y),
+        position=(port_x, MOD_Y),
     ))
     ep.mod_id = mod_id
 
-    # ── Speakers (48) ────────────────────────────────────────────
+    # ── Per-channel pipeline + speakers (cells_per_tick channels) ──
     speaker_ids: dict[int, str] = {}
-    col_speakers: dict[int, list[str]] = {c: [] for c in range(12)}
+    col_speakers: dict[int, list[str]] = {c: [] for c in range(cells_per_tick)}
 
-    is_drum = instrument_proto == "drum-kit" and map_drums
-    for pitch_idx, sig in iter_speaker_signals():
-        # For a drum rail we only emit the drum TYPES the song actually uses
-        # (drums are a fixed set of sounds, not 48 pitches) — skip the rest
-        # instead of placing inert kick-1 placeholder speakers.
-        if is_drum and active_drum_pitches is not None and pitch_idx not in active_drum_pitches:
-            continue
-        col = rail_x + (pitch_idx % 12)
-        row = SPK_Y + (3 - pitch_idx // 12)
-        spk_id = f"{prefix}spk_{pitch_idx}"
-        if is_drum:
-            if pitch_idx < len(DRUM_KIT_NOTES):
-                note_name = DRUM_KIT_NOTES[pitch_idx]
-            else:
-                note_name = DRUM_KIT_NOTES[0]  # placeholder (never played)
+    for c, ch_lanes in enumerate(channels):
+        base_id = f"{prefix}ch{c}"
+        col = channel_x + c
+
+        def _add_ac(uid: str, first_op: str, op: str, second_op: int | str, out: str, y: int) -> str:
+            ac_id = f"{base_id}_{uid}"
+            lb.add_entity(LogicalEntity(
+                entity_id=ac_id,
+                type="arithmetic-combinator",
+                properties={
+                    "first_operand": first_op,
+                    "operation": op,
+                    "second_operand": second_op,
+                    "output_signal": out,
+                },
+                position=(col, y),
+            ))
+            return ac_id
+
+        def _fmt(s: dict[str, str]) -> str:
+            return f"{s['name']}@{s['quality']}"
+
+        # ── Unpacker layout / selector output ─────────────────
+        # Drums have no pitch, so a single-volume cell is stored RAW: the
+        # selector outputs the drum's own signal directly (each(red) *
+        # each(green) → drum_signal) and the speaker reads it with no
+        # unpacker at all — every bit of the cell is the tick→volume.  Only
+        # packed cells (13+ drum types share cells) need the lane-unpacker
+        # chain below.
+        raw = len(ch_lanes) == 1
+        sel_out_signal = BELL_SIG
+        ac_specs: list[tuple[str, str, str, int | str, str]] = []  # (uid, first, op, second, out)
+        lane_out: dict[int, str] = {}    # lane -> AC emitting the lane signal
+        lane_pass: dict[int, str] = {}   # lane -> AC that reads bell directly
+        if raw:
+            sel_out_signal = _fmt(pitch_index_to_signal(ch_lanes[0][1]))
         else:
-            note_name = _pitch_index_to_factorio_note(pitch_idx, midi_base=midi_base)
-        lb.add_entity(LogicalEntity(
-            entity_id=spk_id,
-            type="programmable-speaker",
-            properties={
-                "instrument": instrument_proto,
-                "note": note_name,
-                "vol_signal": sig["name"],
-                "vol_quality": sig["quality"],
-                "polyphony": True,
-                "circuit_enabled": True,
-            },
-            position=(col, row),
-        ))
-        speaker_ids[pitch_idx] = spk_id
-        col_speakers[pitch_idx % 12].append(spk_id)
+            for lane, pitch_idx in sorted(ch_lanes):
+                sig_str = _fmt(pitch_index_to_signal(pitch_idx))
+                if lane == 0:
+                    ac_specs.append(("l1", BELL_SIG, ">>", 21, sig_str))
+                    lane_out[0] = "l1"
+                    lane_pass[0] = "l1"
+                elif lane == 1:
+                    ac_specs.append(("s2", BELL_SIG, ">>", 14, "signal-5"))
+                    ac_specs.append(("l2", "signal-5", "AND", 127, sig_str))
+                    lane_out[1] = "l2"
+                    lane_pass[1] = "s2"
+                elif lane == 2:
+                    ac_specs.append(("s3", BELL_SIG, ">>", 7, "signal-6"))
+                    ac_specs.append(("l3", "signal-6", "AND", 127, sig_str))
+                    lane_out[2] = "l3"
+                    lane_pass[2] = "s3"
+                else:
+                    ac_specs.append(("l4", BELL_SIG, "AND", 127, sig_str))
+                    lane_out[3] = "l4"
+                    lane_pass[3] = "l4"
 
-    # ── Per-channel pipeline (12 channels) ───────────────────────
-    for ch in range(12):
-        base_id = f"{prefix}ch{ch}"
-        col = rail_x + ch
+        n_ac = len(ac_specs)
+        # Speakers sit just below the last AC (or below the selector for a
+        # raw cell) so no dead space is left when lanes are unused.
+        first_spk_y = (UNP_L1_Y - 2 * (n_ac - 1) - 1) if n_ac else (SEL_Y - 1)
 
         # Lookup CC
         cc_id = f"{base_id}_lut"
         cc_signals: list[dict] = []
         for t in range(TICKS_PER_PAGE):
-            cell_offset = t * 12 + ch
+            cell_offset = t * cells_per_tick + c
             sig_idx = cell_offset // num_qual
             qual_idx = cell_offset % num_qual
             value = 60 if t == 0 else t
@@ -794,7 +850,7 @@ def _build_rail_logical(
             position=(col, MATCH_Y),
         ))
 
-        # Selector AC: each(red) * each(green) → bell
+        # Selector AC: each(red) * each(green) → drum signal (raw) or bell
         sel_id = f"{base_id}_sel"
         lb.add_entity(LogicalEntity(
             entity_id=sel_id,
@@ -805,40 +861,49 @@ def _build_rail_logical(
                 "operation": "*",
                 "second_operand": "signal-each",
                 "second_operand_wires": ["green"],
-                "output_signal": BELL_SIG,
+                "output_signal": sel_out_signal,
             },
             position=(col, SEL_Y),
         ))
 
-        # Unpacker chain (6 ACs per channel)
-        spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(4)]
+        # Unpacker ACs (only for packed cells, stacked below the selector)
+        ac_id: dict[str, str] = {}
+        if not raw:
+            for i, (uid, first_op, op, second_op, out) in enumerate(ac_specs):
+                ac_id[uid] = _add_ac(uid, first_op, op, second_op, out, UNP_L1_Y - 2 * i)
 
-        def _add_ac(uid: str, first_op: str, op: str, second_op: int | str, out: str, y: int) -> str:
-            ac_id = f"{base_id}_{uid}"
+        # Speakers (beneath the unpackers / selector, one row per lane)
+        for lane, pitch_idx in sorted(ch_lanes):
+            sig = pitch_index_to_signal(pitch_idx)
+            row = first_spk_y - lane
+            spk_id = f"{prefix}spk_{pitch_idx}"
+            if is_drum:
+                # Drums are a fixed set of 17 sounds; a standalone drum grid
+                # (no audio data) pads the extra slots with kick-1 placeholders.
+                note_name = (
+                    DRUM_KIT_NOTES[pitch_idx]
+                    if pitch_idx < len(DRUM_KIT_NOTES)
+                    else DRUM_KIT_NOTES[0]
+                )
+            else:
+                note_name = _pitch_index_to_factorio_note(
+                    pitch_idx, midi_base=midi_base,
+                )
             lb.add_entity(LogicalEntity(
-                entity_id=ac_id,
-                type="arithmetic-combinator",
+                entity_id=spk_id,
+                type="programmable-speaker",
                 properties={
-                    "first_operand": first_op,
-                    "operation": op,
-                    "second_operand": second_op,
-                    "output_signal": out,
+                    "instrument": instrument_proto,
+                    "note": note_name,
+                    "vol_signal": sig["name"],
+                    "vol_quality": sig["quality"],
+                    "polyphony": True,
+                    "circuit_enabled": True,
                 },
-                position=(col, y),
+                position=(col, row),
             ))
-            return ac_id
-
-        def _fmt(s: dict[str, str]) -> str:
-            return f"{s['name']}@{s['quality']}"
-
-        uid_l1 = _add_ac("l1", BELL_SIG, ">>", 21, _fmt(spk_sigs[0]), UNP_L1_Y)
-        uid_s2 = _add_ac("s2", BELL_SIG, ">>", 14, "signal-5", UNP_S2_Y)
-        uid_l2 = _add_ac("l2", "signal-5", "AND", 127, _fmt(spk_sigs[1]), UNP_L2_Y)
-        uid_s3 = _add_ac("s3", BELL_SIG, ">>", 7, "signal-6", UNP_S3_Y)
-        uid_l3 = _add_ac("l3", "signal-6", "AND", 127, _fmt(spk_sigs[2]), UNP_L3_Y)
-        uid_l4 = _add_ac("l4", BELL_SIG, "AND", 127, _fmt(spk_sigs[3]), UNP_L4_Y)
-
-        out_order = [uid_l1, uid_l2, uid_l3, uid_l4]
+            speaker_ids[pitch_idx] = spk_id
+            col_speakers[c].append(spk_id)
 
         # ── Per-channel networks ──────────────────────────────
         # CC → match DC (green)
@@ -847,48 +912,52 @@ def _build_rail_logical(
         # Match DC → selector AC (green)
         lb.connect("green", Endpoint(match_id, "output"), Endpoint(sel_id, "input"))
 
-        # Selector → first unpacker (green, bell signal)
-        lb.connect("green", Endpoint(sel_id, "output"), Endpoint(uid_l1, "input"))
+        if raw:
+            # Selector → speaker: the volume flows straight through (red).
+            lb.connect("red", Endpoint(sel_id, "output"), Endpoint(col_speakers[c][0], "input"))
+        else:
+            # Bell passthrough green chain (input side): sel → l1 → s2 → s3 → l4
+            passthrough_order = [lane_pass[l] for l in range(4) if l in lane_pass]
+            if passthrough_order:
+                lb.connect("green", Endpoint(sel_id, "output"), Endpoint(ac_id[passthrough_order[0]], "input"))
+                for i in range(len(passthrough_order) - 1):
+                    lb.connect("green", Endpoint(ac_id[passthrough_order[i]], "input"), Endpoint(ac_id[passthrough_order[i + 1]], "input"))
+            # Unpacker green: s2 output → l2 input, s3 output → l3 input
+            if 1 in lane_out:
+                lb.connect("green", Endpoint(ac_id[lane_pass[1]], "output"), Endpoint(ac_id[lane_out[1]], "input"))
+            if 2 in lane_out:
+                lb.connect("green", Endpoint(ac_id[lane_pass[2]], "output"), Endpoint(ac_id[lane_out[2]], "input"))
 
-        # Unpacker green chain: l1→s2→s3→l4 (bell passthrough on input side)
-        lb.connect("green", Endpoint(uid_l1, "input"), Endpoint(uid_s2, "input"))
-        lb.connect("green", Endpoint(uid_s2, "input"), Endpoint(uid_s3, "input"))
-        lb.connect("green", Endpoint(uid_s3, "input"), Endpoint(uid_l4, "input"))
-        # Unpacker green: s2 output → l2 input, s3 output → l3 input
-        lb.connect("green", Endpoint(uid_s2, "output"), Endpoint(uid_l2, "input"))
-        lb.connect("green", Endpoint(uid_s3, "output"), Endpoint(uid_l3, "input"))
-
-        # Red output chain: l1→l2→l3→l4 steps the four octave volume
-        # signals down to speaker level in short hops, then continues down
-        # the column's four speakers (pitch ch, ch+12, ch+24, ch+36 at
-        # y=3,2,1,0).  Each column is an independent red network, so every
-        # wire stays ≤ 4 tiles and no speaker exceeds Factorio's 2-wire
-        # per-port limit.
-        for i in range(len(out_order) - 1):
-            lb.connect("red", Endpoint(out_order[i], "output"), Endpoint(out_order[i + 1], "output"))
-        col_spks = col_speakers[ch]  # ascending pitch: y=3,2,1,0
-        if col_spks:
-            lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(col_spks[0], "input"))
-            for i in range(len(col_spks) - 1):
-                lb.connect("red", Endpoint(col_spks[i], "input"), Endpoint(col_spks[i + 1], "input"))
+            # Red output chain: lane outputs (l1→l2→l3→l4, present ones) then
+            # down the column's speakers.  Each column is an independent red
+            # network, so every wire stays short and no speaker exceeds
+            # Factorio's 2-wire per-port limit.
+            out_order = [ac_id[lane_out[l]] for l in range(4) if l in lane_out]
+            for i in range(len(out_order) - 1):
+                lb.connect("red", Endpoint(out_order[i], "output"), Endpoint(out_order[i + 1], "output"))
+            col_spks = col_speakers[c]  # ascending lane: higher y → lower
+            if col_spks:
+                lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(col_spks[0], "input"))
+                for i in range(len(col_spks) - 1):
+                    lb.connect("red", Endpoint(col_spks[i], "input"), Endpoint(col_spks[i + 1], "input"))
 
     # ── Cross-channel networks ─────────────────────────────────
-    # Sub-tick red bus: ch11_match → ch10_match → … → ch0_match
-    for ch in range(11, 0, -1):
+    # Sub-tick red bus: ch{C-1}_match → … → ch0_match
+    for ch in range(cells_per_tick - 1, 0, -1):
         lb.connect("red", Endpoint(f"{prefix}ch{ch}_match", "input"), Endpoint(f"{prefix}ch{ch-1}_match", "input"))
 
-    # Page data red bus: port → ch11_sel → … → ch0_sel
-    lb.connect("red", Endpoint(port_id, "output"), Endpoint(f"{prefix}ch11_sel", "input"))
-    for ch in range(11, 0, -1):
+    # Page data red bus: port → ch{C-1}_sel → … → ch0_sel
+    lb.connect("red", Endpoint(port_id, "output"), Endpoint(f"{prefix}ch{cells_per_tick - 1}_sel", "input"))
+    for ch in range(cells_per_tick - 1, 0, -1):
         lb.connect("red", Endpoint(f"{prefix}ch{ch}_sel", "input"), Endpoint(f"{prefix}ch{ch-1}_sel", "input"))
 
     # Mod → last match (red, sub_tick injection)
-    lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch11_match", "input"))
+    lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch{cells_per_tick - 1}_match", "input"))
 
     # Clock green bus: all ports → mod
     lb.connect("green", Endpoint(port_id, "input"), Endpoint(mod_id, "input"))
 
-    ep.first_match_id = f"{prefix}ch11_match"
+    ep.first_match_id = f"{prefix}ch{cells_per_tick - 1}_match"
     ep.last_sel_id = f"{prefix}ch0_sel"
     return ep
 

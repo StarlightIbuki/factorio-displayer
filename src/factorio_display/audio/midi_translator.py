@@ -901,6 +901,11 @@ def midi_to_multi_rail_tick_data(
 
     def _build_one_rail(ri: int) -> list[list[float]]:
         """Build tick_data for a single rail (thread-safe, no shared state)."""
+        # Drums are percussive hits, not sustained tones: each hit keeps a
+        # FLAT loudness (its velocity) across its duration instead of a
+        # melodic ADSR ramp, so we never simulate a kick's loudness changing
+        # tick-by-tick.
+        is_drum_rail = rail_instruments[ri] == 'drum'
         td: list[list[float]] = [[0.0] * SPEAKER_COUNT for _ in range(num_ticks)]
         for pitch_idx, start_t, end_t, loudness in rail_notes[ri]:
             start_i = int(start_t)
@@ -910,7 +915,7 @@ def midi_to_multi_rail_tick_data(
                 continue
             for tick in range(max(0, start_i), min(num_ticks, end_i)):
                 tick_in_note = tick - start_i
-                if use_adsr:
+                if use_adsr and not is_drum_rail:
                     shaped = _adsr_shape(
                         tick_in_note, note_duration, loudness,
                         attack_ticks, decay_ticks, sustain_level, release_ticks,

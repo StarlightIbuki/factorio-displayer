@@ -120,19 +120,30 @@ def normalize_tick_data(
 
 def loudness_to_packed(
     tick_data: Sequence[Sequence[int]],
+    grouping: Sequence[Sequence[int | None]] | None = None,
 ) -> list[list[int]]:
-    """Convert ``tick_data[tick][speaker_idx]`` → ``tick_data[tick][channel]``.
+    """Convert ``tick_data[tick][speaker_idx]`` → ``tick_data[tick][cell]``.
 
-    Each inner list moves from 48 loudness values to 12 packed integers.
-
-    Packing groups the SAME semitone across 4 octaves into one integer,
-    matching the player's unpacker which routes all 4 sub-values to
-    speakers of the same semitone in different octaves::
+    Each inner list moves from loudness values to packed integers: every
+    cell packs up to 4 loudnesses (one per lane, 7 bits each) into one
+    integer.  *grouping* is a per-cell list of 4 pitch indices (``None`` =
+    silent lane); when omitted it uses the generic 48-speaker layout that
+    packs the SAME semitone across 4 octaves into one integer, matching the
+    player's unpacker which routes all 4 sub-values to speakers of the same
+    semitone in different octaves::
 
         Channel ch → semitone ch:  pitch[ch+0*12], pitch[ch+1*12],
                                     pitch[ch+2*12], pitch[ch+3*12]
+
+    A compact drum rail passes its own grouping.  A cell with a single lane
+    (a raw tick→volume drum cell) is stored directly — no packing, so every
+    bit encodes the volume and the decoder needs no unpacker.
     """
-    semitone_count = 12
+    if grouping is None:
+        grouping = [
+            [semitone + octave * 12 for octave in range(4)]
+            for semitone in range(12)
+        ]
     result: list[list[int]] = []
     for tick_loudness in tick_data:
         if len(tick_loudness) != SPEAKER_COUNT:
@@ -141,15 +152,19 @@ def loudness_to_packed(
                 f"got {len(tick_loudness)}"
             )
         packed: list[int] = []
-        for semitone in range(semitone_count):
-            packed.append(
-                pack_four(
-                    tick_loudness[semitone + 0 * semitone_count],  # octave 3
-                    tick_loudness[semitone + 1 * semitone_count],  # octave 4
-                    tick_loudness[semitone + 2 * semitone_count],  # octave 5
-                    tick_loudness[semitone + 3 * semitone_count],  # octave 6
+        for lanes in grouping:
+            if len(lanes) == 1:
+                # Raw tick→volume cell: the cell value IS the loudness.
+                packed.append(tick_loudness[lanes[0]] if lanes[0] is not None else 0)
+            else:
+                packed.append(
+                    pack_four(
+                        tick_loudness[lanes[0]] if lanes[0] is not None else 0,
+                        tick_loudness[lanes[1]] if lanes[1] is not None else 0,
+                        tick_loudness[lanes[2]] if lanes[2] is not None else 0,
+                        tick_loudness[lanes[3]] if lanes[3] is not None else 0,
+                    )
                 )
-            )
         result.append(packed)
     return result
 
@@ -251,6 +266,7 @@ def encode_audio_memory(
     y_offset: int = 0,
     x_offset: int = 0,
     id_prefix: str = "",
+    grouping: Sequence[Sequence[int | None]] | None = None,
 ) -> str:
     """Encode tick→loudness data into an audio-memory blueprint string.
 
@@ -259,10 +275,14 @@ def encode_audio_memory(
     The DC is gated by a tick-range condition (like the video encoder).
     Multiple pages are chained; only one page outputs at a time.
 
+    *grouping* (optional) selects the per-tick cell packing — see
+    :func:`loudness_to_packed`.  A compact drum rail passes only the drum
+    types the song uses, so its pages hold far fewer cells.
+
     Decoder formula::
         page_idx   = tick // ticks_per_page
         in_page    = tick  % ticks_per_page
-        flat_idx   = page_idx * cells_per_page + in_page * 12 + channel
+        flat_idx   = page_idx * cells_per_page + in_page * cells_per_tick + cell
         signal_idx = flat_idx % cells_per_page
     """
     from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
@@ -275,21 +295,23 @@ def encode_audio_memory(
 
     num_base = len(signal_pool)
     num_qual = len(qualities)
+    cells_per_tick = len(grouping) if grouping is not None else CHANNELS_PER_TICK
+    cells_per_page = TICKS_PER_PAGE * cells_per_tick
 
     if num_base == 0:
         raise ValueError("signal_pool must not be empty")
 
-    # The pool must have enough signals to fill one page (720 cells).
-    needed_base = math.ceil(CELLS_PER_PAGE / num_qual)
+    # The pool must have enough signals to fill one page.
+    needed_base = math.ceil(cells_per_page / num_qual)
     if num_base < needed_base:
         raise ValueError(
             f"signal_pool has {num_base} base signals × {num_qual} qualities = "
-            f"{num_base * num_qual} unique pairs, but {CELLS_PER_PAGE} are needed "
+            f"{num_base * num_qual} unique pairs, but {cells_per_page} are needed "
             f"for a {TICKS_PER_PAGE}-tick page.  Need at least {needed_base} base signals."
         )
 
     # 1. Pack
-    packed = loudness_to_packed(list(tick_data))
+    packed = loudness_to_packed(list(tick_data), grouping=grouping)
     total_ticks = len(packed)
 
     # 2. Flatten
@@ -298,13 +320,13 @@ def encode_audio_memory(
         flat.extend(tick_vals)
     total_cells = len(flat)
 
-    # 3. Page layout — fixed at CELLS_PER_PAGE (=720) cells per page
-    page_count = math.ceil(total_cells / CELLS_PER_PAGE)
+    # 3. Page layout — fixed at cells_per_page cells per page
+    page_count = math.ceil(total_cells / cells_per_page)
 
     sys.stderr.write(
         f"Audio: {total_ticks} ticks → {total_cells} cells → "
         f"{page_count} page(s) "
-        f"({CELLS_PER_PAGE} cells/page = {needed_base} base × {num_qual} qual, "
+        f"({cells_per_page} cells/page = {needed_base} base × {num_qual} qual, "
         f"{TICKS_PER_PAGE} ticks/page).\n"
     )
 
@@ -324,10 +346,10 @@ def encode_audio_memory(
         dc_id = f"{id_prefix}ap{page_idx}"
 
         # Tick range for this page
-        page_start_cell = page_idx * CELLS_PER_PAGE
-        page_end_cell = page_start_cell + CELLS_PER_PAGE
-        tick_start = page_start_cell // CHANNELS_PER_TICK
-        tick_end = (min(page_end_cell, total_cells) - 1) // CHANNELS_PER_TICK
+        page_start_cell = page_idx * cells_per_page
+        page_end_cell = page_start_cell + cells_per_page
+        tick_start = page_start_cell // cells_per_tick
+        tick_end = (min(page_end_cell, total_cells) - 1) // cells_per_tick
 
         # Condition: clock >= tick_start AND clock <= tick_end
         conditions = [
@@ -346,7 +368,7 @@ def encode_audio_memory(
 
         # Outputs: one per signal×quality pair for every cell in this page
         outputs: list = []
-        for cell_offset in range(CELLS_PER_PAGE):
+        for cell_offset in range(cells_per_page):
             flat_idx = page_start_cell + cell_offset
             if flat_idx >= total_cells:
                 break  # past end of real data; remaining slots stay silent
@@ -718,10 +740,13 @@ def _midi_rails(
             "data": int_data_list,
         })
 
-    # ── Per-rail gain: drums are percussive and quickly mask melodic rails ──
-    # Applied AFTER cache retrieval so the cached data stays pre-gain and the
-    # gain is never double-applied on a cache hit.
-    drum_gain = float(kwargs.get("drum_gain", 0.6))
+    # ── Per-rail gain: drums are percussive, sit low in the mix and sound
+    # more dominating to the ear than pitched notes, so they get a smaller
+    # gain to stay level with (not mask) the melody — a typical note sits
+    # around 25, so drums are scaled to match that rather than riding at
+    # the 100 peak.  Applied AFTER cache retrieval so the cached data stays
+    # pre-gain and the gain is never double-applied on a cache hit.
+    drum_gain = float(kwargs.get("drum_gain", 0.25))
     if drum_gain != 1.0:
         for ri, inst in enumerate(instruments):
             if "drum" in inst.lower():
@@ -1066,6 +1091,7 @@ def encode_audio_to_logical(
     qualities: list[str],
     clock_signal: str = "signal-clock",
     id_prefix: str = "",
+    grouping: Sequence[Sequence[int | None]] | None = None,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Encode tick→loudness data into a :class:`LogicalBlueprint`.
 
@@ -1090,6 +1116,9 @@ def encode_audio_to_logical(
         Name of the clock signal.
     id_prefix : str
         Prefix for entity ids (e.g. ``"r0_"`` for rail 0).
+    grouping : sequence of sequence of int|None, optional
+        Per-tick cell packing (see :func:`loudness_to_packed`).  A compact
+        drum rail passes only the drum types used, shrinking the memory.
 
     Returns
     -------
@@ -1103,20 +1132,22 @@ def encode_audio_to_logical(
 
     num_base = len(signal_pool)
     num_qual = len(qualities)
+    cells_per_tick = len(grouping) if grouping is not None else CHANNELS_PER_TICK
+    cells_per_page = TICKS_PER_PAGE * cells_per_tick
 
     if num_base == 0:
         raise ValueError("signal_pool must not be empty")
 
-    needed_base = math.ceil(CELLS_PER_PAGE / num_qual)
+    needed_base = math.ceil(cells_per_page / num_qual)
     if num_base < needed_base:
         raise ValueError(
             f"signal_pool has {num_base} base signals × {num_qual} qualities = "
-            f"{num_base * num_qual} unique pairs, but {CELLS_PER_PAGE} are needed "
+            f"{num_base * num_qual} unique pairs, but {cells_per_page} are needed "
             f"for a {TICKS_PER_PAGE}-tick page.  Need at least {needed_base} base signals."
         )
 
     # 1. Pack
-    packed = loudness_to_packed(list(tick_data))
+    packed = loudness_to_packed(list(tick_data), grouping=grouping)
     total_ticks = len(packed)
 
     # 2. Flatten
@@ -1126,12 +1157,12 @@ def encode_audio_to_logical(
     total_cells = len(flat)
 
     # 3. Page layout
-    page_count = math.ceil(total_cells / CELLS_PER_PAGE)
+    page_count = math.ceil(total_cells / cells_per_page)
 
     sys.stderr.write(
         f"Audio (logical): {total_ticks} ticks → {total_cells} cells → "
         f"{page_count} page(s) "
-        f"({CELLS_PER_PAGE} cells/page = {needed_base} base × {num_qual} qual, "
+        f"({cells_per_page} cells/page = {needed_base} base × {num_qual} qual, "
         f"{TICKS_PER_PAGE} ticks/page).\n"
     )
 
@@ -1143,10 +1174,10 @@ def encode_audio_to_logical(
     for page_idx in range(page_count):
         dc_id = f"{id_prefix}ap{page_idx}"
 
-        page_start_cell = page_idx * CELLS_PER_PAGE
-        page_end_cell = page_start_cell + CELLS_PER_PAGE
-        tick_start = page_start_cell // CHANNELS_PER_TICK
-        tick_end = (min(page_end_cell, total_cells) - 1) // CHANNELS_PER_TICK
+        page_start_cell = page_idx * cells_per_page
+        page_end_cell = page_start_cell + cells_per_page
+        tick_start = page_start_cell // cells_per_tick
+        tick_end = (min(page_end_cell, total_cells) - 1) // cells_per_tick
 
         # Build conditions and outputs
         conditions = [
@@ -1155,7 +1186,7 @@ def encode_audio_to_logical(
         ]
 
         outputs: list[dict] = []
-        for cell_offset in range(CELLS_PER_PAGE):
+        for cell_offset in range(cells_per_page):
             flat_idx = page_start_cell + cell_offset
             if flat_idx >= total_cells:
                 break

@@ -251,3 +251,54 @@ def test_large_audio_composition_all_wires_short() -> None:
     assert any(
         sel in _reachable(mem_dc, "red") for sel in player_sels
     ), "memory data does not reach decoder page-data selectors"
+
+
+def test_compact_drum_audio_passes_topology() -> None:
+    """Compact drum memory + player must compose without topology errors.
+
+    A single-kick drum rail uses 1 cell/tick (60 cells/page) on the memory
+    side and a 7-entity decoder (1 speaker + LUT + match + selector +
+    unpacker + port + mod).  This must still wire up like a normal rail.
+    """
+    from factorio_display import QUALITIES, SIGNAL_POOL
+    from factorio_display.audio.encoder import encode_audio_to_logical
+    from factorio_display.audio.pitch_mapping import drum_grouping
+
+    used = {0}  # kick-1 only
+    data = [[0] * 48 for _ in range(90)]
+    for t in range(90):
+        data[t][0] = 60  # kick-1 every tick
+
+    mem = encode_audio_to_logical(
+        data, "Audio Memory: Drum", list(SIGNAL_POOL), list(QUALITIES),
+        clock_signal="signal-clock", id_prefix="r0_",
+        grouping=drum_grouping(used),
+    )
+    mem.label = "Audio Memory: Drum"
+
+    timer = _build_timer_for_memory(mem)
+    player_lb = build_audio_decoder_logical(
+        name="Audio Player: Drum",
+        instrument="drum",
+        clock_signal="signal-clock",
+        map_drums=True,
+        active_drum_pitches=used,
+    )
+
+    result = compose(
+        components=[timer, mem, player_lb],
+        connections=[
+            PortConnection("Timer", "clock", mem.label, "clock"),
+            PortConnection("Timer", "clock", player_lb.label, "clock"),
+            PortConnection(mem.label, "data", player_lb.label, "data"),
+        ],
+        output_name="CompactDrumTopologyTest",
+        pole_type=None,
+        use_cache=False,
+    )
+    final_bp = to_draftsman(result)
+    assert_wire_topology(final_bp, label="CompactDrumTopologyTest", lb=result)
+    # The drum decoder is tiny: exactly one drum-kit speaker (kick-1).
+    speakers = [e for e in final_bp.entities
+                if e.name == "programmable-speaker" and e.instrument_name == "drum-kit"]
+    assert len(speakers) == 1, f"expected 1 drum speaker, got {len(speakers)}"

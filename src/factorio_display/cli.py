@@ -969,8 +969,9 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                          help="Deprecated alias for --rail-mode.")
     audio_g.add_argument("--map-drums", action="store_true", default=True,
                          help="Map GM drum notes (24-81) to Factorio drum-kit sounds (default: on).")
-    audio_g.add_argument("--drum-gain", type=float, default=0.6,
-                         help="Volume scale for the drum rail (0-1; default 0.6 so drums don't mask the melody).")
+    audio_g.add_argument("--drum-gain", type=float, default=0.25,
+                         help="Volume scale for the drum rail (0-1; default 0.25 — drums sit low "
+                         "in the mix and sound more dominating than pitched notes).")
     audio_g.add_argument("--no-global-shift", action="store_true", default=False,
                          help="Disable optimal global octave shift.")
 
@@ -1435,7 +1436,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
     midi_kwargs: dict[str, object] = {
         "attach_player": not getattr(args, "no_attach_player", False),
         "map_drums": getattr(args, "map_drums", True),
-        "drum_gain": getattr(args, "drum_gain", 0.6),
+        "drum_gain": getattr(args, "drum_gain", 0.25),
         "rail_mode": rail_mode,
         "use_global_shift": not getattr(args, "no_global_shift", False),
         "ticks_per_beat": getattr(args, "ticks_per_beat", 30),
@@ -1475,6 +1476,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         # Basic-Pitch transcriptions may yield several rails (e.g. piano +
         # drum); plain audio falls back to a single piano rail.
         from .audio.encoder import _audio_rails, encode_audio_to_logical
+        from .audio.pitch_mapping import drum_grouping
         from .audio.player_blueprint import build_multi_rail_decoder_logical
         from . import SIGNAL_POOL, QUALITIES  # pylint: disable=import-outside-toplevel
 
@@ -1482,12 +1484,31 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         if not instruments or not int_data_list:
             return
 
+        # For drum rails, only store/place the drum TYPES the song actually
+        # uses (at most the 17 Factorio drum-kit sounds — not 48 placeholders).
+        # The memory chunk packs just those loudnesses 4-per-cell and the
+        # decoder builds only the channels/speakers that are used.
+        active_drum_pitches: list[set[int] | None] = []
+        for ri, inst in enumerate(instruments):
+            if "drum" in inst.lower():
+                active_drum_pitches.append({
+                    p for p in range(48)
+                    if any(td[p] > 0 for td in int_data_list[ri])
+                })
+            else:
+                active_drum_pitches.append(None)
+
         mem_lbs: list[LogicalBlueprint] = []
         for ri, int_data in enumerate(int_data_list):
+            grouping = (
+                drum_grouping(active_drum_pitches[ri])
+                if active_drum_pitches[ri] is not None else None
+            )
             mem = encode_audio_to_logical(
                 int_data, f"{args.name} r{ri}",
                 signal_pool=list(SIGNAL_POOL), qualities=list(QUALITIES),
                 clock_signal="signal-clock", id_prefix=f"r{ri}_",
+                grouping=grouping,
             )
             mem.label = f"Audio Memory {ri}"
             mem_lbs.append(mem)
@@ -1519,18 +1540,6 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         for mem in mem_lbs:
             components.append(mem)
             connections.append(PortConnection("Timer", "clock", mem.label, "clock"))
-
-        # For drum rails, only place the drum TYPES the song actually uses
-        # (at most the 17 Factorio drum-kit sounds — not 48 placeholders).
-        active_drum_pitches: list[set[int] | None] = []
-        for ri, inst in enumerate(instruments):
-            if "drum" in inst.lower():
-                active_drum_pitches.append({
-                    p for p in range(48)
-                    if any(td[p] > 0 for td in int_data_list[ri])
-                })
-            else:
-                active_drum_pitches.append(None)
 
         player_lb = build_multi_rail_decoder_logical(
             name=f"Audio Player: {args.name}",
