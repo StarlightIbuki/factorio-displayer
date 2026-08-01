@@ -193,7 +193,10 @@ def _layout_and_prewire_audio_bank(lb: "LogicalBlueprint", dc_ids: list[str]) ->
     if n == 0:
         return
 
-    cols = max(1, math.ceil(math.sqrt(n)))
+    # Cap at 12 columns so a multi-rail memory bank stays within the 13-tile
+    # rail spacing and never overlaps the neighbouring rail's player (a
+    # sqrt-based width grows to 15+ columns for 200+ pages).
+    cols = min(12, max(1, math.ceil(math.sqrt(n))))
 
     for idx, dc_id in enumerate(dc_ids):
         row = idx // cols
@@ -476,18 +479,64 @@ def encode_audio_auto(
     return _encode_midi(path, **kwargs)
 
 
-def _encode_midi(
+def _audio_rails(
     path: str,
-    **kwargs: object,
-) -> str:
-    """Encode a MIDI file (or a Basic Pitch transcription) into a blueprint.
+    kwargs: dict[str, object],
+) -> tuple[list[str], list[list[list[int]]]]:
+    """Return ``(instruments, int_data_list)`` for any audio/MIDI input.
 
-    Shared by the ``.mid`` / ``.midi`` input path and the AI-transcription
-    path (Basic Pitch produces a MIDI that is then fed through here).
+    Used by the composed audio path so it can build one memory bank and one
+    player rail per instrument.  MIDI and Basic-Pitch transcriptions go
+    through :func:`_midi_rails`; other audio falls back to the built-in STFT
+    analysis (single piano rail).
     """
-    from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    _AUDIO_EXTS = {"wav", "flac", "ogg", "aiff", "aif", "au", "caf", "mp3", "mp4", "m4a", "aac", "wma"}
+
+    if ext in ("mid", "midi"):
+        return _midi_rails(path, kwargs)
+
+    if ext in _AUDIO_EXTS:
+        if bool(kwargs.get("use_basic_pitch", True)):
+            from .basic_pitch_transcriber import transcribe_audio  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+            midi_path = transcribe_audio(path)
+            if midi_path is not None:
+                return _midi_rails(midi_path, kwargs)
+
+        # Built-in STFT → single piano rail.
+        from .audio_analyzer import (  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+            audio_file_to_loudness, fold_loudness_array,
+        )
+        full_loudness = audio_file_to_loudness(
+            path, activation_threshold=float(kwargs.get("activation_threshold", 0.0)),
+        )
+        if not full_loudness:
+            return [], []
+        game_loudness = fold_loudness_array(full_loudness)
+        global_max = max((v for tick in game_loudness for v in tick), default=0.0)
+        scale = 100.0 / global_max if global_max > 0 else 1.0
+        int_data = [
+            [max(0, min(100, int(round(v * scale)))) for v in tick]
+            for tick in game_loudness
+        ]
+        return ["piano"], [int_data]
+
+    return [], []
+
+
+def _midi_rails(
+    path: str,
+    kwargs: dict[str, object],
+) -> tuple[list[str], list[list[list[int]]]]:
+    """Translate a MIDI file (or Basic Pitch transcription) into rails.
+
+    Returns ``(instruments, int_data_list)`` where *instruments* is one entry
+    per rail and ``int_data_list[ri][tick][pitch]`` is the 0-100 loudness grid
+    for rail *ri*.  Shared by :func:`_encode_midi` and the composed audio path
+    (so the composed path can build one memory bank + player rail per
+    instrument).
+    """
     from .midi_translator import midi_to_multi_rail_tick_data  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
-    from .player_blueprint import build_multi_rail_decoder  # pylint: disable=relative-beyond-top-level
 
     # Gather midi_translator kwargs
     midi_kwargs: dict[str, object] = {}
@@ -513,7 +562,6 @@ def _encode_midi(
 
     # ── Determine instruments via rail_mode ─────────────────────────
     rail_mode: str = str(kwargs.get("rail_mode", "piano"))
-    attach_player = bool(kwargs.get("attach_player", True))
     map_drums = bool(kwargs.get("map_drums", False))
 
     # Parse rail_mode: "piano", "all", "auto:0.05", or "piano,bass"
@@ -603,8 +651,7 @@ def _encode_midi(
                     best = max(range(len(multi_data)), key=lambda i: sum(
                         1 for t in multi_data[i] if any(v > 0 for v in t)
                     ))
-                    instruments = [instruments[best]]  # type: ignore[index] — will be overridden below
-                    # Need to re-fetch just that one
+                    instruments = [instruments[best]]  # type: ignore[index]
                     instruments = [instruments[0]]
         else:
             # Comma-separated instrument names: "piano,bass,drum"
@@ -614,7 +661,7 @@ def _encode_midi(
 
         if not instruments:
             sys.stderr.write("No instruments selected.\n")
-            return ""
+            return [], []
 
         sys.stderr.write(
             f"Using {len(instruments)} rail(s): {', '.join(instruments)}\n"
@@ -664,16 +711,35 @@ def _encode_midi(
                         for tick in float_data
                     ])
 
-    if not int_data_list or not any(any(any(v for v in tick) for tick in td) for td in int_data_list):
-        sys.stderr.write("No notes found in MIDI.\n")
-        return ""
-
     # Persist the freshly-computed tick data (only non-empty results).
     if _cached is None:
         cache_json_put("audio_encode", _ckey, {
             "instruments": instruments,
             "data": int_data_list,
         })
+
+    return instruments, int_data_list
+
+
+def _encode_midi(
+    path: str,
+    **kwargs: object,
+) -> str:
+    """Encode a MIDI file (or a Basic Pitch transcription) into a blueprint.
+
+    Shared by the ``.mid`` / ``.midi`` input path and the AI-transcription
+    path (Basic Pitch produces a MIDI that is then fed through here).
+    """
+    from .. import SIGNAL_POOL, QUALITIES, CLOCK_SIGNAL  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from .player_blueprint import build_multi_rail_decoder  # pylint: disable=relative-beyond-top-level
+
+    instruments, int_data_list = _midi_rails(path, kwargs)
+    if not int_data_list or not any(any(any(v for v in tick) for tick in td) for td in int_data_list):
+        sys.stderr.write("No notes found in MIDI.\n")
+        return ""
+
+    attach_player = bool(kwargs.get("attach_player", True))
+    map_drums = bool(kwargs.get("map_drums", False))
 
     # ── debug JSON dump ──────────────────────────────────────────────
     debug_json_path = kwargs.get("debug_json_path")

@@ -170,6 +170,7 @@ class _RailEndpoints:
         self.first_sel_id: str = ""       # ch11_sel (receives page data on red)
         self.last_sel_id: str = ""        # ch0_sel (for daisy-chain out)
         self.port_id: str = ""            # page_port CC
+        self.mod_id: str = ""             # modulo AC (clock % 60)
         self.last_speaker_id: str = ""    # last speaker in red chain (for debug bridge)
         self.first_dbg_id: str = ""       # first debug lamp (for cross-rail bridge)
         self.speaker_ids: dict[tuple[int, int], str] = {}
@@ -632,61 +633,34 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def build_audio_decoder_logical(
-    name: str = "Audio Decoder",
-    instrument: str = "piano",
-    clock_signal: str = "signal-clock",
-    signal_pool: list[str] | None = None,
-    qualities: list[str] | None = None,
-    map_drums: bool = False,
-) -> "LogicalBlueprint":  # noqa: F821
-    """Build a single-rail 48-speaker audio decoder as a
-    :class:`LogicalBlueprint` (no positions, networks instead of wires).
+def _build_rail_logical(
+    lb: "LogicalBlueprint",  # noqa: F821
+    prefix: str,
+    rail_x: int,
+    instrument: str,
+    signal_pool: list[str],
+    qualities: list[str],
+    map_drums: bool,
+    midi_base: int,
+    clock_signal: str,
+) -> "_RailEndpoints":  # noqa: F821
+    """Build one rail's 48-speaker decoder into *lb* as logical entities/networks.
 
-    This is the logical-format counterpart of :func:`build_audio_decoder`.
-    Use :func:`to_draftsman` to materialise it into a draftsman
-    ``Blueprint`` with positions and physical wiring.
-
-    Parameters
-    ----------
-    name : str
-        Label for the blueprint.
-    instrument : str
-        Factorio instrument name (piano, bass, celesta, plucked, drum).
-    clock_signal : str
-        Name of the clock signal.
-    signal_pool : list[str] | None
-        Base signal names.  Defaults to the project pool.
-    qualities : list[str] | None
-        Quality tiers.  Defaults to the project qualities.
-    map_drums : bool
-        When True and instrument is ``"drum"``, speakers use drum-kit
-        note names (kick-1, snare-1, …) instead of MIDI note names.
-
-    Returns
-    -------
-    LogicalBlueprint
+    Entity ids are prefixed with *prefix* (e.g. ``"r0_"``) and positions are
+    offset by *rail_x* so multiple rails can sit side by side.  Returns the
+    cross-rail endpoint ids.
     """
-    from .. import SIGNAL_POOL, QUALITIES  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
-    from ..logical_blueprint import Endpoint, LogicalBlueprint, LogicalEntity  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
 
-    if signal_pool is None:
-        signal_pool = list(SIGNAL_POOL)
-    if qualities is None:
-        qualities = list(QUALITIES)
-
-    num_base = len(signal_pool)
     num_qual = len(qualities)
-
     instrument_proto = INSTRUMENT_MAP.get(
         instrument.lower().replace("programmable-speaker-instrument-", ""),
         instrument,
     )
-
-    lb = LogicalBlueprint(label=name)
+    ep = _RailEndpoints()
 
     # ── Page input port ──────────────────────────────────────────
-    port_id = "page_port"
+    port_id = f"{prefix}page_port"
     # The page port's red output is connected to the upstream audio memory
     # data bus, so it must not emit any non-audio signal.  Keep it as an
     # empty constant combinator; its input side still receives the clock
@@ -695,11 +669,12 @@ def build_audio_decoder_logical(
         entity_id=port_id,
         type="constant-combinator",
         properties={"signals": []},
-        position=(PORT_X, PORT_Y),
+        position=(rail_x + PORT_X, PORT_Y),
     ))
+    ep.port_id = port_id
 
     # ── Modulo AC: clock % 60 → signal-M ─────────────────────────
-    mod_id = "mod"
+    mod_id = f"{prefix}mod"
     lb.add_entity(LogicalEntity(
         entity_id=mod_id,
         type="arithmetic-combinator",
@@ -709,8 +684,9 @@ def build_audio_decoder_logical(
             "second_operand": TICKS_PER_PAGE,
             "output_signal": "signal-M",
         },
-        position=(MOD_X, MOD_Y),
+        position=(rail_x + MOD_X, MOD_Y),
     ))
+    ep.mod_id = mod_id
 
     # ── Speakers (48) ────────────────────────────────────────────
     speaker_ids: dict[int, str] = {}
@@ -718,16 +694,16 @@ def build_audio_decoder_logical(
 
     is_drum = instrument_proto == "drum-kit" and map_drums
     for pitch_idx, sig in iter_speaker_signals():
-        col = pitch_idx % 12
+        col = rail_x + (pitch_idx % 12)
         row = SPK_Y + (3 - pitch_idx // 12)
-        spk_id = f"spk_{pitch_idx}"
+        spk_id = f"{prefix}spk_{pitch_idx}"
         if is_drum:
             if pitch_idx < len(DRUM_KIT_NOTES):
                 note_name = DRUM_KIT_NOTES[pitch_idx]
             else:
                 note_name = DRUM_KIT_NOTES[0]  # placeholder (never played)
         else:
-            note_name = _pitch_index_to_factorio_note(pitch_idx)
+            note_name = _pitch_index_to_factorio_note(pitch_idx, midi_base=midi_base)
         lb.add_entity(LogicalEntity(
             entity_id=spk_id,
             type="programmable-speaker",
@@ -742,11 +718,12 @@ def build_audio_decoder_logical(
             position=(col, row),
         ))
         speaker_ids[pitch_idx] = spk_id
-        col_speakers[col].append(spk_id)
+        col_speakers[pitch_idx % 12].append(spk_id)
 
     # ── Per-channel pipeline (12 channels) ───────────────────────
     for ch in range(12):
-        base_id = f"ch{ch}"
+        base_id = f"{prefix}ch{ch}"
+        col = rail_x + ch
 
         # Lookup CC
         cc_id = f"{base_id}_lut"
@@ -765,7 +742,7 @@ def build_audio_decoder_logical(
             entity_id=cc_id,
             type="constant-combinator",
             properties={"signals": cc_signals},
-            position=(ch, LUT_Y),
+            position=(col, LUT_Y),
         ))
 
         # Match DC (handles sub_tick 1..59)
@@ -781,10 +758,15 @@ def build_audio_decoder_logical(
                     {"signal": "signal-each", "copy_count": False, "constant": 1},
                 ],
             },
-            position=(ch, MATCH_Y),
+            position=(col, MATCH_Y),
         ))
 
         # Match0 DC (handles sub_tick 0 — value-0 fallback)
+        # Both conditions are AND-ed: sub_tick == 0 AND each == 60.  The
+        # explicit compare_type is required because the draftsman default is
+        # 'or' and the serializer's condition fixer must not turn this into
+        # (sub_tick == 0) OR (each == 60) — which would fire every tick since
+        # the lookup CC always outputs value 60 for the t=0 slots (the beep).
         match0_id = f"{base_id}_match0"
         lb.add_entity(LogicalEntity(
             entity_id=match0_id,
@@ -792,13 +774,14 @@ def build_audio_decoder_logical(
             properties={
                 "conditions": [
                     {"first": "signal-M", "op": "=", "constant": 0},
-                    {"first": "signal-each", "op": "=", "constant": 60},
+                    {"first": "signal-each", "op": "=", "constant": 60,
+                     "compare_type": "and"},
                 ],
                 "outputs": [
                     {"signal": "signal-each", "copy_count": False, "constant": 1},
                 ],
             },
-            position=(ch, MATCH0_Y),
+            position=(col, MATCH0_Y),
         ))
 
         # Selector AC: each(red) * each(green) → bell
@@ -814,7 +797,7 @@ def build_audio_decoder_logical(
                 "second_operand_wires": ["green"],
                 "output_signal": BELL_SIG,
             },
-            position=(ch, SEL_Y),
+            position=(col, SEL_Y),
         ))
 
         # Unpacker chain (6 ACs per channel)
@@ -831,10 +814,10 @@ def build_audio_decoder_logical(
                     "second_operand": second_op,
                     "output_signal": out,
                 },
-                position=(ch, y),
+                position=(col, y),
             ))
             return ac_id
-        
+
         def _fmt(s: dict[str, str]) -> str:
             return f"{s['name']}@{s['quality']}"
 
@@ -872,8 +855,7 @@ def build_audio_decoder_logical(
         # the column's four speakers (pitch ch, ch+12, ch+24, ch+36 at
         # y=3,2,1,0).  Each column is an independent red network, so every
         # wire stays ≤ 4 tiles and no speaker exceeds Factorio's 2-wire
-        # per-port limit (a cross-column grid snake would over-connect
-        # the column-head speakers and produce wires > 9 tiles).
+        # per-port limit.
         for i in range(len(out_order) - 1):
             lb.connect("red", Endpoint(out_order[i], "output"), Endpoint(out_order[i + 1], "output"))
         col_spks = col_speakers[ch]  # ascending pitch: y=3,2,1,0
@@ -884,30 +866,139 @@ def build_audio_decoder_logical(
     # ── Cross-channel networks ─────────────────────────────────
     # Sub-tick red bus: ch11_match → ch10_match → … → ch0_match
     for ch in range(11, 0, -1):
-        lb.connect("red", Endpoint(f"ch{ch}_match", "input"), Endpoint(f"ch{ch-1}_match", "input"))
-        lb.connect("red", Endpoint(f"ch{ch}_match0", "input"), Endpoint(f"ch{ch-1}_match0", "input"))
+        lb.connect("red", Endpoint(f"{prefix}ch{ch}_match", "input"), Endpoint(f"{prefix}ch{ch-1}_match", "input"))
+        lb.connect("red", Endpoint(f"{prefix}ch{ch}_match0", "input"), Endpoint(f"{prefix}ch{ch-1}_match0", "input"))
 
     # Page data red bus: port → ch11_sel → … → ch0_sel
-    lb.connect("red", Endpoint(port_id, "output"), Endpoint("ch11_sel", "input"))
+    lb.connect("red", Endpoint(port_id, "output"), Endpoint(f"{prefix}ch11_sel", "input"))
     for ch in range(11, 0, -1):
-        lb.connect("red", Endpoint(f"ch{ch}_sel", "input"), Endpoint(f"ch{ch-1}_sel", "input"))
-
-    # NOTE: no cross-column speaker grid.  Each column's four speakers are
-    # already chained to its unpacker outputs above (column-local red
-    # network), which keeps every speaker within 2 red wires and all wires
-    # short.
+        lb.connect("red", Endpoint(f"{prefix}ch{ch}_sel", "input"), Endpoint(f"{prefix}ch{ch-1}_sel", "input"))
 
     # Mod → last match (red, sub_tick injection)
-    lb.connect("red", Endpoint(mod_id, "output"), Endpoint("ch11_match", "input"))
-    lb.connect("red", Endpoint(mod_id, "output"), Endpoint("ch11_match0", "input"))
+    lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch11_match", "input"))
+    lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch11_match0", "input"))
 
     # Clock green bus: all ports → mod
     lb.connect("green", Endpoint(port_id, "input"), Endpoint(mod_id, "input"))
 
+    ep.first_match_id = f"{prefix}ch11_match"
+    ep.first_match0_id = f"{prefix}ch11_match0"
+    ep.last_sel_id = f"{prefix}ch0_sel"
+    return ep
+
+
+def build_audio_decoder_logical(
+    name: str = "Audio Decoder",
+    instrument: str = "piano",
+    clock_signal: str = "signal-clock",
+    signal_pool: list[str] | None = None,
+    qualities: list[str] | None = None,
+    map_drums: bool = False,
+) -> "LogicalBlueprint":  # noqa: F821
+    """Build a single-rail 48-speaker audio decoder as a
+    :class:`LogicalBlueprint` (no positions, networks instead of wires).
+
+    This is the logical-format counterpart of :func:`build_audio_decoder`.
+    Use :func:`to_draftsman` to materialise it into a draftsman
+    ``Blueprint`` with positions and physical wiring.
+
+    Parameters
+    ----------
+    name : str
+        Label for the blueprint.
+    instrument : str
+        Factorio instrument name (piano, bass, celesta, plucked, drum).
+    clock_signal : str
+        Name of the clock signal.
+    signal_pool : list[str] | None
+        Base signal names.  Defaults to the project pool.
+    qualities : list[str] | None
+        Quality tiers.  Defaults to the project qualities.
+    map_drums : bool
+        When True and instrument is ``"drum"``, speakers use drum-kit
+        note names (kick-1, snare-1, …) instead of MIDI note names.
+
+    Returns
+    -------
+    LogicalBlueprint
+    """
+    from .. import SIGNAL_POOL, QUALITIES  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from ..logical_blueprint import Endpoint, LogicalBlueprint  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+
+    if signal_pool is None:
+        signal_pool = list(SIGNAL_POOL)
+    if qualities is None:
+        qualities = list(QUALITIES)
+
+    lb = LogicalBlueprint(label=name)
+    _build_rail_logical(
+        lb, "", 0, instrument, signal_pool, qualities,
+        map_drums, INSTRUMENT_MIDI_BASES.get(instrument, 53), clock_signal,
+    )
+
     for net in lb.networks:
-        if net.color == "red" and Endpoint(port_id, "output") in net.endpoints:
+        if net.color == "red" and Endpoint("page_port", "output") in net.endpoints:
             lb.set_input_port("data", net.network_id)
-        elif net.color == "green" and Endpoint(port_id, "input") in net.endpoints:
+        elif net.color == "green" and Endpoint("page_port", "input") in net.endpoints:
             lb.set_input_port("clock", net.network_id)
+
+    return lb
+
+
+def build_multi_rail_decoder_logical(
+    name: str = "Audio Decoder",
+    instruments: list[str] | None = None,
+    clock_signal: str = "signal-clock",
+    signal_pool: list[str] | None = None,
+    qualities: list[str] | None = None,
+    map_drums: bool = False,
+) -> "LogicalBlueprint":  # noqa: F821
+    """Build a **multi-rail** 48-speaker-per-rail audio decoder as a
+    :class:`LogicalBlueprint`.
+
+    One rail is built per instrument, side by side (each 13 columns wide).
+    Every rail has its own mod AC (``clock % 60``) reading the **shared**
+    green clock, its own page-data red bus, and its own 48 speakers.
+
+    Ports
+    -----
+    - ``"clock"`` — shared green clock bus (all rails).
+    - ``"data_0"``, ``"data_1"``, … — per-rail red page-data input bus.
+    """
+    from .. import SIGNAL_POOL, QUALITIES  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+    from ..logical_blueprint import Endpoint, LogicalBlueprint  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
+
+    if instruments is None or not instruments:
+        instruments = ["piano"]
+    if signal_pool is None:
+        signal_pool = list(SIGNAL_POOL)
+    if qualities is None:
+        qualities = list(QUALITIES)
+
+    lb = LogicalBlueprint(label=name)
+    rail_info: list[_RailEndpoints] = []
+    for ri, inst in enumerate(instruments):
+        info = _build_rail_logical(
+            lb, f"r{ri}_", ri * RAIL_WIDTH, inst, signal_pool, qualities,
+            map_drums, INSTRUMENT_MIDI_BASES.get(
+                inst.lower().replace("programmable-speaker-instrument-", ""), 53,
+            ),
+            clock_signal,
+        )
+        rail_info.append(info)
+
+    # ── Share one green clock bus across all rails ──────────────
+    # Each rail's page_port input (and mod input) green network must merge so
+    # the single "clock" port feeds every rail.
+    for ri in range(1, len(rail_info)):
+        lb.connect("green", Endpoint(f"r{ri}_page_port", "input"), Endpoint(f"r{ri-1}_page_port", "input"))
+
+    # ── Declare ports ────────────────────────────────────────────
+    for net in lb.networks:
+        if net.color == "green" and Endpoint("r0_page_port", "input") in net.endpoints:
+            lb.set_input_port("clock", net.network_id)
+        for ri, info in enumerate(rail_info):
+            if net.color == "red" and Endpoint(info.port_id, "output") in net.endpoints:
+                lb.set_input_port(f"data_{ri}", net.network_id)
 
     return lb
