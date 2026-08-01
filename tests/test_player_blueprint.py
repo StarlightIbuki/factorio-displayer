@@ -319,20 +319,38 @@ class TestMultiRailDecoder:
         assert len(_get_entities_by_type(bp_multi, "programmable-speaker")) == 48
         assert len(_get_entities_by_type(bp_multi, "arithmetic-combinator")) == 85
 
-    def test_two_rails_double_speakers(self):
-        """Two rails → 96 speakers."""
+    def test_two_rails_speaker_counts(self):
+        """Piano rail keeps 48 speakers; a bass rail needs only its real
+        range (F2-E5 = 36) — so two rails → 84 speakers."""
         bp_str = build_multi_rail_decoder(
             name="Dual", instruments=["piano", "bass"],
         )
         bp = _parse_bp(bp_str)
         speakers = _get_entities_by_type(bp, "programmable-speaker")
-        assert len(speakers) == 96
+        assert len(speakers) == 48 + 36
 
         # ── logical-blueprint validation ──────────────────────────
         from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
         result = validate_blueprint_via_logical(bp_str)
         assert result["errors"] == [], f"Validation errors: {result['errors']}"
         assert result["entity_count"] == len(bp.entities)
+
+    def test_bass_rail_uses_real_range_speakers(self):
+        """A bass rail needs only 36 physical speakers (its real range).
+
+        The generic 48-speaker grid matches piano (F3-E7, 4 octaves).  The
+        other melodic instruments have a 3-octave real range (36 notes), so
+        they place 36 speakers — the missing 4th octave is never driven by
+        the routing, so its speakers (and the top lamp row) are not placed.
+        """
+        bp = _parse_bp(build_multi_rail_decoder(
+            name="Bass", instruments=["bass"],
+        ))
+        speakers = _get_entities_by_type(bp, "programmable-speaker")
+        assert len(speakers) == 36
+        # Bass has no 4th-octave row (y == SPK_Y, the top speaker row).
+        ys = {int(s.tile_position[1]) for s in speakers}
+        assert min(ys) >= 3, f"bass should only use 3 octave rows, got {sorted(ys)}"
 
     def test_two_rails_share_one_mod_ac(self):
         """Two rails share exactly one modulo AC (not one per rail)."""
@@ -341,8 +359,9 @@ class TestMultiRailDecoder:
         )
         bp = _parse_bp(bp_str)
         acs = _get_entities_by_type(bp, "arithmetic-combinator")
-        # 7perCh×12×2 rails + 1 shared mod = 169
-        assert len(acs) == 7 * 12 * 2 + 1
+        # piano: selector + 6 unpackers = 7/ch × 12; bass: selector + 5
+        # unpackers (3 octaves, no l4) = 6/ch × 12; + 1 shared mod
+        assert len(acs) == 7 * 12 + 6 * 12 + 1
 
         # ── logical-blueprint validation ──────────────────────────
         from conftest import validate_blueprint_via_logical  # pylint: disable=import-outside-toplevel
@@ -374,7 +393,8 @@ class TestMultiRailDecoder:
         rail0 = [s for s in speakers if int(s.tile_position[0]) < 12]
         rail1 = [s for s in speakers if int(s.tile_position[0]) >= 13]
         assert len(rail0) == 48
-        assert len(rail1) == 48
+        # Drum rail (melodic fallback) uses its real range (F3-E6 = 36)
+        assert len(rail1) == 36
         for s in rail0:
             assert s.instrument_name == "piano", f"Rail 0 expected piano, got {s.instrument_name}"
         for s in rail1:
@@ -438,7 +458,8 @@ class TestLogicalBlueprintDecoder:
         )
         speakers = [e for e in lb.entities.values()
                      if e.type == "programmable-speaker"]
-        assert len(speakers) == 48
+        # Standalone drum fallback uses the drum's real range (F3-E6 = 36).
+        assert len(speakers) == 36
         for spk in speakers:
             pitch = int(spk.entity_id.rsplit("_", 1)[1])
             note = spk.properties.get("note", "")
@@ -461,7 +482,8 @@ class TestLogicalBlueprintDecoder:
         )
         speakers = [e for e in lb.entities.values()
                      if e.type == "programmable-speaker"]
-        assert len(speakers) == 48
+        # Standalone drum fallback uses the drum's real range (F3-E6 = 36).
+        assert len(speakers) == 36
         for spk in speakers:
             pitch = int(spk.entity_id.rsplit("_", 1)[1])
             note = spk.properties.get("note", "")
@@ -516,6 +538,33 @@ class TestLogicalBlueprintDecoder:
         assert len(dcs) == 1   # match
         assert len(ccs) == 2   # page port + LUT
         assert len(acs) == 2   # mod + selector (no unpacker)
+
+    def test_drum_with_data_is_compact_even_without_map_drums(self):
+        """A drum rail with active_drum_pitches uses the compact per-drum
+        layout even when map_drums=False.
+
+        ``map_drums`` only controls whether below-range melodic notes route
+        into a kick drum — an existing drum rail must still use the compact
+        per-used-drum cells.  Regression: without this, a large drum
+        ``ticks_per_page`` overflowed the LUT signal pool when map_drums=False.
+        """
+        lb = build_audio_decoder_logical(
+            name="Drum Test",
+            instrument="drum",
+            map_drums=False,
+            active_drum_pitches={1, 2, 5},
+            ticks_per_page=303,
+        )
+        speakers = sorted(
+            (e for e in lb.entities.values() if e.type == "programmable-speaker"),
+            key=lambda e: e.entity_id,
+        )
+        # 3 used drum types → 3 raw cells, 3 speakers, no unpackers
+        assert [e.properties["note"] for e in speakers] == [
+            "kick-2", "snare-1", "hat-1",
+        ]
+        acs = [e for e in lb.entities.values() if e.type == "arithmetic-combinator"]
+        assert len(acs) == 4  # mod + 3 selectors (no unpackers)
 
     def test_compact_drum_three_types(self):
         """Three used drums use raw cells: 3 speakers, no unpackers."""

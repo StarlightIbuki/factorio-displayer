@@ -311,6 +311,19 @@ def _melodic_ranges() -> dict[str, dict[str, int]]:
     }
 
 
+def speaker_count_for(instrument: str) -> int:
+    """Physical speaker count for a rail of *instrument*.
+
+    The generic 48-speaker grid matches piano's real range (F3-E7 = 4
+    octaves).  The other melodic instruments have a 3-octave real range
+    (36 notes), so only 36 physical speakers are placed — the missing top
+    octave's speakers are never driven, since the routing folds out-of-range
+    notes into the instrument's real range instead of using a placeholder.
+    """
+    rng = FACTORIO_INSTRUMENTS.get(instrument, FACTORIO_INSTRUMENTS['piano'])
+    return rng['max'] - rng['min'] + 1
+
+
 def _resolve_note_instrument(note: int, preferred: str) -> str | None:
     """Return the instrument whose REAL range can actually play *note*.
 

@@ -45,6 +45,7 @@ from .pitch_mapping import (
     pitch_index_to_signal,
     SPEAKER_COUNT,
 )
+from .midi_translator import speaker_count_for  # pylint: disable=relative-beyond-top-level
 
 INSTRUMENT_MAP: dict[str, str] = {
     "piano": "piano",
@@ -265,8 +266,14 @@ def _build_rail(
     midi_base: int = 53,
     map_drums: bool = False,
     ticks_per_page: int = TICKS_PER_PAGE,
+    speaker_count: int | None = None,
 ) -> _RailEndpoints:
-    """Build one rail's 48-speaker decoder pipeline at the given X offset.
+    """Build one rail's decoder pipeline at the given X offset.
+
+    The rail places ``speaker_count`` physical speakers (pitch indices
+    0..speaker_count-1) in a 12-column grid of octave rows.  Most melodic
+    instruments have a 3-octave real range (36 notes) so they only get 36
+    speakers; piano (F3-E7, 4 octaves) gets the full 48.
 
     Returns endpoint IDs for cross-rail wiring.
     """
@@ -276,6 +283,15 @@ def _build_rail(
         instrument.lower().replace("programmable-speaker-instrument-", ""),
         instrument,
     )
+
+    n_speakers = (
+        speaker_count if speaker_count is not None
+        else speaker_count_for(instrument)
+    )
+    # 12 semitone columns; rows = octaves.  n_speakers is 48 (4 rows) or
+    # 36 (3 rows) — the top row's speakers are never driven for 36-note
+    # instruments, so they are not placed.
+    lanes = (n_speakers + 11) // 12
 
     prefix = f"r{rail_idx}_"
 
@@ -288,6 +304,8 @@ def _build_rail(
 
     # ── Speakers ───────────────────────────────────────────────────
     for pitch_idx, sig in iter_speaker_signals():
+        if pitch_idx >= n_speakers:
+            break  # only the instrument's real-range speakers are placed
         col = rail_x + (pitch_idx % 12)
         row = SPK_Y + (3 - pitch_idx // 12)
         spk_id = f"{prefix}spk_{pitch_idx}"
@@ -319,6 +337,8 @@ def _build_rail(
     dbg_lamp_ids: dict[tuple[int, int], str] = {}
     if debug_lamps:
         for pitch_idx, sig in iter_speaker_signals():
+            if pitch_idx >= n_speakers:
+                break
             col = rail_x + (pitch_idx % 12)
             lamp_row = DEBUG_Y + (3 - pitch_idx // 12)
             dbg_id = f"{prefix}dbg_{pitch_idx}"
@@ -385,8 +405,8 @@ def _build_rail(
             side_1="output", side_2="input",
         )
 
-        # -- Unpacker chain (6 ACs) --
-        spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(4)]
+        # -- Unpacker chain (up to 6 ACs — one per octave lane present) --
+        spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(lanes)]
 
         def _ac(uid, y, first_op, op, second_op, out, *, _bid=base_id):
             ac = new_entity("arithmetic-combinator", id=f"{_bid}_{uid}",
@@ -403,9 +423,10 @@ def _build_rail(
         uid_l2 = _ac("l2", UNP_L2_Y, "signal-5", "AND", 127, spk_sigs[1])
         uid_s3 = _ac("s3", UNP_S3_Y, BELL_SIG, ">>", 7, "signal-6")
         uid_l3 = _ac("l3", UNP_L3_Y, "signal-6", "AND", 127, spk_sigs[2])
-        uid_l4 = _ac("l4", UNP_L4_Y, BELL_SIG, "AND", 127, spk_sigs[3])
-
-        out_order = [uid_l1, uid_l2, uid_l3, uid_l4]
+        out_order = [uid_l1, uid_l2, uid_l3]
+        if lanes >= 4:
+            uid_l4 = _ac("l4", UNP_L4_Y, BELL_SIG, "AND", 127, spk_sigs[3])
+            out_order.append(uid_l4)
 
         # Green wiring
         blueprint.add_circuit_connection(
@@ -420,10 +441,11 @@ def _build_rail(
             "green", uid_s2, uid_s3,
             side_1="input", side_2="input",
         )
-        blueprint.add_circuit_connection(
-            "green", uid_s3, uid_l4,
-            side_1="input", side_2="input",
-        )
+        if lanes >= 4:
+            blueprint.add_circuit_connection(
+                "green", uid_s3, uid_l4,
+                side_1="input", side_2="input",
+            )
         blueprint.add_circuit_connection(
             "green", uid_s2, uid_l2,
             side_1="output", side_2="input",
@@ -683,6 +705,7 @@ def _build_rail_logical(
     clock_signal: str,
     active_drum_pitches: set[int] | None = None,
     ticks_per_page: int = TICKS_PER_PAGE,
+    speaker_count: int | None = None,
 ) -> "_RailEndpoints":  # noqa: F821
     """Build one rail's 48-speaker decoder into *lb* as logical entities/networks.
 
@@ -711,7 +734,14 @@ def _build_rail_logical(
     # semitone, lanes = the 4 octaves).  A compact drum rail uses only the
     # drum TYPES the song actually plays, packed 4-per-cell — so a song with
     # a single kick uses 1 cell/tick, 1 speaker and a tiny decoder.
-    is_drum = instrument_proto == "drum-kit" and map_drums
+    # A drum rail always plays the compact per-used-drum cells whenever the
+    # song's data is available (active_drum_pitches), regardless of the
+    # ``map_drums`` flag — that flag only controls whether below-range melodic
+    # notes route INTO a kick drum, not how an existing drum rail sounds.
+    # The 48-grid fallback is only for standalone exports (no audio data).
+    is_drum = instrument_proto == "drum-kit" and (
+        map_drums or active_drum_pitches is not None
+    )
     if is_drum and active_drum_pitches is not None:
         grouping = drum_grouping(active_drum_pitches)
         cells_per_tick = len(grouping)
@@ -720,9 +750,19 @@ def _build_rail_logical(
             for cell in grouping
         ]
     else:
+        # Melodic rail: 12 semitone columns; only the octave lanes that have
+        # physical speakers (piano = 4, the 36-note instruments = 3) — the
+        # missing top octave's speakers are never driven, so they are not
+        # placed.  The memory still stores 12 cells/tick (lane 3 = 0), so the
+        # decoder reads the same cells it always did.
+        n_speakers = (
+            speaker_count if speaker_count is not None
+            else speaker_count_for(instrument)
+        )
         cells_per_tick = 12
         channels = [
-            [(oct_idx, ch + oct_idx * 12) for oct_idx in range(4)]
+            [(oct_idx, ch + oct_idx * 12) for oct_idx in range(4)
+             if ch + oct_idx * 12 < n_speakers]
             for ch in range(12)
         ]
 
