@@ -101,6 +101,24 @@ def test_blueprint_ascii_endpoint(client: TestClient) -> None:
     assert "small-lamp" in body["text"]
 
 
+def test_blueprint_render_endpoint(client: TestClient) -> None:
+    """The render endpoint returns ASCII text plus a structured preview model."""
+    disp = client.post("/api/v1/blueprints/display", json={"width": 4, "height": 4}).json()
+    r = client.post("/api/v1/blueprints/render", json={"blueprint": disp["blueprint"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert "ascii" in body and "Blueprint entities" in body["ascii"]
+    model = body["model"]
+    assert len(model["entities"]) == 16          # 4x4 lamp grid
+    assert model["entities"][0]["kind"] == "one"
+    assert model["entities"][0]["letter"] == "L"
+    assert len(model["networks"]) == 1           # one red data bus
+    assert model["networks"][0]["color"] == "red"
+    assert len(model["wires"]) == 15             # 16 lamps daisy-chained
+    assert model["ports"][0]["red"]["input"] == 0
+    assert model["min_x"] == 0 and model["max_y"] == 3
+
+
 def test_share_link_lifecycle(client: TestClient) -> None:
     """A finished job can be shared; the public link serves the blueprint with CORS."""
     r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])

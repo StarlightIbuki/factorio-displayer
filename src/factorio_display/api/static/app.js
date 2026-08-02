@@ -8,7 +8,7 @@ import { attachCropBox, exportEditedImage, exportConcatenated, makePreview, FRAM
 import { saveMedia, getMedia, deleteMedia } from "./mediacache.js";
 import { currentLocale, setLocale, t, applyStaticI18n } from "./i18n.js";
 import { DEFAULT_REMOTE_BASE, apiUrl, configuredApiBase, currentApiBase, resolveApiBase, setConfiguredApiBase } from "./api-config.js";
-import { blueprintAscii, asciiPre } from "./ascii.js";
+import { openBlueprintInspector } from "./inspect.js";
 
 // ── tiny helpers ───────────────────────────────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -159,11 +159,9 @@ function showView(name) {
 $("#btn-first").addEventListener("click", () => { resetCreate(); showView("create"); });
 $("#btn-new").addEventListener("click", () => { resetCreate(); showView("create"); });
 $("#btn-back").addEventListener("click", () => { resetCreate(); showView("home"); });
-$("#btn-tools").addEventListener("click", () => $("#viewer-modal").classList.remove("hidden"));
-$("#viewer-close").addEventListener("click", () => $("#viewer-modal").classList.add("hidden"));
-$("#viewer-modal").addEventListener("click", (e) => {
-  if (e.target === e.currentTarget) e.currentTarget.classList.add("hidden");
-});
+// Blueprint viewer utility → the unified inspector modal (paste mode).
+$("#btn-tools").addEventListener("click", () =>
+  openBlueprintInspector({ api, renderYamlTree }));
 
 // token
 const tokenInput = $("#token-input");
@@ -1419,47 +1417,14 @@ async function renderJobResult(host, job) {
     metaItem(t("result.instruments"), meta.instruments ? meta.instruments.join(", ") : null),
     metaItem(t("result.kind"), meta.kind),
   ]);
-  // Lazy result panel — the (large) blueprint text is NOT fetched on render;
-  // it is only loaded when the user views / copies / downloads it.
-  const tabs = el("div", { class: "result-tabs" });
+  // Quick actions — the full inspection (string / YAML / ASCII / interactive
+  // preview) lives in the shared inspector modal.
   const view = el("div");
-  const tabFormat = (key) => (key === "inspect" ? "yaml" : key);
-  const renderTab = async (key) => {
-    $$(".result-tabs button", tabs).forEach((b) => b.classList.toggle("active", b.dataset.fmt === key));
-    try {
-      if (key === "ascii") {
-        const text = await getResultText(id, "blueprint");
-        view.innerHTML = "";
-        const host = el("div");
-        view.append(host);
-        await renderAsciiInto(host, text);
-        return;
-      }
-      const text = await getResultText(id, tabFormat(key));
-      view.innerHTML = "";
-      if (key === "inspect") view.append(renderYamlTree(text));
-      else if (key === "json") {
-        try { view.append(renderTreeView(JSON.parse(text))); }
-        catch (_) { view.append(el("textarea", { class: "mono bpview", readonly: "", text })); }
-      } else view.append(el("textarea", { class: "mono bpview", readonly: "", text }));
-    } catch (e) {
-      view.innerHTML = "";
-      view.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: tabFormat(key), msg: e.message }) }));
-    }
-  };
-  const tabDefs = [
-    ["blueprint", t("s3.formatBlueprint")],
-    ["inspect", t("result.inspectItem")],
-    ["ascii", t("result.ascii")],
-  ];
-  if (isDev()) tabDefs.push(["json", t("s3.formatJson")]);
-  for (const [key, label] of tabDefs) {
-    tabs.append(el("button", { "data-fmt": key, text: label, onclick: () => renderTab(key) }));
-  }
   view.append(el("p", { class: "hint", text: t("result.viewHint") }));
-  host.append(metaStrip, tabs,
+  host.append(metaStrip,
     el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
-      el("button", { class: "primary", text: t("result.view"), title: t("result.viewTitle"), onclick: () => renderTab("blueprint") }),
+      el("button", { class: "primary", text: t("result.view"), title: t("result.viewTitle"), onclick: () => viewJobInline(id, view) }),
+      el("button", { text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ api, renderYamlTree, jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
       el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
       el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, job.name) }),
       el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: () => shareJob(id) }),
@@ -1959,61 +1924,18 @@ function stopPolling() {
   if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Tools — blueprint viewer / decode
-// ═══════════════════════════════════════════════════════════════════════
-function renderInlineResult(host, obj) {
-  host.innerHTML = "";
-  const format = obj.format || "blueprint";
-  const text = obj.text || obj.blueprint || "";
-  const meta = el("div", { class: "meta-strip" }, [
-    metaItem("format", format),
-    metaItem(t("result.entityCount"), obj.entity_count != null ? Number(obj.entity_count).toLocaleString() : null),
-    metaItem(t("result.instruments"), obj.instruments ? obj.instruments.join(", ") : null),
-  ]);
-  host.append(meta);
-  host.append(el("textarea", { class: "mono bpview", readonly: "", text }));
-  host.append(el("div", { class: "row", style: "margin-top:8px" }, [
-    el("button", { class: "primary", text: t("result.copy"), onclick: () => copyText(text) }),
-    el("button", { text: t("result.download"), onclick: () => downloadText(text, `${obj.name || "result"}.${FORMAT_EXT[format] || "txt"}`) }),
-  ]));
-}
-
-$("#viewer-decode").addEventListener("click", async () => {
-  const bp = $("#viewer-input").value.trim();
-  const host = $("#viewer-result");
-  if (!bp) { toast(t("t.pasteBlueprint"), "error"); return; }
-  host.innerHTML = "";
-  host.append(el("p", { class: "hint", text: t("t.decoding") }));
+// Load a job's blueprint string inline (used by the result panel "View"
+// button).  The full inspection lives in the shared inspector modal.
+async function viewJobInline(id, view) {
   try {
-    const res = await api("/api/v1/blueprints/decode", { method: "POST", body: { blueprint: bp } });
-    const obj = await res.json();
-    renderInlineResult(host, obj);
+    const text = await getResultText(id, "blueprint");
+    view.innerHTML = "";
+    view.append(el("textarea", { class: "mono bpview", readonly: "", text }));
   } catch (e) {
-    host.innerHTML = "";
-    host.append(el("p", { class: "hint", text: t("t.decodeError", { msg: e.message }) }));
-  }
-});
-
-// Render ASCII-art (entities + wiring maps) for a blueprint string into *host*.
-async function renderAsciiInto(host, bpString) {
-  host.innerHTML = "";
-  host.append(el("p", { class: "hint", text: t("t.asciiRendering") }));
-  try {
-    const text = await blueprintAscii(api, bpString);
-    host.innerHTML = "";
-    host.append(asciiPre(text));
-  } catch (e) {
-    host.innerHTML = "";
-    host.append(el("p", { class: "hint", text: t("t.asciiFail", { msg: e.message }) }));
+    view.innerHTML = "";
+    view.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: "blueprint", msg: e.message }) }));
   }
 }
-
-$("#viewer-ascii").addEventListener("click", async () => {
-  const bp = $("#viewer-input").value.trim();
-  if (!bp) { toast(t("t.pasteBlueprint"), "error"); return; }
-  renderAsciiInto($("#viewer-result"), bp);
-});
 
 // boot
 document.documentElement.lang = currentLocale();

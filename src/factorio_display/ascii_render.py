@@ -353,3 +353,120 @@ def blueprint_string_to_ascii(bp_string: str, *, coords: bool = True) -> str:
     pass a raw blueprint string (mirrors :func:`blueprint_string_to_yaml`).
     """
     return render_blueprint((bp_string or "").strip(), coords=coords)
+
+
+def blueprint_render_model(bp: Any) -> dict:
+    """Return a structured model of a blueprint for the interactive preview.
+
+    The model mirrors what the ASCII renderer computes (same glyphs and the
+    same red/green network detection) so the web preview can draw combinator
+    outlines, red/green wire lines, network-coloured ports, and hover
+    highlighting — all consistent with the ASCII maps.
+
+    Returns a dict with::
+
+        entities:  [{x, y, name, dir, letter, kind}]
+        ports:     [{entity, red: {input, output}, green: {input, output}}]
+                   (net index or -1 per side/colour)
+        networks:  [{color, char, map, endpoints: [{entity, side}]}]
+        wires:     [[{entity, side, color}, {entity, side, color}], ...]
+        min_x / min_y / max_x / max_y
+
+    *bp* may be a blueprint string or a draftsman Blueprint.
+    """
+    from draftsman.blueprintable import Blueprint
+
+    if isinstance(bp, str):
+        bp = Blueprint.from_string(bp)
+    books = getattr(bp, "blueprints", None)
+    if books is not None and len(books) > 0:
+        inner = books[0]
+        bp = inner.blueprint if hasattr(inner, "blueprint") else inner
+
+    entities = list(bp.entities)
+    objid_to_idx = {id(e): i for i, e in enumerate(entities)}
+    ent_by_objid = {id(e): e for e in entities}
+
+    ent_records: list[dict] = []
+    for e in entities:
+        anchor = _entity_anchor(e)
+        info = _ENTITY_LETTERS.get(e.name, (".", None))
+        ent_records.append({
+            "x": anchor[0] if anchor else 0,
+            "y": anchor[1] if anchor else 0,
+            "name": e.name,
+            "dir": _entity_direction(e),
+            "letter": info[0],
+            "kind": info[1] or "other",
+        })
+
+    def _net_pos(keys: list[tuple[int, str, str]]) -> tuple[int, int]:
+        xs: list[int] = []
+        ys: list[int] = []
+        for (oid, _side, _color) in keys:
+            e = ent_by_objid.get(oid)
+            if e is None:
+                continue
+            anchor = _entity_anchor(e)
+            if anchor is None:
+                continue
+            xs.append(anchor[0])
+            ys.append(anchor[1])
+        return (min(ys) if ys else 0, min(xs) if xs else 0)
+
+    network_records: list[dict] = []
+    net_of_key: dict[tuple[int, str, str], int] = {}
+    for color in ("red", "green"):
+        color_nets = [n for n in _networks(bp) if n and n[0][2] == color]
+        for i, keys in enumerate(sorted(color_nets, key=_net_pos)):
+            idx = len(network_records)
+            network_records.append({
+                "color": color,
+                "char": _CHARS[i % _MAP_SIZE],
+                "map": i // _MAP_SIZE + 1,
+                "endpoints": [
+                    {"entity": objid_to_idx[oid], "side": side}
+                    for (oid, side, _c) in keys
+                ],
+            })
+            for key in keys:
+                net_of_key[key] = idx
+
+    ports: list[dict] = []
+    for i, e in enumerate(entities):
+        oid = id(e)
+        entry = {"entity": i, "red": {"input": -1, "output": -1},
+                 "green": {"input": -1, "output": -1}}
+        for color in ("red", "green"):
+            for side in ("input", "output"):
+                key = (oid, side, color)
+                if key in net_of_key:
+                    entry[color][side] = net_of_key[key]
+        ports.append(entry)
+
+    wires: list[list[dict]] = []
+    for pa, pb in _iter_wire_ports(bp):
+        if pa[0] not in objid_to_idx or pb[0] not in objid_to_idx:
+            continue
+        wires.append([
+            {"entity": objid_to_idx[pa[0]], "side": pa[1], "color": pa[2]},
+            {"entity": objid_to_idx[pb[0]], "side": pb[1], "color": pb[2]},
+        ])
+
+    xs = [r["x"] for r in ent_records]
+    ys = [r["y"] for r in ent_records]
+    return {
+        "entities": ent_records,
+        "ports": ports,
+        "networks": network_records,
+        "wires": wires,
+        "min_x": min(xs) if xs else 0,
+        "min_y": min(ys) if ys else 0,
+        "max_x": max(xs) if xs else 0,
+        "max_y": max(ys) if ys else 0,
+    }
+
+
+def blueprint_string_render_model(bp_string: str) -> dict:
+    """Convenience wrapper: :func:`blueprint_render_model` from a string."""
+    return blueprint_render_model((bp_string or "").strip())

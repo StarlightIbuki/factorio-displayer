@@ -411,3 +411,17 @@ def blueprint_to_ascii(bp_string: str) -> BuildResult:
 
     text = blueprint_string_to_ascii((bp_string or "").strip())
     return BuildResult(text=text, name="ASCII Blueprint", format="ascii")
+
+
+def blueprint_render(bp_string: str) -> dict:
+    """Return ASCII text plus a structured model for the interactive preview."""
+    from .ascii_render import (  # pylint: disable=import-outside-toplevel
+        blueprint_string_to_ascii,
+        blueprint_string_render_model,
+    )
+
+    bp_str = (bp_string or "").strip()
+    return {
+        "ascii": blueprint_string_to_ascii(bp_str),
+        "model": blueprint_string_render_model(bp_str),
+    }
