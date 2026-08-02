@@ -655,13 +655,54 @@ const PROXY_MAX = 512;
 // Reject files above this size up-front (matches the backend upload limit).
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024; // 256 MiB
 
+// Cache builds are serialized (one at a time): running several heavy
+// main-thread encoders at once would freeze the UI and block everything else.
+// Chosen files land in the list immediately with a "processing…" state and
+// their chips stay interactive while the queue works through them.
+let cacheQueue = [];
+let cacheBusy = false;
+const chipEls = new Map(); // clip id -> chip element, for live progress updates
+
+function queueCacheBuild(clip) {
+  cacheQueue.push(clip);
+  if (!cacheBusy) void drainCacheQueue();
+}
+
+async function drainCacheQueue() {
+  cacheBusy = true;
+  try {
+    while (cacheQueue.length) {
+      const c = cacheQueue.shift();
+      // The user may have removed this clip while it waited — skip it.
+      if (!state.clips.includes(c)) continue;
+      if (c.cacheStatus === "pending") await buildCache(c);
+    }
+  } finally {
+    cacheBusy = false;
+  }
+}
+
+function paintClipProgress(c) {
+  const chip = chipEls.get(c.id);
+  if (!chip) return;
+  const fill = chip.querySelector(".progressbar > span");
+  const pct = chip.querySelector(".clip-progress .pct");
+  if (fill) fill.style.width = `${Math.round((c.progress || 0) * 100)}%`;
+  if (pct) pct.textContent = `${Math.round((c.progress || 0) * 100)}%`;
+}
+
 async function buildCache(c) {
   if (c.cacheStatus === "caching" || c.cacheStatus === "cached") return;
   c.cacheStatus = "caching";
+  c.progress = 0;
   renderPlaylist();
   try {
     if (c.kind === "video") {
-      const blob = await compressVideo(c.file, { quality: "high", maxDim: PROXY_MAX });
+      const blob = await compressVideo(c.file, {
+        quality: "high",
+        maxDim: PROXY_MAX,
+        onProgress: (pct) => { c.progress = pct / 100; paintClipProgress(c); },
+      });
       blob.name = c.name.replace(/\.[^.]+$/i, "") + "-proxy.webm";
       c.file = blob;
       c.size = blob.size;
@@ -678,6 +719,7 @@ async function buildCache(c) {
     c.cacheStatus = "failed";
     console.warn("cache build failed:", c.name, e);
   }
+  c.progress = 1;
   clipInfo.delete(c.id);
   renderPlaylist();
   if (!$("#wstep-timeline").classList.contains("hidden")) {
@@ -701,7 +743,7 @@ function addFiles(files) {
     };
     if (isSoundKind(kind)) clip.edit.start = 0;
     state.clips.push(clip);
-    buildCache(clip);
+    queueCacheBuild(clip);
   }
   renderPlaylist();
   refreshRecommendation();
@@ -727,23 +769,43 @@ fileInput.addEventListener("change", () => { addFiles([...fileInput.files]); fil
 const btnAddMedia = $("#btn-add-media");
 if (btnAddMedia) btnAddMedia.addEventListener("click", () => fileInput.click());
 
+function clipStatus(c) {
+  if (c.cacheStatus === "pending" || c.cacheStatus === "caching") return t("t.clipsProcessing");
+  if (c.cacheStatus === "failed") return t("t.clipsFailed");
+  return t("t.clipsCached");
+}
+
 function renderPlaylist() {
   // Chosen files are displayed inside the dotted box — hide the drop hint
   // once something is listed.
   const hint = $("#dropzone-hint");
   if (hint) hint.classList.toggle("hidden", state.clips.length > 0);
   playlistEl.innerHTML = "";
+  chipEls.clear();
   if (!state.clips.length) return;
   for (const c of state.clips) {
-    playlistEl.append(el("div", { class: "upload-chip", dataset: { id: c.id } }, [
+    const processing = c.cacheStatus === "pending" || c.cacheStatus === "caching";
+    const chip = el("div", { class: "upload-chip" + (processing ? " processing" : ""), dataset: { id: c.id } }, [
       el("span", { class: "badge " + c.kind, text: c.kind }),
       el("span", { class: "name", text: c.name }),
-      el("span", { class: "meta", text: `${fmtBytes(c.size)} · ${c.cacheStatus === "caching" ? t("t.clipsCaching") : c.cacheStatus === "failed" ? t("t.clipsFailed") : t("t.clipsCached")}${isEdited(c.edit) ? " · " + t("t.edited") : ""}` }),
+      el("span", { class: "meta" }, [
+        `${fmtBytes(c.size)} · `,
+        el("span", { class: processing ? "processing" : "", text: clipStatus(c) }),
+        isEdited(c.edit) ? ` · ${t("t.edited")}` : "",
+      ]),
       el("button", { text: t("t.clipsEdit"), onclick: () => openEditor(c.id) }),
       el("button", { text: "↑", title: "Move up", onclick: () => moveClip(c.id, -1) }),
       el("button", { text: "↓", title: "Move down", onclick: () => moveClip(c.id, 1) }),
       el("button", { class: "danger", text: "✕", title: "Remove", onclick: () => removeClip(c.id) }),
-    ]));
+    ]);
+    if (processing) {
+      chip.append(el("div", { class: "clip-progress" }, [
+        el("div", { class: "progressbar" }, [el("span", { style: `width:${Math.round((c.progress || 0) * 100)}%` })]),
+        el("span", { class: "pct", text: `${Math.round((c.progress || 0) * 100)}%` }),
+      ]));
+    }
+    chipEls.set(c.id, chip);
+    playlistEl.append(chip);
   }
 }
 
@@ -760,6 +822,8 @@ function moveClip(id, dir) {
 function removeClip(id) {
   state.clips = state.clips.filter((c) => c.id !== id);
   clipInfo.delete(id);
+  chipEls.delete(id);
+  cacheQueue = cacheQueue.filter((c) => c.id !== id);
   if (selectedClipId === id) selectedClipId = null;
   renderPlaylist();
   renderInspector();
