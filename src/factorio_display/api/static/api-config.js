@@ -11,10 +11,10 @@
 // DEFAULT_REMOTE_BASE.  The runtime API client additionally retries once with
 // the remote base if a same-origin request fails at the network level.
 //
-// DEFAULT_REMOTE_BASE: the public backend.  Change this when the server
-// moves, or point it at any backend you control (must be HTTPS when the
-// page is served over HTTPS, e.g. from GitHub Pages).
-export const DEFAULT_REMOTE_BASE = "https://factorio.qvq.moe";
+// DEFAULT_REMOTE_BASE: the public backend.  HTTPS on a high port (no public
+// 80/443) so the GitHub Pages frontend can call it without mixed-content
+// blocks.  Change this when the server moves.
+export const DEFAULT_REMOTE_BASE = "https://factorio.qvq.moe:60012";
 
 const KEY = "fd_api_base";
 let resolved = null; // "" (same-origin) or an absolute base URL, cached
