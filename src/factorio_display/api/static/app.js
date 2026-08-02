@@ -76,6 +76,7 @@ function isSoundKind(k) { return k === "audio" || k === "midi"; }
 const state = {
   token: localStorage.getItem("fd_token") || "",
   anonToken: "",            // server-signed default token for anonymous users (not persisted)
+  anonSupported: false,     // backend advertises anonymous use (auth.anonymous_limits/token)
   clips: [],        // [{ id, file, name, size, kind, edit, cacheStatus }]
   editorClipId: null,
   running: new Set(),
@@ -272,6 +273,11 @@ async function initAuth() {
     // sends this when the user isn't signed in so anonymous jobs land in the
     // shared "anonymous" bucket.  Never persisted (it can expire server-side).
     state.anonToken = authInfo.anonymous_token || "";
+    // Only offer "continue as guest" when the backend actually supports
+    // anonymous use — the new backend always advertises anonymous_limits
+    // (and anonymous_token when token-gated).  Old backends that require a
+    // token don't, so we must not present a guest path that would 401.
+    state.anonSupported = !!(authInfo.anonymous_token || authInfo.anonymous_limits);
   } catch (_) { githubAuth = null; }
   renderAuth();
 }
@@ -1291,11 +1297,11 @@ generateBtn.addEventListener("click", generate);
 
 async function generate() {
   if (!state.clips.length) return;
-  // Not signed in → warn that uploads/blueprints are public; let the user log
-  // in (popup, wizard state preserved) or continue as an anonymous guest
-  // (subject to the server's anonymous rate limit of 1 processing / 5 queued).
+  // Not signed in → warn that uploads/blueprints are public.  Offer "continue
+  // as guest" only when the backend supports anonymous use; otherwise the
+  // server requires sign-in, so the only way forward is to log in.
   if (isAnonymous() && githubAuth) {
-    loginProceed = () => { runGenerate(); };
+    if (state.anonSupported) loginProceed = () => { runGenerate(); };
     openLoginModal();
     return;
   }
@@ -1407,6 +1413,10 @@ async function runGenerate() {
   } catch (e) {
     generateStatus.textContent = "";
     if (e.status === 401) {
+      // The server rejected us (it requires sign-in, or our anonymous token
+      // was rejected/expired).  Say why instead of silently flashing the
+      // modal, then offer login as the way forward.
+      toast(t("auth.loginRequired"), "error");
       openLoginModal();
     } else if (e.status === 429 || e.status === 409) {
       toast(t("t.serverBusy", { msg: e.message }));
