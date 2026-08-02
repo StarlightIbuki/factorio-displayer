@@ -302,6 +302,9 @@ function loadMeta(file) {
       img.src = url;
       return;
     }
+    // MIDI can't be decoded by <video>/<audio>; give it a nominal duration
+    // (matching app.js probeClip) — the real length is determined server-side.
+    if (/\.(mid|midi)$/i.test(file.name)) { resolve({ w: 0, h: 0, dur: 30 }); return; }
     const v = document.createElement("video");
     v.muted = true;
     v.preload = "metadata";
@@ -329,11 +332,12 @@ export async function exportConcatenated(clips, opts = {}, onProgress) {
   // Ensure every clip has a unique id so probe metadata doesn't collide.
   for (let i = 0; i < clips.length; i++) if (clips[i].id == null) clips[i].id = `auto${i}`;
 
-  // video/image clips play on the video timeline; audio-only clips are
+  // video/image clips play on the video timeline; audio-only clips (and MIDI,
+  // which can't be decoded in-browser and is uploaded raw to the backend) are
   // placed on the audio rail at an absolute start time (edit.start).
   const visuals = [];
   const overlays = [];
-  for (const c of clips) (c.kind === "audio" ? overlays : visuals).push(c);
+  for (const c of clips) ((c.kind === "audio" || c.kind === "midi") ? overlays : visuals).push(c);
 
   const prep = new Map();
   async function probe(c) {

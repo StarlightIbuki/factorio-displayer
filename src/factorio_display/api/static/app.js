@@ -646,12 +646,16 @@ function schedulePreviewRefresh() {
 
 async function refreshPreview() {
   if (!state.clips.length || previewBusy) return;
+  // MIDI is uploaded raw to the backend and can't be decoded in-browser, so it
+  // is never part of the on-screen final preview.
+  const previewable = state.clips.filter((c) => c.kind !== "midi");
+  if (!previewable.length) return;
   previewBusy = true;
   const status = $("#preview-status");
   const player = $("#preview-player");
   status.textContent = t("t.rendering");
   try {
-    const specs = state.clips.map((c) => ({ id: c.id, file: c.file, name: c.name, kind: c.kind, edit: c.edit }));
+    const specs = previewable.map((c) => ({ id: c.id, file: c.file, name: c.name, kind: c.kind, edit: c.edit }));
     const out = await exportConcatenated(specs, { mode: $("#opt-output-mode").value, maxDim: parseInt($("#compress-dim").value, 10) || 256 },
       (pct) => { status.textContent = t("t.renderingPct", { pct: Math.round(pct) }); });
     if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
@@ -825,7 +829,12 @@ dropzone.addEventListener("drop", (e) => {
   dropzone.classList.remove("drag");
   addFiles([...e.dataTransfer.files]);
 });
-fileInput.addEventListener("change", () => { addFiles([...fileInput.files]); fileInput.value = ""; });
+fileInput.addEventListener("change", () => {
+  // Always clear the input (even if adding throws) so re-selecting the same
+  // file, or adding more files, always fires `change` again.
+  try { addFiles([...fileInput.files]); }
+  finally { fileInput.value = ""; }
+});
 // Allow adding more media while editing (timeline step) — buildCache re-renders
 // the timeline because the step is visible.
 const btnAddMedia = $("#btn-add-media");
