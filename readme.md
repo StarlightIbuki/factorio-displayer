@@ -286,7 +286,7 @@ The audio decoder drives a 48-speaker matrix (12 semitones × 4 octaves, F3–E7
     - `l4 = bell & 127`
 6.  **Speakers:** 48 programmable speakers (4 rows × 12 columns), each listening on its assigned `(signal, quality)` pair with `allow_polyphony=True`.
 
-**Total entities:** 48 spk + 85 AC + 24 DC + 13 CC = 170.  
+**Total entities:** 48 spk + 85 AC + 12 DC + 13 CC = 158.  
 **Wire colors:** RED = page data bus + sub_tick distribution, GREEN = CC lookup outputs + bell bus.
 
 ### Audio Normalization

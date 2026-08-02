@@ -120,7 +120,7 @@ Convenience wrapper around `build_multi_rail_decoder(instruments=[instrument])`.
 
 | Y      | Entity           | Purpose                        |
 |--------|------------------|--------------------------------|
-| 24     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
+| 22     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
 | 22     | Lookup CCs       | sub-tick entries (t=0→60)      |
 | 20     | Match DCs        | `each==signal-M → signal=1`    |
 | 16     | Selector ACs     | `each(red)*each(green)→bell`   |
@@ -134,7 +134,7 @@ Convenience wrapper around `build_multi_rail_decoder(instruments=[instrument])`.
 | 0–3    | Speakers (12×4)  | 48 programmable speakers       |
 | −4–−1  | Debug lamps (opt)| Blue glow = volume level       |
 
-Single-rail: 48 spk + 85 AC + 24 DC + 13 CC = **170** entities (178 with debug lamps).
+Single-rail: 48 spk + 85 AC + 12 DC + 13 CC = **158** entities (206 with debug lamps).
 
 Match0 DCs handle sub_tick=0 (value-0 signals are dropped by Factorio).
 CC t=0 entry uses value 60 (never 0); other entries use t (1..59).
@@ -290,34 +290,6 @@ and checks structural invariants:
 
 Call this in every test that produces a blueprint string.
 
-## Logical Blueprint DSL (preferred authoring format)
-
-**Always prefer the Logical Blueprint DSL** when generating or modifying combinator circuitry.  The DSL is defined in `architecture.md` under "Logical Blueprint DSL" and implemented in `src/factorio_display/logical_blueprint.py`.
-
-### When to use Logical Blueprint vs raw draftsman
-
-| Situation | Use |
-|-----------|-----|
-| New memory encoding (audio/video pages) | `encode_audio_to_logical()` → LogicalBlueprint → TOML |
-| New decoder/player circuitry | `build_audio_decoder_logical()` → LogicalBlueprint → TOML |
-| Modifying existing combinator layout | Edit LogicalBlueprint TOML, then `to_draftsman()` |
-| Adding new entity types to the DSL | Extend `LogicalEntity` + TOML ser/de in `logical_blueprint.py` |
-| Quick one-off draftsman tweak | Raw draftsman is acceptable for trivial changes |
-
-### Key rules
-
-1. **Entities first, positions later.**  Build the entity graph and networks;
-   defer tile coordinates to a layout pass.
-2. **Use networks, not wires.**  Instead of `add_circuit_connection("red", a, b)`,
-   do `lb.connect("red", Endpoint("a", "output"), Endpoint("b", "input"))`.
-3. **TOML is the interchange format.**  The canonical serialisation is TOML
-   (`to_toml()` / `from_toml()`).  The draftsman string is the export format.
-4. **Validate after generation.**  Call `validate_blueprint_via_logical(bp_str)`
-   from `tests/conftest.py` in every test that produces a blueprint string.
-5. **Check for unexpected warnings.**  Use `assert_no_unexpected_warnings(recorded_warnings)`
-   from `tests/conftest.py` when generating blueprints in tests.
-6. **Silent pages are omitted.**  Don't create DC entities for all-zero pages.
-
 ## Multi-rail and instrument notes
 
 - `INSTRUMENT_MIDI_BASES` in `pitch_mapping.py` defines the F-aligned MIDI base
@@ -342,12 +314,36 @@ In the video all-in-one blueprint, the RED wire carries everything —
 the raw clock (self-loop), the modulo clock (sub-tick for DC gating),
 DC outputs (colour data), display lamp inputs, and progress bar.
 
-## Logical Blueprint DSL
+## Logical Blueprint DSL (preferred authoring format)
 
 The **Logical Blueprint** is an intermediate TOML-based representation that
 separates *what* entities and circuit networks exist from *where* they are
 placed and *how* they are physically wired.  It is the **preferred authoring
 format** for all new blueprint generation code.
+
+### When to use Logical Blueprint vs raw draftsman
+
+| Situation | Use |
+|-----------|-----|
+| New memory encoding (audio/video pages) | `encode_audio_to_logical()` → LogicalBlueprint → TOML |
+| New decoder/player circuitry | `build_audio_decoder_logical()` → LogicalBlueprint → TOML |
+| Modifying existing combinator layout | Edit LogicalBlueprint TOML, then `to_draftsman()` |
+| Adding new entity types to the DSL | Extend `LogicalEntity` + TOML ser/de in `logical_blueprint.py` |
+| Quick one-off draftsman tweak | Raw draftsman is acceptable for trivial changes |
+
+### Key rules
+
+1. **Entities first, positions later.**  Build the entity graph and networks;
+   defer tile coordinates to a layout pass.
+2. **Use networks, not wires.**  Instead of `add_circuit_connection("red", a, b)`,
+   do `lb.connect("red", Endpoint("a", "output"), Endpoint("b", "input"))`.
+3. **TOML is the interchange format.**  The canonical serialisation is TOML
+   (`to_toml()` / `from_toml()`).  The draftsman string is the export format.
+4. **Validate after generation.**  Call `validate_blueprint_via_logical(bp_str)`
+   from `tests/conftest.py` in every test that produces a blueprint string.
+5. **Check for unexpected warnings.**  Use `assert_no_unexpected_warnings(recorded_warnings)`
+   from `tests/conftest.py` when generating blueprints in tests.
+6. **Silent pages are omitted.**  Don't create DC entities for all-zero pages.
 
 ### Why a DSL?
 
