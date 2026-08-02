@@ -1,16 +1,17 @@
 """Principal resolution — who owns what.
 
 Every upload, job and artifact belongs to a *principal* (an opaque string).
-In the current (pre-OIDC) phase:
 
-- if ``--api-token`` is configured, a request must carry it (``Authorization:
-  Bearer <token>`` or ``X-API-Token``); each distinct token maps to a stable
-  principal, so different token holders are fully isolated from each other;
-- if no token is configured, everything belongs to a single ``"anonymous"``
-  bucket.
+Auth modes (checked in this order):
 
-When OIDC lands (final phase) the Google identity simply resolves to a
-principal string — the storage/job isolation model below is unchanged.
+- ``--token-key <key>`` — signed access tokens.  The request must carry a
+  token issued by ``factorio-display token issue --key <same key>`` (sent as
+  ``Authorization: Bearer <token>`` or ``X-API-Token: <token>``).  The
+  principal is derived from the token's ``sub`` claim, so each user is fully
+  isolated from the others.
+- ``--api-token <secret>`` — legacy shared-secret gate.  Every request must
+  carry it; each distinct token maps to a stable principal.
+- neither — everything belongs to a single ``"anonymous"`` bucket.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import hmac
 from fastapi import HTTPException, Request
 
 from .settings import Settings
+from .tokens import TokenError, verify
 
 
 def _extract_token(request: Request) -> str | None:
@@ -33,24 +35,51 @@ def _extract_token(request: Request) -> str | None:
     return token or None
 
 
-def resolve_principal(request: Request, settings: Settings) -> str:
-    """Return the principal id for *request*, enforcing the ``--api-token`` gate.
+def _unauthorized(message: str) -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail={
+            "code": "unauthorized",
+            "message": message,
+        },
+    )
 
-    Raises ``HTTPException(401)`` when a token is configured but missing/wrong.
+
+def _principal_id(seed: str) -> str:
+    return f"tk_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+
+
+def resolve_principal(request: Request, settings: Settings) -> str:
+    """Return the principal id for *request*, enforcing auth when configured.
+
+    Raises ``HTTPException(401)`` when a token/key is configured but missing or wrong.
     """
+    # Mode 1: signed access tokens (HMAC key on the server).
+    if settings.token_key:
+        token = _extract_token(request)
+        if token is None:
+            raise _unauthorized(
+                "Missing access token. Send it as 'Authorization: Bearer <token>' "
+                "or 'X-API-Token: <token>'. Issue one with "
+                "'factorio-display token issue --key <server token-key> --user <name>'."
+            )
+        try:
+            claims = verify(settings.token_key, token)
+        except TokenError as exc:
+            raise _unauthorized(f"Invalid access token: {exc}") from exc
+        sub = str(claims.get("sub") or "")
+        return _principal_id(f"{settings.token_key}:{sub}")
+
+    # Mode 2: legacy shared-secret gate.
     if settings.api_token:
         token = _extract_token(request)
         if token is None or not hmac.compare_digest(token, settings.api_token):
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "code": "unauthorized",
-                    "message": "Invalid or missing API token. Send it as "
-                    "'Authorization: Bearer <token>' or 'X-API-Token: <token>'.",
-                },
+            raise _unauthorized(
+                "Invalid or missing API token. Send it as "
+                "'Authorization: Bearer <token>' or 'X-API-Token: <token>'."
             )
-        digest = hashlib.sha256(settings.api_token.encode("utf-8")).hexdigest()[:16]
-        return f"tk_{digest}"
+        return _principal_id(settings.api_token)
+
     return "anonymous"
 
 

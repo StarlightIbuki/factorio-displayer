@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -89,6 +90,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.runner = runner
     app.state.started_at = time.time()
     app.add_middleware(CompressionMiddleware, minimum_size=settings.compress_min_size)
+
+    # CORS — allow the GitHub Pages frontend (and localhost dev origins) to
+    # call this API cross-origin.  Both the explicit list and the regex are
+    # configurable via Settings / --cors-origins / --cors-origin-regex.
+    if settings.cors_allow_origins or settings.cors_allow_origin_regex:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_allow_origins),
+            allow_origin_regex=settings.cors_allow_origin_regex or None,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            # Auth is via an X-API-Token header (not cookies), so credentials
+            # stay off — this keeps explicit-origin matching simple and safe.
+            allow_credentials=False,
+        )
 
     # ── public metadata ──────────────────────────────────────────────
     @app.get("/api/v1/health", response_model=HealthOut, tags=["meta"])

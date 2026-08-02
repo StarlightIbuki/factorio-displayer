@@ -97,6 +97,30 @@ def test_pastebin_requires_server_key(client: TestClient) -> None:
     assert r.status_code == 422
 
 
+def test_cors_allows_github_pages_by_default(client: TestClient) -> None:
+    """The GitHub Pages origin is allowed cross-origin out of the box."""
+    r = client.options(
+        "/api/v1/health",
+        headers={
+            "Origin": "https://StarlightIbuki.github.io",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers.get("access-control-allow-origin") == "https://StarlightIbuki.github.io"
+    assert "GET" in (r.headers.get("access-control-allow-methods") or "")
+
+
+def test_cors_rejects_unknown_origin(client: TestClient) -> None:
+    """Origins outside the allow-list are refused on preflight (Starlette → 400)."""
+    r = client.options(
+        "/api/v1/health",
+        headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "GET"},
+    )
+    assert r.status_code == 400
+    assert r.headers.get("access-control-allow-origin") is None
+
+
 def test_upload_roundtrip(client: TestClient) -> None:
     r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])
     assert r.status_code == 201

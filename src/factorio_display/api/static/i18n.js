@@ -10,7 +10,7 @@ const DICT = {
     // topbar
     "topbar.tools": "Blueprint viewer",
     "topbar.token": "API token",
-    "topbar.tokenTitle": "Only needed when the server runs with --api-token",
+    "topbar.tokenTitle": "Only needed when the server requires a token (--api-token or --token-key)",
     "topbar.dev": "dev",
     "topbar.devTitle": "Developer mode — show raw JSON results and artifacts",
     "topbar.about": "About",
@@ -147,6 +147,14 @@ const DICT = {
     // about / acknowledgements
     "about.title": "About & Acknowledgements",
     "about.fetchFail": "Could not load the acknowledgement text.",
+    "about.backendTitle": "Backend API",
+    "about.backendHint": "Leave empty for automatic: use the local backend, falling back to the public server.",
+    "about.backendSave": "Save",
+    "about.backendResetBtn": "Use auto",
+    "about.backendSaved": "Backend saved.",
+    "about.backendReset": "Backend reset to automatic.",
+    "about.backendLocal": "Local backend (this server)",
+    "about.backendRemote": "Remote backend:",
     // jobs
     "jobs.inQueue": "In queue — will start as soon as a worker is free.",
     "jobs.soundOnly": "♪ Sound only — no video preview",
@@ -206,7 +214,7 @@ const DICT = {
     // topbar
     "topbar.tools": "蓝图查看器",
     "topbar.token": "API 令牌",
-    "topbar.tokenTitle": "仅当服务器以 --api-token 启动时需要",
+    "topbar.tokenTitle": "仅当服务器需要令牌时需要（--api-token 或 --token-key）",
     "topbar.dev": "开发",
     "topbar.devTitle": "开发者模式——显示原始 JSON 结果与产物",
     "topbar.about": "关于",
@@ -343,6 +351,14 @@ const DICT = {
     // about / acknowledgements
     "about.title": "关于与致谢",
     "about.fetchFail": "无法加载致谢文本。",
+    "about.backendTitle": "后端 API",
+    "about.backendHint": "留空则自动选择：优先使用本地后端，失败时回退到公共服务器。",
+    "about.backendSave": "保存",
+    "about.backendResetBtn": "恢复自动",
+    "about.backendSaved": "后端已保存。",
+    "about.backendReset": "后端已恢复为自动选择。",
+    "about.backendLocal": "本地后端（当前服务器）",
+    "about.backendRemote": "远程后端：",
     // jobs
     "jobs.inQueue": "排队中——有空闲工作线程时立即开始。",
     "jobs.soundOnly": "♪ 仅音频——无视频预览",

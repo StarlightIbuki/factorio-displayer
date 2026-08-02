@@ -7,6 +7,7 @@ import { compressVideo } from "./compress.js";
 import { attachCropBox, exportEditedImage, exportConcatenated, makePreview, FRAME, snapFrame } from "./editor.js";
 import { saveMedia, getMedia, deleteMedia } from "./mediacache.js";
 import { currentLocale, setLocale, t, applyStaticI18n } from "./i18n.js";
+import { DEFAULT_REMOTE_BASE, apiUrl, configuredApiBase, currentApiBase, resolveApiBase, setConfiguredApiBase } from "./api-config.js";
 
 // ── tiny helpers ───────────────────────────────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -90,27 +91,36 @@ async function api(path, options = {}) {
     headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(options.body);
   }
-  let res;
-  try {
-    res = await fetch(path, { ...options, headers });
-  } catch (e) {
-    throw new Error("Cannot reach the server");
-  }
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`;
+  let base = await resolveApiBase();
+  // "Default to local, fall back to remote": when the effective base is the
+  // same origin, retry once against the remote backend if the request fails
+  // at the network level.  HTTP error responses (4xx/5xx) are NOT retried.
+  const attempts = base === "" ? [base, DEFAULT_REMOTE_BASE] : [base];
+  for (let i = 0; i < attempts.length; i++) {
+    let res;
     try {
-      const d = await res.json();
-      msg = (d && d.detail && d.detail.error && d.detail.error.message)
-        || (d && d.detail && d.detail.message)
-        || (d && d.error && d.error.message)
-        || msg;
-    } catch (_) { /* ignore */ }
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
+      res = await fetch(attempts[i] + path, { ...options, headers });
+    } catch (_e) {
+      if (i < attempts.length - 1) continue; // network failure → try next base
+      throw new Error("Cannot reach the server");
+    }
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const d = await res.json();
+        msg = (d && d.detail && d.detail.error && d.detail.error.message)
+          || (d && d.detail && d.detail.message)
+          || (d && d.error && d.error.message)
+          || msg;
+      } catch (_) { /* ignore */ }
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
+    }
+    if (res.status === 204) return null;
+    return res;
   }
-  if (res.status === 204) return null;
-  return res;
+  throw new Error("Cannot reach the server");
 }
 
 // ── views ──────────────────────────────────────────────────────────────
@@ -1122,7 +1132,7 @@ async function renderJobResult(host, job) {
         if (low.endsWith(".toml")) continue;              // toml removed
         if (low.endsWith(".json") && !isDev()) continue;  // json dev-only
         list.append(
-          el("a", { href: `/api/v1/jobs/${id}/artifacts/${encodeURIComponent(a.name)}`, target: "_blank", rel: "noopener", text: `${a.name} (${fmtBytes(a.size_bytes)})` }),
+          el("a", { href: await apiUrl(`/api/v1/jobs/${id}/artifacts/${encodeURIComponent(a.name)}`), target: "_blank", rel: "noopener", text: `${a.name} (${fmtBytes(a.size_bytes)})` }),
           " "
         );
       }
@@ -1531,12 +1541,45 @@ async function openAbout() {
   modal.classList.remove("hidden");
   body.textContent = "…";
   try {
-    const res = await fetch(`/acknowledgement.${currentLocale()}.txt`);
+    // Relative path so it also works when the page is hosted under a
+    // GitHub Pages sub-path (e.g. /factorio-displayer/).
+    const res = await fetch(`./acknowledgement.${currentLocale()}.txt`);
     if (!res.ok) throw new Error(String(res.status));
     body.textContent = await res.text();
   } catch (_) {
     body.textContent = t("about.fetchFail");
   }
+  // Backend config panel — show what's currently in use.
+  const input = $("#backend-input");
+  const status = $("#backend-status");
+  if (input) {
+    input.value = configuredApiBase();
+    try {
+      const base = await currentApiBase();
+      status.textContent = base === "" ? t("about.backendLocal") : `${t("about.backendRemote")} ${base}`;
+    } catch (_) {
+      status.textContent = "";
+    }
+  }
+}
+const $backendSave = $("#backend-save");
+if ($backendSave) {
+  $backendSave.addEventListener("click", async () => {
+    setConfiguredApiBase($("#backend-input").value);
+    toast(t("about.backendSaved"));
+    openAbout();
+    renderHome();
+  });
+}
+// Reset the backend override back to auto (local → remote fallback).
+const $backendReset = $("#backend-reset");
+if ($backendReset) {
+  $backendReset.addEventListener("click", async () => {
+    setConfiguredApiBase("");
+    toast(t("about.backendReset"));
+    openAbout();
+    renderHome();
+  });
 }
 
 applyStaticI18n();

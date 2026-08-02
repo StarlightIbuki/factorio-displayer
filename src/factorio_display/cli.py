@@ -1200,6 +1200,29 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     _add_json_option(b2y_parser)
 
     # ==================================================================
+    # Subcommand: token  (sign & verify access tokens)
+    # ==================================================================
+    token_parser = subparsers.add_parser(
+        "token",
+        help="Sign and verify HMAC-signed access tokens.",
+    )
+    token_sub = token_parser.add_subparsers(dest="token_cmd", required=True, title="token commands")
+    token_issue = token_sub.add_parser("issue", help="Sign a new access token for a user.")
+    token_issue.add_argument("--key", required=True,
+                             help="Shared HMAC key (must match the server's --token-key).")
+    token_issue.add_argument("--user", required=True,
+                             help="Owner/subject of the token (any string, e.g. a username).")
+    token_issue.add_argument("--ttl-hours", type=int, default=24 * 7,
+                             help="Token lifetime in hours (default: 168 = 7 days).")
+    token_issue.add_argument("--scope", default="*",
+                             help="Scope claim (default: '*').")
+    token_verify = token_sub.add_parser("verify", help="Verify a token and print its claims.")
+    token_verify.add_argument("--key", required=True,
+                              help="Shared HMAC key (must match the server's --token-key).")
+    token_verify.add_argument("token", help="The token string to verify.")
+    _add_json_option(token_parser)
+
+    # ==================================================================
     # Subcommand: server
     # ==================================================================
     server_parser = subparsers.add_parser(
@@ -1218,12 +1241,25 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                                help="Max active jobs per caller (default: 2).")
     server_parser.add_argument("--api-token", type=str, default=None,
                                help="Optional shared-secret gate (Authorization: Bearer or X-API-Token).")
+    server_parser.add_argument("--token-key", type=str, default=None,
+                               help="HMAC key used to sign/verify access tokens. Issue tokens "
+                                    "with 'factorio-display token issue --key <same key>'.")
     server_parser.add_argument("--base-url", type=str, default=None,
                                help="Public base URL (default: http://<host>:<port>).")
     server_parser.add_argument(
         "--compress-artifacts", dest="compress_artifacts",
         action=argparse.BooleanOptionalAction, default=True,
         help="Gzip large text artifacts on disk (default: on).",
+    )
+    server_parser.add_argument(
+        "--cors-origins", type=str, default=None, metavar="LIST",
+        help="Comma-separated allowed CORS origins (replaces the defaults, "
+             "which include https://StarlightIbuki.github.io).",
+    )
+    server_parser.add_argument(
+        "--cors-origin-regex", type=str, default=None, metavar="REGEX",
+        help="Regex of allowed CORS origins (replaces the default "
+             "https://[a-z0-9-]+\\.github\\.io).",
     )
 
     args = parser.parse_args()
@@ -1334,6 +1370,20 @@ def _dispatch(args) -> None:
         else:
             sys.stdout.write(yaml_text)
 
+    elif args.command == "token":
+        from .api.tokens import sign, verify, TokenError  # pylint: disable=import-outside-toplevel
+
+        if args.token_cmd == "issue":
+            token = sign(args.key, args.user, ttl_seconds=args.ttl_hours * 3600, scope=args.scope)
+            sys.stdout.write(token + "\n")
+        elif args.token_cmd == "verify":
+            try:
+                claims = verify(args.key, args.token)
+            except TokenError as exc:
+                sys.exit(f"INVALID: {exc}")
+            for k, v in claims.items():
+                sys.stdout.write(f"{k}: {v}\n")
+
     elif args.command == "server":
         _handle_server(args)
 
@@ -1350,15 +1400,28 @@ def _handle_server(args) -> None:
         )
 
     base_url = args.base_url or f"http://{args.host}:{args.port}"
+    import os  # pylint: disable=import-outside-toplevel
+
+    # CORS: CLI flags win, then env vars, then the built-in defaults.
+    cors_env = os.environ.get("CORS_ALLOW_ORIGINS", "")
+    cors_regex_env = os.environ.get("CORS_ALLOW_ORIGIN_REGEX", "")
+    cors_origins = tuple(
+        o.strip() for o in (args.cors_origins if args.cors_origins is not None else cors_env).split(",")
+        if o.strip()
+    )
+    cors_regex = args.cors_origin_regex or cors_regex_env or None
     settings = Settings(
         data_dir=Path(args.data_dir) if args.data_dir else Path("server_data"),
         max_workers=args.max_workers,
         max_jobs_per_user=args.max_jobs_per_user,
         api_token=args.api_token,
+        token_key=args.token_key,
         compress_artifacts=args.compress_artifacts,
         host=args.host,
         port=args.port,
         base_url=base_url,
+        cors_allow_origins=cors_origins or Settings.cors_allow_origins,
+        cors_allow_origin_regex=cors_regex or Settings.cors_allow_origin_regex,
     )
     serve(settings)
 
