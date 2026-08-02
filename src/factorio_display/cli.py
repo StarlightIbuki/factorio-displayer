@@ -1026,6 +1026,10 @@ def _json_envelope(args, out_text: str, err_text: str, exit_code: int) -> dict:
         result["blueprint"] = ""
         result["text"] = primary
         result["format"] = "yaml"
+    elif cmd == "blueprint-ascii":
+        result["blueprint"] = ""
+        result["text"] = primary
+        result["format"] = "ascii"
 
     if exit_code:
         last = [ln for ln in err_text.strip().splitlines() if ln.strip()]
@@ -1198,6 +1202,27 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         help="Write YAML to file instead of stdout.",
     )
     _add_json_option(b2y_parser)
+
+    # ==================================================================
+    # Subcommand: blueprint-ascii
+    # ==================================================================
+    ascii_parser = subparsers.add_parser(
+        "blueprint-ascii",
+        help="Render a blueprint string as ASCII art (entities + wiring) for debugging.",
+    )
+    ascii_parser.add_argument(
+        "input",
+        help="Path to a text file containing one blueprint string, or '-' for stdin.",
+    )
+    ascii_parser.add_argument(
+        "-o", "--output", type=str, default=None,
+        help="Write the ASCII art to file instead of stdout.",
+    )
+    ascii_parser.add_argument(
+        "--no-coords", action="store_true",
+        help="Omit the row/column coordinate headers from the grids.",
+    )
+    _add_json_option(ascii_parser)
 
     # ==================================================================
     # Subcommand: token  (sign & verify access tokens)
@@ -1390,6 +1415,21 @@ def _dispatch(args) -> None:
             sys.stderr.write(f"YAML written to: {args.output}\n")
         else:
             sys.stdout.write(yaml_text)
+
+    elif args.command == "blueprint-ascii":
+        from .ascii_render import render_blueprint
+
+        if args.input == "-":
+            bp_str = sys.stdin.read().strip()
+        else:
+            bp_str = _read_text_auto(Path(args.input)).strip()
+
+        ascii_text = render_blueprint(bp_str, coords=not getattr(args, "no_coords", False))
+        if args.output:
+            Path(args.output).write_text(ascii_text, encoding="utf-8")
+            sys.stderr.write(f"ASCII art written to: {args.output}\n")
+        else:
+            sys.stdout.write(ascii_text)
 
     elif args.command == "token":
         from .api.tokens import sign, verify, TokenError  # pylint: disable=import-outside-toplevel
