@@ -439,6 +439,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         res = service.decode_blueprint(body.blueprint)
         return _build_out(res)
 
+    @app.post("/api/v1/blueprints/ascii", response_model=BuildOut, tags=["builders"])
+    def blueprint_ascii(
+        body: DecodeRequest,
+        principal: str = Depends(get_principal),  # pylint: disable=unused-argument
+    ) -> BuildOut:
+        """Render a blueprint string as ASCII art (entity + wiring maps)."""
+        from .. import service  # pylint: disable=import-outside-toplevel
+
+        res = service.blueprint_to_ascii(body.blueprint)
+        return _build_out(res)
+
     # ── static web app (mounted last so /api/v1/* routes win) ────────
     static_dir = settings.static_dir or (Path(__file__).resolve().parent / "static")
     if static_dir.is_dir():

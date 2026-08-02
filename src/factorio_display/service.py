@@ -403,3 +403,11 @@ def decode_blueprint(bp_string: str) -> BuildResult:
 
     yaml_text = blueprint_string_to_yaml((bp_string or "").strip())
     return BuildResult(text=yaml_text, name="Decoded Blueprint", format="yaml")
+
+
+def blueprint_to_ascii(bp_string: str) -> BuildResult:
+    """Render a blueprint string as ASCII art (entities + wiring maps)."""
+    from .ascii_render import blueprint_string_to_ascii  # pylint: disable=import-outside-toplevel
+
+    text = blueprint_string_to_ascii((bp_string or "").strip())
+    return BuildResult(text=text, name="ASCII Blueprint", format="ascii")

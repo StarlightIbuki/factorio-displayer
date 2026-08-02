@@ -344,3 +344,12 @@ def render_blueprint(bp: Any, *, coords: bool = True) -> str:
             lines.append("")
 
     return "\n".join(lines)
+
+
+def blueprint_string_to_ascii(bp_string: str, *, coords: bool = True) -> str:
+    """Render a blueprint string as ASCII art (entity + wiring maps).
+
+    Thin convenience wrapper around :func:`render_blueprint` so callers can
+    pass a raw blueprint string (mirrors :func:`blueprint_string_to_yaml`).
+    """
+    return render_blueprint((bp_string or "").strip(), coords=coords)

@@ -316,10 +316,11 @@
       </div>
       <fieldset class="panel">
         <legend data-i18n="viewer.decode">Decode &amp; inspect</legend>
-        <p class="hint" data-i18n="viewer.hint">Paste a blueprint string to decode it into YAML and see its stats.</p>
+        <p class="hint" data-i18n="viewer.hint">Paste a blueprint string to decode it into YAML, see its stats, or render it as ASCII art for wiring debugging.</p>
         <textarea id="viewer-input" rows="6" placeholder="0eNq…" spellcheck="false"></textarea>
         <div class="row" style="margin-top:8px">
           <button id="viewer-decode" class="primary" data-i18n="viewer.inspect">Inspect</button>
+          <button id="viewer-ascii" data-i18n="viewer.ascii">ASCII art</button>
         </div>
       </fieldset>
       <div id="viewer-result" class="result-host"></div>

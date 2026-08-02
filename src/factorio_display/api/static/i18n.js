@@ -153,8 +153,9 @@ const DICT = {
     // viewer modal
     "viewer.title": "Blueprint viewer",
     "viewer.decode": "Decode & inspect",
-    "viewer.hint": "Paste a blueprint string to decode it into YAML and see its stats.",
+    "viewer.hint": "Paste a blueprint string to decode it into YAML, see its stats, or render it as ASCII art for wiring debugging.",
     "viewer.inspect": "Inspect",
+    "viewer.ascii": "ASCII art",
     // about / acknowledgements
     "about.title": "About & Acknowledgements",
     "about.ok": "OK",
@@ -188,6 +189,7 @@ const DICT = {
     "result.fbe": "Open in FBE ↗",
     "result.fbeWarning": "FBE shows an adapted preview — signal names are remapped so it can load. Copy/Download for the real blueprint.",
     "result.inspectItem": "Inspect item",
+    "result.ascii": "Debug ASCII",
     "result.couldNotLoad": "Could not load {fmt}: {msg}",
     "result.entityCount": "entity count",
     "result.totalTicks": "total ticks",
@@ -226,6 +228,8 @@ const DICT = {
     "t.pasteBlueprint": "Paste a blueprint first",
     "t.decoding": "Decoding…",
     "t.decodeError": "Error: {msg}",
+    "t.asciiRendering": "Rendering ASCII art…",
+    "t.asciiFail": "Could not render ASCII: {msg}",
   },
 
   "zh-CN": {
@@ -375,8 +379,9 @@ const DICT = {
     // viewer modal
     "viewer.title": "蓝图查看器",
     "viewer.decode": "解码与检查",
-    "viewer.hint": "粘贴蓝图字符串以解码为 YAML 并查看统计信息。",
+    "viewer.hint": "粘贴蓝图字符串以解码为 YAML、查看统计信息，或渲染为 ASCII 视图以调试布线。",
     "viewer.inspect": "检查",
+    "viewer.ascii": "ASCII 视图",
     // about / acknowledgements
     "about.title": "关于与致谢",
     "about.ok": "确定",
@@ -410,6 +415,7 @@ const DICT = {
     "result.fbe": "在 FBE 中打开 ↗",
     "result.fbeWarning": "FBE 中显示的是适配后的预览——信号名已被替换以便 FBE 加载。真实蓝图请使用复制/下载。",
     "result.inspectItem": "检查项",
+    "result.ascii": "调试 ASCII",
     "result.couldNotLoad": "无法加载 {fmt}: {msg}",
     "result.entityCount": "实体数量",
     "result.totalTicks": "总刻度",
@@ -448,6 +454,8 @@ const DICT = {
     "t.pasteBlueprint": "请先粘贴蓝图",
     "t.decoding": "解码中…",
     "t.decodeError": "错误: {msg}",
+    "t.asciiRendering": "正在渲染 ASCII 视图…",
+    "t.asciiFail": "无法渲染 ASCII: {msg}",
   },
 };
 

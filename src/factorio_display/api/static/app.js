@@ -8,6 +8,7 @@ import { attachCropBox, exportEditedImage, exportConcatenated, makePreview, FRAM
 import { saveMedia, getMedia, deleteMedia } from "./mediacache.js";
 import { currentLocale, setLocale, t, applyStaticI18n } from "./i18n.js";
 import { DEFAULT_REMOTE_BASE, apiUrl, configuredApiBase, currentApiBase, resolveApiBase, setConfiguredApiBase } from "./api-config.js";
+import { blueprintAscii, asciiPre } from "./ascii.js";
 
 // ── tiny helpers ───────────────────────────────────────────────────────
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -1421,6 +1422,14 @@ async function renderJobResult(host, job) {
   const renderTab = async (key) => {
     $$(".result-tabs button", tabs).forEach((b) => b.classList.toggle("active", b.dataset.fmt === key));
     try {
+      if (key === "ascii") {
+        const text = await getResultText(id, "blueprint");
+        view.innerHTML = "";
+        const host = el("div");
+        view.append(host);
+        await renderAsciiInto(host, text);
+        return;
+      }
       const text = await getResultText(id, tabFormat(key));
       view.innerHTML = "";
       if (key === "inspect") view.append(renderYamlTree(text));
@@ -1433,7 +1442,11 @@ async function renderJobResult(host, job) {
       view.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: tabFormat(key), msg: e.message }) }));
     }
   };
-  const tabDefs = [["blueprint", t("s3.formatBlueprint")], ["inspect", t("result.inspectItem")]];
+  const tabDefs = [
+    ["blueprint", t("s3.formatBlueprint")],
+    ["inspect", t("result.inspectItem")],
+    ["ascii", t("result.ascii")],
+  ];
   if (isDev()) tabDefs.push(["json", t("s3.formatJson")]);
   for (const [key, label] of tabDefs) {
     tabs.append(el("button", { "data-fmt": key, text: label, onclick: () => renderTab(key) }));
@@ -1886,6 +1899,26 @@ $("#viewer-decode").addEventListener("click", async () => {
     host.innerHTML = "";
     host.append(el("p", { class: "hint", text: t("t.decodeError", { msg: e.message }) }));
   }
+});
+
+// Render ASCII-art (entities + wiring maps) for a blueprint string into *host*.
+async function renderAsciiInto(host, bpString) {
+  host.innerHTML = "";
+  host.append(el("p", { class: "hint", text: t("t.asciiRendering") }));
+  try {
+    const text = await blueprintAscii(api, bpString);
+    host.innerHTML = "";
+    host.append(asciiPre(text));
+  } catch (e) {
+    host.innerHTML = "";
+    host.append(el("p", { class: "hint", text: t("t.asciiFail", { msg: e.message }) }));
+  }
+}
+
+$("#viewer-ascii").addEventListener("click", async () => {
+  const bp = $("#viewer-input").value.trim();
+  if (!bp) { toast(t("t.pasteBlueprint"), "error"); return; }
+  renderAsciiInto($("#viewer-result"), bp);
 });
 
 // boot

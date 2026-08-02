@@ -88,6 +88,19 @@ def test_sync_decode_builder(client: TestClient) -> None:
     assert r.json()["format"] == "yaml"
 
 
+def test_blueprint_ascii_endpoint(client: TestClient) -> None:
+    """The ASCII-art endpoint renders entities + wiring maps for a blueprint."""
+    disp = client.post("/api/v1/blueprints/display", json={"width": 4, "height": 4}).json()
+    r = client.post("/api/v1/blueprints/ascii", json={"blueprint": disp["blueprint"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["format"] == "ascii"
+    assert "Blueprint entities" in body["text"]
+    assert "Wiring" in body["text"]
+    # A 4x4 display is all lamps wired into one red data bus.
+    assert "small-lamp" in body["text"]
+
+
 def test_share_link_lifecycle(client: TestClient) -> None:
     """A finished job can be shared; the public link serves the blueprint with CORS."""
     r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])
