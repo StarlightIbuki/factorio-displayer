@@ -218,22 +218,52 @@ function svgView(model, doc) {
     el("input", { type: "checkbox", checked: "", id: "preview-wires" }),
     el("span", { text: t("preview.showWires") }),
   ]);
-  toolbar.append(showWires);
+  const zoomOut = el("button", { class: "pv-zoom", text: "−", title: t("preview.zoomOut") });
+  const zoomVal = el("span", { class: "pv-zoom-val", text: "100%" });
+  const zoomIn = el("button", { class: "pv-zoom", text: "+", title: t("preview.zoomIn") });
+  const zoomReset = el("button", { class: "pv-zoom", text: "1:1", title: t("preview.zoomReset") });
+  toolbar.append(showWires, el("span", { class: "spacer" }), zoomOut, zoomVal, zoomIn, zoomReset);
   wrap.append(toolbar);
 
-  const body = el("div");
-  const detail = el("div", { class: "preview-detail" });
+  // Split layout: scrollable canvas on the left, properties on the right.
+  const layout = el("div", { class: "preview-layout" });
+  const canvas = el("div", { class: "preview-canvas" });
+  const side = el("div", { class: "preview-side" });
+
   // Raw blueprint entities (with position/direction/control_behavior) — the
   // render model entities are only {x,y,name,dir,letter,kind}.
   const entities = _entities(doc);
   const showDetail = (idx) => {
-    detail.innerHTML = "";
-    if (idx == null) detail.append(el("p", { class: "hint", text: t("preview.clickHint") }));
-    else detail.append(entityDetail(entities[idx], idx, true));
+    side.innerHTML = "";
+    if (idx == null) side.append(el("p", { class: "hint", text: t("preview.clickHint") }));
+    else side.append(entityDetail(entities[idx], idx));
   };
   showDetail(null);
+
   const svg = buildPreview(model, showDetail);
-  body.append(svg);
+  const holder = el("div", { class: "preview-holder" });
+  holder.append(svg);
+  canvas.append(holder);
+  layout.append(canvas, side);
+  wrap.append(layout);
+
+  // Zoom — scrollbars live in the canvas, so a scaled-up holder tracks them.
+  const W = (model.max_x - model.min_x + 2) * TILE + PAD * 2;
+  const H = (model.max_y - model.min_y + 3) * TILE + PAD * 2;
+  let zoom = 1;
+  const applyZoom = () => {
+    holder.style.width = (W * zoom) + "px";
+    holder.style.height = (H * zoom) + "px";
+    svg.style.width = (W * zoom) + "px";
+    svg.style.height = (H * zoom) + "px";
+    zoomVal.textContent = Math.round(zoom * 100) + "%";
+    zoomIn.disabled = zoom >= 4;
+    zoomOut.disabled = zoom <= 0.25;
+  };
+  zoomIn.addEventListener("click", () => { zoom = Math.min(4, zoom * 1.25); applyZoom(); });
+  zoomOut.addEventListener("click", () => { zoom = Math.max(0.25, zoom / 1.25); applyZoom(); });
+  zoomReset.addEventListener("click", () => { zoom = 1; applyZoom(); });
+  applyZoom();
 
   // legend
   const legend = el("div", { class: "preview-legend" });
@@ -243,10 +273,10 @@ function svgView(model, doc) {
       el("span", { text: `${net.char} ${net.color} · ${net.endpoints.length} pt` }),
     ]));
   });
-  wrap.append(body, detail, legend);
+  wrap.append(legend);
 
   $("#preview-wires", wrap).addEventListener("change", (e) => {
-    body.querySelectorAll(".wire").forEach((w) => w.classList.toggle("hidden", !e.target.checked));
+    canvas.querySelectorAll(".wire").forEach((w) => w.classList.toggle("hidden", !e.target.checked));
   });
   return wrap;
 }
@@ -334,51 +364,94 @@ function _sig(s) {
   return _SIG_SPECIAL[s.name] || s.name;
 }
 
-function describeCondition(ent) {
-  const cb = ent.control_behavior;
-  if (!cb) return "—";
+// ── condition / output list views (read-only "controllers") ────────────
+function ctlInput(value) {
+  return el("input", { type: "text", class: "pv-ctl", readonly: "", value: value == null ? "" : String(value) });
+}
+function ctlSelect(value, options) {
+  const sel = el("select", { class: "pv-ctl", disabled: "" });
+  const v = value == null ? "" : String(value);
+  let found = false;
+  for (const o of options) {
+    const opt = el("option", { text: o });
+    if (String(o) === v) { opt.selected = true; found = true; }
+    sel.append(opt);
+  }
+  if (!found && v !== "") sel.append(el("option", { text: v, selected: "" }));
+  return sel;
+}
+function sigCtl(sig) { return ctlInput(sig ? _sig(sig) : ""); }
+function condRow(label, ...ctls) {
+  return el("div", { class: "pv-row" }, [el("span", { class: "pv-row-label", text: label }), ...ctls]);
+}
+function condGroup(title) { return el("div", { class: "pv-group", text: title }); }
+
+function conditionView(cb) {
+  const list = el("div", { class: "pv-cond" });
+  if (!cb) { list.append(el("p", { class: "hint", text: "—" })); return list; }
+
   if (cb.decider_conditions) {
     const c = cb.decider_conditions;
-    const first = _sig(c.first_signal) || (c.use_parameters ? "parameters" : "?");
-    const second = c.second_signal ? _sig(c.second_signal)
-      : (c.constant != null ? String(c.constant) : (c.use_parameters ? "parameters" : ""));
-    const out = c.output_signal ? `[${_sig(c.output_signal)}]`
-      : (c.copy_count_from_input ? "[count]" : "1");
-    return `[${first}] ${c.comparator || "="} ${second} → ${out}`;
+    list.append(condGroup(t("inspect.condition")));
+    list.append(condRow(t("inspect.first"), sigCtl(c.first_signal)));
+    list.append(condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])));
+    list.append(condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "")));
+    list.append(condGroup(t("inspect.output")));
+    list.append(condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)));
+    const copyBox = el("input", { type: "checkbox", disabled: "" });
+    if (c.copy_count_from_input) copyBox.checked = true;
+    list.append(el("label", { class: "pv-row" }, [
+      el("span", { class: "pv-row-label", text: t("inspect.copyCount") }),
+      copyBox,
+    ]));
+    return list;
   }
   if (cb.arithmetic_conditions) {
     const c = cb.arithmetic_conditions;
-    const first = c.first_signal ? `[${_sig(c.first_signal)}]`
-      : (c.first_constant != null ? String(c.first_constant) : "0");
-    const second = c.second_signal ? `[${_sig(c.second_signal)}]`
-      : (c.second_constant != null ? String(c.second_constant) : "0");
-    const out = c.output_signal ? `[${_sig(c.output_signal)}]` : "?";
-    return `${first} ${c.operation || "+"} ${second} → ${out}`;
+    list.append(condGroup(t("inspect.condition")));
+    list.append(condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.first_constant != null ? c.first_constant : "0")));
+    list.append(condRow(t("inspect.operation"), ctlSelect(c.operation || "+", ["+", "-", "*", "/", "%", "^"])));
+    list.append(condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.second_constant != null ? c.second_constant : "0")));
+    list.append(condGroup(t("inspect.output")));
+    list.append(condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)));
+    return list;
   }
-  if (Array.isArray(cb.filters) && cb.filters.length) {
-    return cb.filters
-      .filter((f) => f && f.signal)
-      .map((f) => `[${_sig(f.signal)}] ×${f.count ?? 1}`)
-      .join(", ");
+  if (Array.isArray(cb.filters)) {
+    list.append(condGroup(t("inspect.signals")));
+    if (!cb.filters.length) { list.append(el("p", { class: "hint", text: "—" })); return list; }
+    cb.filters.filter((f) => f && f.signal).forEach((f) => {
+      list.append(el("div", { class: "pv-row" }, [
+        el("span", { class: "pv-row-label", text: `${t("inspect.signal")}${f.index != null ? " " + f.index : ""}` }),
+        sigCtl(f.signal),
+        el("span", { class: "pv-row-label", text: t("inspect.count") }),
+        ctlInput(f.count != null ? f.count : 1),
+      ]));
+    });
+    return list;
   }
   if (cb.circuit_parameters) {
     const cp = cb.circuit_parameters;
-    const sig = cp.circuit_value_signal ? `[${_sig(cp.circuit_value_signal)}]` : "";
-    return sig ? `${cp.signal_value_is_pitch ? "pitch" : "volume"} ← ${sig}` : "—";
+    list.append(condGroup(t("inspect.output")));
+    list.append(condRow(t("inspect.mode"), ctlSelect(cp.signal_value_is_pitch ? "pitch" : "volume", ["volume", "pitch"])));
+    list.append(condRow(t("inspect.signal"), sigCtl(cp.circuit_value_signal)));
+    return list;
   }
   if (cb.circuit_condition) {
     const c = cb.circuit_condition;
-    const left = c.first_signal ? `[${_sig(c.first_signal)}]` : "?";
-    const right = c.second_signal ? `[${_sig(c.second_signal)}]`
-      : (c.constant != null ? String(c.constant) : "?");
-    return `${left} ${c.comparator || "="} ${right}`;
+    list.append(condGroup(t("inspect.condition")));
+    list.append(condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.constant != null ? c.constant : "?")));
+    list.append(condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])));
+    list.append(condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "?")));
+    return list;
   }
-  return "—";
+  list.append(el("p", { class: "hint", text: "—" }));
+  return list;
 }
 
-// One entity card, shared by the parts list and the preview click panel.
-// When includeConfig is true, the raw control_behavior is shown too.
-function entityDetail(ent, idx, includeConfig = false) {
+// One entity card, shared by the parts list and the preview side panel.
+// Position/facing as key-value rows; condition/output as a structured list
+// of read-only controllers (conditionView).
+function entityDetail(ent, idx) {
   const card = el("div", { class: "inspect-item" });
   const head = el("div", { class: "inspect-item-head" }, [
     el("span", { class: "inspect-item-badge", text: _ENTITY_LETTER[ent.name] || "." }),
@@ -392,13 +465,10 @@ function entityDetail(ent, idx, includeConfig = false) {
   rows.append(
     kv(t("inspect.position"), fmtPos(ent.position)),
     kv(t("inspect.facing"), facingOf(ent)),
-    kv(t("inspect.condition"), describeCondition(ent)),
   );
   card.append(head, rows);
-  if (includeConfig && ent.control_behavior) {
-    card.append(el("div", { class: "inspect-item-config-title", text: t("preview.config") }));
-    card.append(el("pre", { class: "mono inspect-item-config", text: JSON.stringify(ent.control_behavior, null, 2) }));
-  }
+  card.append(el("div", { class: "inspect-item-config-title", text: t("inspect.condition") }));
+  card.append(conditionView(ent.control_behavior));
   return card;
 }
 
