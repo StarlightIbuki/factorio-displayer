@@ -8,11 +8,13 @@
 //   * Preview   — an interactive SVG: combinator outlines, red/green wire
 //                 overlays, network-coloured ports, hover-to-highlight.
 //
-// The structured model + ASCII text come from POST /api/v1/blueprints/render,
-// so the preview is always consistent with the ASCII maps.
+// The ASCII text + structured model are rendered CLIENT-SIDE by ascii.js
+// (a port of the backend ascii_render.py), so the ASCII/preview tabs need
+// no backend round-trip.  Only the YAML tab still asks the backend.
 
 /* eslint-env browser */
 import { t } from "./i18n.js";
+import { decodeBlueprintString, renderBlueprintAscii, renderBlueprintModel } from "./ascii.js";
 
 // ── tiny DOM helpers (kept local; the app's helpers are not exported) ──
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -248,10 +250,11 @@ async function loadBlueprint(bpString) {
   content.innerHTML = "";
   content.append(el("p", { class: "hint", text: t("t.decoding") }));
   try {
-    const res = await _state.api("/api/v1/blueprints/render", { method: "POST", body: { blueprint: bpString } });
-    const data = await res.json();
-    _state.asciiPages = splitAsciiPages(data.ascii || "");
-    _state.model = data.model || null;
+    // ASCII + preview model are computed in-browser (ascii.js), so the
+    // inspector works without hitting the backend for these two tabs.
+    const doc = await decodeBlueprintString(bpString);
+    _state.asciiPages = splitAsciiPages(renderBlueprintAscii(doc));
+    _state.model = renderBlueprintModel(doc);
   } catch (e) {
     content.innerHTML = "";
     content.append(el("p", { class: "hint", text: t("t.asciiFail", { msg: e.message }) }));
