@@ -82,9 +82,6 @@ const state = {
   previewRendered: false,
 };
 
-// Cached rendered result panels (job_id -> Node) so a completed job's result
-// is not re-fetched on every 2s poll while other jobs are still running.
-const jobResultCache = new Map();
 // Cached 1s low-res preview node per job (job_id -> { node }).
 const jobPreviewCache = new Map();
 
@@ -171,6 +168,7 @@ tokenInput.addEventListener("change", () => {
 
 // ── GitHub login ──────────────────────────────────────────────────────
 let githubAuth = null; // { client_id, redirect_uri, frontend_url } | null
+let oauthPending = false; // true while an OAuth popup is up
 const $login = $("#btn-login");
 const $authUser = $("#auth-user");
 
@@ -208,22 +206,30 @@ function renderAuth() {
 }
 
 async function initAuth() {
-  // OAuth return: the backend redirected here with ?fd_token=…&state=…
+  // OAuth return — the backend redirected here with ?fd_token=…&state=….
+  // When login ran in a popup this code runs in the popup (window.opener set);
+  // after a full-page redirect it runs in this window.
   const params = new URLSearchParams(location.search);
   const tok = params.get("fd_token");
   const st = params.get("state");
   if (tok) {
-    const expected = sessionStorage.getItem("fd_oauth_state");
+    const expected = localStorage.getItem("fd_oauth_state");
     if (st && expected && st === expected) {
       setToken(tok);
-      toast(t("auth.signedIn", { user: currentUser() || "" }));
+      if (!window.opener) toast(t("auth.signedIn", { user: currentUser() || "" }));
     } else if (params.get("error")) {
       toast(t("auth.oauthError", { msg: params.get("error") }), "error");
     } else {
       toast(t("auth.stateMismatch"), "error");
     }
-    sessionStorage.removeItem("fd_oauth_state");
+    localStorage.removeItem("fd_oauth_state");
     history.replaceState(null, "", location.pathname + location.hash);
+    if (window.opener) {
+      // We're the OAuth popup: the opener already got the token via the
+      // storage event. Close quietly.
+      setTimeout(() => window.close(), 400);
+      return;
+    }
   }
   // Does this backend support GitHub login?  (public info from /capabilities)
   try {
@@ -233,19 +239,45 @@ async function initAuth() {
   renderAuth();
 }
 
-if ($login) {
-  $login.addEventListener("click", () => {
-    if (!githubAuth) return;
-    const state = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
-    sessionStorage.setItem("fd_oauth_state", state);
-    const url = new URL("https://github.com/login/oauth/authorize");
-    url.searchParams.set("client_id", githubAuth.client_id);
-    url.searchParams.set("redirect_uri", githubAuth.redirect_uri);
-    url.searchParams.set("state", state);
-    url.searchParams.set("scope", "read:user");
+// Start GitHub OAuth in a POPUP so the in-progress wizard (clips, edits)
+// survives the round-trip — you can log in mid-flow without losing work.
+// On success the popup stores the token in localStorage (same origin) and
+// closes; this window picks it up via the `storage` event below.
+function startOAuth() {
+  if (!githubAuth) return;
+  const state = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
+  // localStorage (not sessionStorage): the popup is a separate window with its
+  // own sessionStorage, but shares localStorage with this origin.
+  localStorage.setItem("fd_oauth_state", state);
+  const url = new URL("https://github.com/login/oauth/authorize");
+  url.searchParams.set("client_id", githubAuth.client_id);
+  url.searchParams.set("redirect_uri", githubAuth.redirect_uri);
+  url.searchParams.set("state", state);
+  url.searchParams.set("scope", "read:user");
+  oauthPending = true;
+  const w = window.open(url.toString(), "github-oauth", "width=560,height=720,popup=yes");
+  if (!w) {
+    // Popup blocked → full-page redirect (wizard state would be lost, but
+    // login still works).
     location.href = url.toString();
-  });
+  }
 }
+
+// The OAuth popup writes fd_token to localStorage → storage event here.
+window.addEventListener("storage", (e) => {
+  if (e.key === "fd_token") {
+    state.token = localStorage.getItem("fd_token") || "";
+    renderAuth();
+    if (oauthPending && state.token) {
+      oauthPending = false;
+      closeLoginModal();
+      toast(t("auth.signedIn", { user: currentUser() || "" }));
+      renderHome(); // the signed-in user's job list may differ
+    }
+  }
+});
+
+if ($login) $login.addEventListener("click", startOAuth);
 if ($authUser) {
   $authUser.addEventListener("click", () => {
     if (confirm(t("auth.signOutConfirm"))) {
@@ -255,6 +287,36 @@ if ($authUser) {
     }
   });
 }
+
+// ── login prompt (shown when creating a job without being signed in) ──
+function openLoginModal() {
+  const modal = $("#login-modal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+  const btn = $("#login-modal-btn");
+  const hint = $("#login-modal-dev");
+  if (btn) btn.classList.toggle("hidden", !githubAuth);
+  if (hint) {
+    hint.classList.toggle("hidden", !!githubAuth);
+    hint.textContent = t("auth.noGithub");
+  }
+}
+function closeLoginModal() {
+  const modal = $("#login-modal");
+  if (modal) modal.classList.add("hidden");
+}
+const $loginModal = $("#login-modal");
+if ($loginModal) {
+  $loginModal.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeLoginModal();
+  });
+}
+const $loginModalBtn = $("#login-modal-btn");
+if ($loginModalBtn) $loginModalBtn.addEventListener("click", () => { closeLoginModal(); startOAuth(); });
+const $loginModalClose = $("#login-modal-close");
+if ($loginModalClose) $loginModalClose.addEventListener("click", closeLoginModal);
+const $loginModalDismiss = $("#login-modal-dismiss");
+if ($loginModalDismiss) $loginModalDismiss.addEventListener("click", closeLoginModal);
 
 // ── developer mode ────────────────────────────────────────────────────
 // Hides raw JSON (results/artifacts) from non-developers; removes TOML.
@@ -1148,6 +1210,13 @@ generateBtn.addEventListener("click", generate);
 
 async function generate() {
   if (!state.clips.length) return;
+  // Creating a job requires a token on the deployed backend — prompt for
+  // login (in a popup, so the wizard state is kept) instead of failing with a
+  // developer-facing error.
+  if (!state.token && githubAuth) {
+    openLoginModal();
+    return;
+  }
   const quality = $("#compress-quality").value;
   const outputMode = $("#opt-output-mode").value;
   // Videos are always compressed to the display resolution (non-optional).
@@ -1251,7 +1320,9 @@ async function generate() {
     startPolling();
   } catch (e) {
     generateStatus.textContent = "";
-    if (e.status === 429 || e.status === 409) {
+    if (e.status === 401) {
+      openLoginModal();
+    } else if (e.status === 429 || e.status === 409) {
       toast(t("t.serverBusy", { msg: e.message }));
       showView("home");
     } else {
@@ -1314,7 +1385,7 @@ async function renderJobResult(host, job) {
   const view = el("div");
   let active = "blueprint";
   let currentText = "";
-  let pastebinUrl = null;
+  let shareUrl = null;
 
   const tabFormat = (key) => (key === "inspect" ? "yaml" : key);
   const renderTab = async (key) => {
@@ -1346,23 +1417,26 @@ async function renderJobResult(host, job) {
   }
   host.append(metaStrip, tabs, view);
 
-  const doPastebin = async () => {
+  const doShare = async () => {
     if (!currentText) return;
     try {
-      pastebinUrl = await uploadToPastebin(currentText, job.name || "blueprint");
-      copyText(pastebinUrl);
-      toast(`${t("result.pastebin")} ${pastebinUrl}`);
+      if (!shareUrl) {
+        toast(t("t.pastebinUploading"));
+        shareUrl = await createShareUrl(id);
+      }
+      await copyText(shareUrl);
+      toast(`${t("result.pastebin")} ${shareUrl}`);
     } catch (e) {
       toast(t("t.pastebinFail", { msg: e.message }), "error");
     }
   };
   const doFBE = async () => {
     try {
-      if (!pastebinUrl) {
+      if (!shareUrl) {
         toast(t("t.pastebinUploading"));
-        pastebinUrl = await uploadToPastebin(currentText, job.name || "blueprint");
+        shareUrl = await createShareUrl(id);
       }
-      window.open(`https://fbe.teoxoy.com/?source=${encodeURIComponent(pastebinUrl)}`, "_blank", "noopener");
+      window.open(`https://fbe.teoxoy.com/?source=${encodeURIComponent(shareUrl)}`, "_blank", "noopener");
     } catch (e) {
       toast(t("t.fbeFail", { msg: e.message }), "error");
     }
@@ -1370,8 +1444,8 @@ async function renderJobResult(host, job) {
   host.append(el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
     el("button", { class: "primary", text: t("result.copy"), onclick: () => currentText && copyText(currentText) }),
     el("button", { text: t("result.download"), onclick: () => currentText && downloadText(currentText, `${job.name || "result"}.${FORMAT_EXT[tabFormat(active)] || "txt"}`) }),
-    el("button", { text: t("result.pastebin"), title: "Upload this result to Pastebin", onclick: doPastebin }),
-    el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via Pastebin)", onclick: doFBE }),
+    el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: doShare }),
+    el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: doFBE }),
   ]));
 
   try {
@@ -1395,11 +1469,14 @@ async function renderJobResult(host, job) {
   await renderTab(active);
 }
 
-// ── Pastebin / FBE sharing ────────────────────────────────────────────
-async function uploadToPastebin(text, name) {
-  const res = await api("/api/v1/pastebin", { method: "POST", body: { text, name, format: "text" } });
+// ── temporary share link (Pastebin / FBE source) ──────────────────────
+// The backend issues a short-lived public URL that serves the blueprint raw
+// text with permissive CORS — no third-party paste service or server key.
+async function createShareUrl(jobId) {
+  const res = await api(`/api/v1/jobs/${jobId}/share`, { method: "POST" });
   const data = await res.json();
-  return data.url;
+  const base = await currentApiBase();
+  return (base || location.origin) + data.url;
 }
 
 // ── structured viewers ────────────────────────────────────────────────
@@ -1667,12 +1744,11 @@ function buildJobCard(job) {
   if (expanded) {
     const detail = el("div", { class: "job-detail" });
     if (job.status === "succeeded") {
-      if (jobResultCache.has(job.job_id)) {
-        detail.append(jobResultCache.get(job.job_id).cloneNode(true));
-      } else {
-        card.append(detail);
-        renderJobResult(detail, job).then(() => jobResultCache.set(job.job_id, detail.cloneNode(true)));
-      }
+      // Always render fresh: the cached clone lost its event handlers and was
+      // never re-attached to the card, which made a folded job silently refuse
+      // to unfold (until a refresh cleared the cache).
+      card.append(detail);
+      renderJobResult(detail, job);
     } else if (job.status === "running") {
       const log = job.progress && job.progress.log_tail ? job.progress.log_tail.join("\n") : t("t.working");
       detail.append(el("pre", { class: "logbox", text: log }));
@@ -1702,7 +1778,6 @@ async function deleteJob(id) {
   try {
     await api(`/api/v1/jobs/${id}`, { method: "DELETE" });
     state.expanded.delete(id);
-    jobResultCache.delete(id);
     jobPreviewCache.delete(id);
     try { await deleteMedia(id); } catch (_) { /* non-fatal */ }
     try { await deleteMedia("preview:" + id); } catch (_) { /* non-fatal */ }
@@ -1838,5 +1913,12 @@ applyStaticI18n();
 renderFormatSelectOptions();
 showView("home");
 initAuth();
+
+// Show the terms-of-use / acknowledgement automatically on first visit.
+// (Skip in the OAuth popup — only the main window should show it.)
+if (!window.opener && !localStorage.getItem("fd_ack_seen")) {
+  localStorage.setItem("fd_ack_seen", "1");
+  setTimeout(openAbout, 400);
+}
 
 

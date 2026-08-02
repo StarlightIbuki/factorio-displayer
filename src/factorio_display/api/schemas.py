@@ -95,14 +95,6 @@ class DecodeRequest(BaseModel):
     blueprint: str
 
 
-class PastebinRequest(BaseModel):
-    """Body for ``POST /api/v1/pastebin`` — upload a snippet to Pastebin."""
-
-    text: str
-    name: str = "blueprint"
-    format: str = "text"
-
-
 class UploadOut(BaseModel):
     upload_id: str
     name: str

@@ -85,16 +85,57 @@ def test_sync_decode_builder(client: TestClient) -> None:
     assert r.json()["format"] == "yaml"
 
 
-def test_pastebin_requires_server_key(client: TestClient) -> None:
-    """Without a configured PASTEBIN_DEV_KEY the proxy must refuse cleanly."""
-    r = client.post("/api/v1/pastebin", json={"text": "0eN test", "name": "bp"})
-    assert r.status_code == 400
-    body = r.json()
-    assert body["detail"]["error"]["code"] == "no_pastebin_key"
+def test_share_link_lifecycle(client: TestClient) -> None:
+    """A finished job can be shared; the public link serves the blueprint with CORS."""
+    r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])
+    upload_id = r.json()[0]["upload_id"]
+    r = client.post(
+        "/api/v1/jobs",
+        json={"type": "encode", "inputs": [upload_id], "options": {"name": "Tiny", "power": "none", "use_cache": False}},
+    )
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
 
-    # missing required text → pydantic 422
-    r = client.post("/api/v1/pastebin", json={})
-    assert r.status_code == 422
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        status = client.get(f"/api/v1/jobs/{job_id}").json()["status"]
+        if status in ("succeeded", "failed", "cancelled"):
+            break
+        time.sleep(0.5)
+    assert status == "succeeded", client.get(f"/api/v1/jobs/{job_id}").json().get("error")
+
+    r = client.post(f"/api/v1/jobs/{job_id}/share")
+    assert r.status_code == 200
+    share = r.json()
+    assert share["url"].startswith("/api/v1/share/")
+    token = share["url"].rsplit("/", 1)[1]
+
+    # Public link is reachable WITHOUT auth, serves the blueprint, and is CORS-open.
+    r = client.get(f"/api/v1/share/{token}")
+    assert r.status_code == 200
+    assert r.text.startswith("0eN")
+    assert r.headers.get("access-control-allow-origin") == "*"
+
+    # Unknown / expired token → 410 Gone.
+    assert client.get("/api/v1/share/does-not-exist").status_code == 410
+
+
+def test_share_requires_finished_job(tmp_path) -> None:
+    """Sharing a non-existent or in-flight job is refused."""
+    settings = Settings(data_dir=tmp_path / "data", max_workers=1)
+    app = create_app(settings)
+    store = app.state.store
+    job_id = "j_seed"
+    store.save_job(
+        "anonymous",
+        job_id,
+        {"job_id": job_id, "owner": "anonymous", "type": "encode", "name": "x", "status": "running",
+         "progress": {"phase": "running"}, "created_at": 1.0, "started_at": 1.0, "finished_at": None,
+         "error": None, "result": None, "inputs": [], "callback_url": None, "config": {}},
+    )
+    with TestClient(app) as c:
+        assert c.post("/api/v1/jobs/j_seed/share").status_code == 409
+        assert c.post("/api/v1/jobs/missing/share").status_code == 404
 
 
 def test_cors_allows_github_pages_by_default(client: TestClient) -> None:

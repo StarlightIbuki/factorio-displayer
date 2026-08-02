@@ -29,7 +29,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8000
     base_url: str = "http://127.0.0.1:8000"
-    pastebin_dev_key: str = ""  # https://pastebin.com/doc_api (env PASTEBIN_DEV_KEY)
+    share_ttl_hours: float = 24.0  # lifetime of a temporary public share link
 
     # CORS: which browser origins may call the API cross-origin.  The default
     # allows the project's GitHub Pages site (and localhost dev servers).

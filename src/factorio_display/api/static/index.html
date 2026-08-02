@@ -347,6 +347,22 @@
     </div>
   </div>
 
+  <!-- ═══════════ Login (modal) ═══════════ -->
+  <div id="login-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="row between">
+        <h2 data-i18n="auth.loginTitle">Sign in</h2>
+        <button id="login-modal-close" class="link">✕</button>
+      </div>
+      <p class="hint" data-i18n="auth.loginHint">Sign in with GitHub to create and manage jobs.</p>
+      <div class="row" style="gap:8px;margin-top:12px">
+        <button id="login-modal-btn" class="primary big" data-i18n="auth.login">Login with GitHub</button>
+        <button id="login-modal-dismiss" data-i18n="auth.cancel">Cancel</button>
+      </div>
+      <p class="hint hidden" id="login-modal-dev"></p>
+    </div>
+  </div>
+
   <div id="toasts" class="toasts"></div>
 
   <script type="module" src="./app.js"></script>

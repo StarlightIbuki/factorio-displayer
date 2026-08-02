@@ -8,6 +8,7 @@ Route layout (all under ``/api/v1``):
 - ``GET /jobs/{id}``, ``POST /jobs/{id}/cancel``,
   ``DELETE /jobs/{id}``
 - ``GET /jobs/{id}/result``                          — result (blueprint/toml/yaml/json)
+- ``POST /jobs/{id}/share``, ``GET /share/{token}``  — temporary public share link
 - ``GET /jobs/{id}/artifacts[/{name}]``              — intermediate artifacts
 - ``POST /blueprints/display|audio-decoder|logical|decode`` — fast sync builders
 
@@ -17,8 +18,10 @@ Every upload/job/artifact is scoped to the caller's principal.
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -51,7 +54,6 @@ from .schemas import (
     JobListOut,
     JobOut,
     LogicalRequest,
-    PastebinRequest,
     UploadOut,
 )
 from .settings import Settings
@@ -98,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.store = store
     app.state.runner = runner
     app.state.started_at = time.time()
+    app.state.share_tokens: dict[str, dict] = {}  # token -> {job_id, principal, expires_at}
     app.add_middleware(CompressionMiddleware, minimum_size=settings.compress_min_size)
 
     # CORS — allow the GitHub Pages frontend (and localhost dev origins) to
@@ -331,45 +334,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=_err("not_found", "artifact not found"))
         return FileResponse(path)
 
-    # ── pastebin (1-click share / FBE source) ────────────────────────
-    @app.post("/api/v1/pastebin", tags=["meta"])
-    async def pastebin(body: PastebinRequest) -> dict:
-        """Proxy an anonymous Pastebin upload. Requires a dev key on the server
-        (Settings.pastebin_dev_key or the ``PASTEBIN_DEV_KEY`` env var)."""
-        import os  # pylint: disable=import-outside-toplevel
-        import httpx  # pylint: disable=import-outside-toplevel
-
-        key = settings.pastebin_dev_key or os.environ.get("PASTEBIN_DEV_KEY", "")
-        if not key:
+    # ── temporary public share links ────────────────────────────────
+    @app.post("/api/v1/jobs/{job_id}/share", tags=["jobs"])
+    def create_share(job_id: str, principal: str = Depends(get_principal)) -> dict:
+        """Issue a short-lived, public URL that serves this job's blueprint with
+        permissive CORS — used by "Copy link" and as the FBE source.  No third
+        party paste service or server-side key is needed."""
+        rec = runner.get(principal, job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        if rec.get("status") != "succeeded":
             raise HTTPException(
-                status_code=400,
-                detail=_err(
-                    "no_pastebin_key",
-                    "Pastebin is not configured — set PASTEBIN_DEV_KEY on the server.",
-                ),
+                status_code=409,
+                detail=_err("job_not_ready", "only finished jobs can be shared"),
             )
-        payload = {
-            "api_dev_key": key,
-            "api_option": "create",
-            "api_paste_code": body.text,
-            "api_paste_name": body.name,
-            "api_paste_format": body.format,
-            "api_paste_private": "1",   # unlisted
-            "api_paste_expire_date": "1M",
+        token = secrets.token_urlsafe(18)
+        expires_at = time.time() + settings.share_ttl_hours * 3600
+        # Opportunistically drop expired links so the table stays small.
+        now = time.time()
+        for stale in [k for k, v in app.state.share_tokens.items() if v["expires_at"] < now]:
+            app.state.share_tokens.pop(stale, None)
+        app.state.share_tokens[token] = {
+            "job_id": job_id,
+            "principal": principal,
+            "expires_at": expires_at,
         }
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                r = await client.post("https://pastebin.com/api/api_post.php", data=payload)
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        return {
+            "url": f"/api/v1/share/{token}",
+            "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
+        }
+
+    @app.get("/api/v1/share/{token}", tags=["meta"])
+    def get_share(token: str) -> Response:
+        """Publicly serve a shared blueprint (raw text) with ``Access-Control-
+        Allow-Origin: *`` so any origin — including FBE's CORS proxy — can fetch it."""
+        rec = app.state.share_tokens.get(token)
+        now = time.time()
+        if rec is None or rec["expires_at"] < now:
             raise HTTPException(
-                status_code=502, detail=_err("pastebin_error", f"Pastebin unreachable: {exc}")
-            ) from exc
-        text = r.text.strip()
-        if not text.startswith("http"):
-            raise HTTPException(
-                status_code=502, detail=_err("pastebin_error", text or "Pastebin returned an error")
+                status_code=410,
+                detail=_err("share_expired", "share link is invalid or expired"),
             )
-        return {"url": text}
+        job_rec = runner.get(rec["principal"], rec["job_id"])
+        if job_rec is None or job_rec.get("status") != "succeeded":
+            raise HTTPException(
+                status_code=410,
+                detail=_err("share_expired", "share link is invalid or expired"),
+            )
+        text = _materialize_result(store, runner, rec["principal"], rec["job_id"], job_rec, "blueprint")
+        return Response(
+            content=text,
+            media_type=_CONTENT_TYPE["blueprint"],
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "public, max-age=3600",
+            },
+        )
 
     # ── fast sync builders ───────────────────────────────────────────
     @app.post("/api/v1/blueprints/display", response_model=BuildOut, tags=["builders"])

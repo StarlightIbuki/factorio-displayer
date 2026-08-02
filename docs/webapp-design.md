@@ -54,7 +54,7 @@ Jobs may be queued when workers are busy; the job list shows `queued` (with a "w
   - **sound-only jobs omit the preview** and show a "♪ Sound only — no video preview" note instead.
   The thumbnail **takes the place of the job title**: `.job-head` is a row with the preview on the left and a vertically-centered meta column on the right (status badge · age · job id, then the action buttons), so the card height matches the preview and clicking anywhere (incl. the preview) unfolds the job.
 - **Result panel** (expand a succeeded job): tabs **blueprint** / **Inspect item** (structured, collapsible YAML tree viewer). **TOML is removed**, and **JSON (results + `.json` artifacts) is hidden unless Developer mode** is on (a `dev` toggle in the top bar, persisted in `localStorage`).
-- **1-click share**: **Pastebin ↗** uploads the current result via the backend proxy `POST /api/v1/pastebin` (requires the server to set `PASTEBIN_DEV_KEY`); **Open in FBE ↗** opens `https://fbe.teoxoy.com/?source=<pastebin url>` (uploading first if needed) to render the blueprint in the Factorio Blueprint Editor.
+- **1-click share**: **Share link ↗** calls `POST /api/v1/jobs/{id}/share`; the backend mints a short-lived public token (default 24 h, `share_ttl_hours`) and returns a link. The public `GET /api/v1/share/{token}` serves the raw blueprint with `Access-Control-Allow-Origin: *`, so any origin can fetch it — no third-party paste service or server key. **Open in FBE ↗** opens `https://fbe.teoxoy.com/?source=<share link>` (creating the link first if needed); FBE loads it through its own CORS proxy and renders it in the Factorio Blueprint Editor.
 
 ## 2. App shell
 
