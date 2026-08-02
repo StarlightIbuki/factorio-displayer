@@ -157,6 +157,44 @@ The backend allows these origins by default (`Settings.cors_allow_origins` /
 Override with `--cors-origins a,b --cors-origin-regex <re>` or the env vars
 `CORS_ALLOW_ORIGINS` / `CORS_ALLOW_ORIGIN_REGEX`.
 
+## GitHub login (OAuth)
+
+The backend runs the OAuth flow (client secret stays server-side), issues one
+of its own signed tokens with `sub = "github:<login>"`, and redirects the
+browser back to the SPA, which stores the token and shows the signed-in user.
+
+### 1. Create a GitHub OAuth App
+
+At <https://github.com/settings/developers> → **New OAuth App**:
+
+- **Application name**: `factorio-display`
+- **Homepage URL**: `https://StarlightIbuki.github.io/factorio-displayer/`
+- **Authorization callback URL**: `https://factorio.qvq.moe:60012/auth/github/callback`
+
+Save the **Client ID** and **Client Secret**.
+
+### 2. Configure the server
+
+Add to `/etc/factorio-display/env` (the systemd unit loads this file):
+
+```bash
+GITHUB_OAUTH_CLIENT_ID=<client id>
+GITHUB_OAUTH_CLIENT_SECRET=<client secret>
+GITHUB_OAUTH_REDIRECT_URI=https://factorio.qvq.moe:60012/auth/github/callback
+FRONTEND_URL=https://StarlightIbuki.github.io/factorio-displayer/
+```
+
+```bash
+sudo systemctl restart factorio-display
+```
+
+The frontend fetches `/api/v1/capabilities` and shows the **Login with GitHub**
+button only when the backend advertises `auth.github`. The Client Secret never
+appears in capabilities or in the browser.
+
+> The same flags work as CLI options: `--github-client-id`,
+> `--github-client-secret`, `--github-redirect-uri`, `--frontend-url`.
+
 ## Updating the backend
 
 ```powershell
