@@ -394,9 +394,18 @@ pre.ascii {
 .inspect-item-key { color: var(--muted); font-size: 12px; }
 .inspect-item-val { font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-word; }
 .inspect-item-config-title { font-size: 11px; color: var(--muted); margin-top: 6px; }
-.pv-cond { display: flex; flex-direction: column; gap: 4px; }
-.pv-group { font-size: 11px; color: var(--green); margin-top: 6px; }
-.pv-group:first-child { margin-top: 0; }
+/* numbered, browsable condition/output list */
+.pv-list { display: flex; flex-direction: column; gap: 4px; }
+.pv-item { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--bg); }
+.pv-item-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: var(--bg-2); border: none; padding: 4px 8px; cursor: pointer;
+  font-family: inherit; font-size: 12px; color: var(--text); text-align: left;
+}
+.pv-item-num { background: var(--bg-3); color: var(--amber); border-radius: 4px; padding: 0 5px; font-family: var(--mono); font-weight: 700; }
+.pv-item-title { color: var(--muted); }
+.pv-item-body { display: none; padding: 6px 8px; }
+.pv-item-body.open { display: flex; flex-direction: column; gap: 4px; }
 .pv-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pv-row-label { color: var(--muted); font-size: 12px; min-width: 64px; }
 .pv-ctl {

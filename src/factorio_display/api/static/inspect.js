@@ -391,67 +391,92 @@ function sigCtl(sig) { return ctlInput(sig ? _sig(sig) : ""); }
 function condRow(label, ...ctls) {
   return el("div", { class: "pv-row" }, [el("span", { class: "pv-row-label", text: label }), ...ctls]);
 }
-function condGroup(title) { return el("div", { class: "pv-group", text: title }); }
+function copyCountCtl(c) {
+  const box = el("input", { type: "checkbox", disabled: "" });
+  if (c.copy_count_from_input) box.checked = true;
+  return el("label", { class: "pv-row" }, [
+    el("span", { class: "pv-row-label", text: t("inspect.copyCount") }),
+    box,
+  ]);
+}
 
-function conditionView(cb) {
-  const list = el("div", { class: "pv-cond" });
-  if (!cb) { list.append(el("p", { class: "hint", text: "—" })); return list; }
-
+// Build the ordered list of condition/output ENTRIES for an entity — each
+// becomes a numbered, browsable item (#1 condition, #2 output, …).
+function conditionEntries(cb) {
+  const out = [];
+  if (!cb) return out;
   if (cb.decider_conditions) {
     const c = cb.decider_conditions;
-    list.append(condGroup(t("inspect.condition")));
-    list.append(condRow(t("inspect.first"), sigCtl(c.first_signal)));
-    list.append(condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])));
-    list.append(condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "")));
-    list.append(condGroup(t("inspect.output")));
-    list.append(condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)));
-    const copyBox = el("input", { type: "checkbox", disabled: "" });
-    if (c.copy_count_from_input) copyBox.checked = true;
-    list.append(el("label", { class: "pv-row" }, [
-      el("span", { class: "pv-row-label", text: t("inspect.copyCount") }),
-      copyBox,
-    ]));
-    return list;
+    out.push({ title: t("inspect.condition"), body: () => [
+      condRow(t("inspect.first"), sigCtl(c.first_signal)),
+      condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])),
+      condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "")),
+    ] });
+    out.push({ title: t("inspect.output"), body: () => [
+      condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)),
+      copyCountCtl(c),
+    ] });
+    return out;
   }
   if (cb.arithmetic_conditions) {
     const c = cb.arithmetic_conditions;
-    list.append(condGroup(t("inspect.condition")));
-    list.append(condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.first_constant != null ? c.first_constant : "0")));
-    list.append(condRow(t("inspect.operation"), ctlSelect(c.operation || "+", ["+", "-", "*", "/", "%", "^"])));
-    list.append(condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.second_constant != null ? c.second_constant : "0")));
-    list.append(condGroup(t("inspect.output")));
-    list.append(condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)));
-    return list;
+    out.push({ title: t("inspect.condition"), body: () => [
+      condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.first_constant != null ? c.first_constant : "0")),
+      condRow(t("inspect.operation"), ctlSelect(c.operation || "+", ["+", "-", "*", "/", "%", "^"])),
+      condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.second_constant != null ? c.second_constant : "0")),
+    ] });
+    out.push({ title: t("inspect.output"), body: () => [
+      condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)),
+    ] });
+    return out;
   }
   if (Array.isArray(cb.filters)) {
-    list.append(condGroup(t("inspect.signals")));
-    if (!cb.filters.length) { list.append(el("p", { class: "hint", text: "—" })); return list; }
     cb.filters.filter((f) => f && f.signal).forEach((f) => {
-      list.append(el("div", { class: "pv-row" }, [
-        el("span", { class: "pv-row-label", text: `${t("inspect.signal")}${f.index != null ? " " + f.index : ""}` }),
-        sigCtl(f.signal),
-        el("span", { class: "pv-row-label", text: t("inspect.count") }),
-        ctlInput(f.count != null ? f.count : 1),
-      ]));
+      out.push({ title: t("inspect.signal"), body: () => [
+        condRow(t("inspect.signal"), sigCtl(f.signal)),
+        condRow(t("inspect.count"), ctlInput(f.count != null ? f.count : 1)),
+      ] });
     });
-    return list;
+    return out;
   }
   if (cb.circuit_parameters) {
     const cp = cb.circuit_parameters;
-    list.append(condGroup(t("inspect.output")));
-    list.append(condRow(t("inspect.mode"), ctlSelect(cp.signal_value_is_pitch ? "pitch" : "volume", ["volume", "pitch"])));
-    list.append(condRow(t("inspect.signal"), sigCtl(cp.circuit_value_signal)));
-    return list;
+    out.push({ title: t("inspect.output"), body: () => [
+      condRow(t("inspect.mode"), ctlSelect(cp.signal_value_is_pitch ? "pitch" : "volume", ["volume", "pitch"])),
+      condRow(t("inspect.signal"), sigCtl(cp.circuit_value_signal)),
+    ] });
+    return out;
   }
   if (cb.circuit_condition) {
     const c = cb.circuit_condition;
-    list.append(condGroup(t("inspect.condition")));
-    list.append(condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.constant != null ? c.constant : "?")));
-    list.append(condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])));
-    list.append(condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "?")));
-    return list;
+    out.push({ title: t("inspect.condition"), body: () => [
+      condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.constant != null ? c.constant : "?")),
+      condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])),
+      condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "?")),
+    ] });
+    return out;
   }
-  list.append(el("p", { class: "hint", text: "—" }));
+  return out;
+}
+
+// Numbered, browsable list view: each entry is an accordion item (#1, #2, …).
+function conditionView(cb) {
+  const list = el("div", { class: "pv-list" });
+  const entries = conditionEntries(cb);
+  if (!entries.length) { list.append(el("p", { class: "hint", text: "—" })); return list; }
+  entries.forEach((entry, i) => {
+    const item = el("div", { class: "pv-item" });
+    const body = el("div", { class: "pv-item-body" });
+    body.append(...entry.body());
+    const head = el("button", { class: "pv-item-head", type: "button" }, [
+      el("span", { class: "pv-item-num", text: `#${i + 1}` }),
+      el("span", { class: "pv-item-title", text: entry.title }),
+    ]);
+    head.addEventListener("click", () => body.classList.toggle("open"));
+    if (i === 0) body.classList.add("open");
+    item.append(head, body);
+    list.append(item);
+  });
   return list;
 }
 
@@ -474,7 +499,6 @@ function entityDetail(ent, idx) {
     kv(t("inspect.facing"), facingOf(ent)),
   );
   card.append(head, rows);
-  card.append(el("div", { class: "inspect-item-config-title", text: t("inspect.condition") }));
   card.append(conditionView(ent.control_behavior));
   return card;
 }
