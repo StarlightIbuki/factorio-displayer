@@ -49,11 +49,12 @@ function fmtRel(ts) {
 
 function shortName(n) { return n && n.length > 22 ? n.slice(0, 20) + "…" : n; }
 
-function toast(msg, kind = "info") {
+function toast(msg, kind = "info", dur = 6000) {
   const box = $("#toasts");
-  const t = el("div", { class: `toast ${kind === "error" ? "error" : ""}`, text: msg });
+  const cls = kind === "error" ? " error" : kind === "warning" ? " warning" : "";
+  const t = el("div", { class: `toast${cls}`, text: msg });
   box.append(t);
-  setTimeout(() => t.remove(), 6000);
+  setTimeout(() => t.remove(), dur);
 }
 
 function isVideoFile(name) { return /\.(mp4|avi|mov|mkv|webm)$/i.test(name); }
@@ -1518,6 +1519,9 @@ async function openFBE(jobId) {
     // FBE's naive `?source=` parser splits on '=' and never URL-decodes, so
     // the share URL must be passed RAW (it only contains URL-safe chars).
     window.open(`https://fbe.teoxoy.com/?source=${url}`, "_blank", "noopener");
+    // FBE's data is base-game 2.0.68, so the share path remaps signal names it
+    // doesn't know — what FBE shows is an adapted preview, not the real bp.
+    toast(t("result.fbeWarning"), "warning", 12000);
   } catch (e) { toast(t("t.fbeFail", { msg: e.message }), "error"); }
 }
 

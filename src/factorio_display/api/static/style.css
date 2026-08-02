@@ -363,6 +363,7 @@ textarea.bpview { min-height: 140px; }
   animation: slidein .15s ease-out;
 }
 .toast.error { border-left-color: var(--red); }
+.toast.warning { border-left-color: var(--amber); }
 @keyframes slidein { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* ═══════════ Wizard ═══════════ */
