@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import io
+import json
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -136,6 +139,23 @@ def test_share_requires_finished_job(tmp_path) -> None:
     with TestClient(app) as c:
         assert c.post("/api/v1/jobs/j_seed/share").status_code == 409
         assert c.post("/api/v1/jobs/missing/share").status_code == 404
+
+
+def test_ensure_blueprint_icons_injects_missing() -> None:
+    """Serve-time icon injection makes old (icon-less) blueprints FBE-compatible."""
+    from factorio_display import service
+    from factorio_display.api.server import _ensure_blueprint_icons
+
+    bpstr = service.export_display(service.DisplayConfig(name="X", width=2, height=2)).blueprint
+    data = json.loads(zlib.decompress(base64.b64decode(bpstr[1:])).decode())
+    data["blueprint"].pop("icons", None)
+    noicons = "0" + base64.b64encode(zlib.compress(json.dumps(data, separators=(",", ":")).encode())).decode()
+
+    fixed = _ensure_blueprint_icons(noicons)
+    out = json.loads(zlib.decompress(base64.b64decode(fixed[1:])).decode())
+    assert out["blueprint"]["icons"]
+    # Already carrying icons → left untouched.
+    assert _ensure_blueprint_icons(bpstr) == bpstr
 
 
 def test_cors_allows_github_pages_by_default(client: TestClient) -> None:

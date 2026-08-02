@@ -17,9 +17,11 @@ Every upload/job/artifact is scoped to the caller's principal.
 
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import time
+import zlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -515,6 +517,31 @@ def _job_counts(settings: Settings, store: Store) -> tuple[int, int]:
     return busy, queued
 
 
+def _ensure_blueprint_icons(text: str) -> str:
+    """Inject a minimal ``icons`` array into a blueprint string that lacks one.
+
+    Factorio always writes icons and FBE's schema requires the field — without
+    it FBE rejects the blueprint.  Applied at serve time so blueprints produced
+    before the generator emitted icons (old jobs) are still FBE-compatible.
+    """
+    if not text or not text.startswith("0"):
+        return text
+    try:
+        raw = base64.b64decode(text[1:])
+        data = json.loads(zlib.decompress(raw).decode("utf-8"))
+    except Exception:  # pylint: disable=broad-exception-caught
+        return text
+    bp = data.get("blueprint")
+    if not isinstance(bp, dict) or bp.get("icons"):
+        return text
+    bp["icons"] = [{"index": 1, "signal": {"type": "virtual", "name": "signal-0"}}]
+    try:
+        raw = zlib.compress(json.dumps(data, separators=(",", ":")).encode("utf-8"))
+        return "0" + base64.b64encode(raw).decode("ascii")
+    except Exception:  # pylint: disable=broad-exception-caught
+        return text
+
+
 def _materialize_result(
     store: Store, runner: JobRunner, principal: str, job_id: str, rec: dict, fmt: str
 ) -> str:
@@ -522,6 +549,8 @@ def _materialize_result(
     name = _RESULT_ARTIFACT[fmt]
     text = store.read_artifact_text(principal, job_id, name)
     if text is not None:
+        if fmt == "blueprint":
+            text = _ensure_blueprint_icons(text)
         return text
 
     # Not stored — synthesise from the blueprint (the common case for encode).
