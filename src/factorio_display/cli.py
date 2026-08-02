@@ -965,6 +965,77 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
 
 # ── Main CLI ───────────────────────────────────────────────────────────
 
+def _add_json_option(parser: argparse.ArgumentParser) -> None:
+    """Add the machine-readable ``--json`` output flag to *parser*."""
+    parser.add_argument(
+        "--json", action="store_true", default=False,
+        help="Emit a JSON envelope {version, result} instead of a raw blueprint/text.",
+    )
+
+
+def _json_envelope(args, out_text: str, err_text: str, exit_code: int) -> dict:
+    """Build the ``--json`` output envelope for a completed command.
+
+    The shape is the golden contract shared with the web API: the ``encode``
+    command emits ``result.blueprint`` plus metadata; builder commands emit
+    ``result.blueprint`` (display/audio) or ``result.text`` (logical/yaml).
+    """
+    import json  # pylint: disable=import-outside-toplevel
+
+    from . import __version__  # pylint: disable=import-outside-toplevel
+    from .service import (  # pylint: disable=import-outside-toplevel
+        _extract_ticks_from_logs,
+        _extract_warnings,
+        count_entities,
+    )
+
+    cmd = args.command
+    primary = out_text.strip()
+    result: dict = {
+        "command": cmd,
+        "blueprint": primary,
+        "logs": err_text,
+    }
+
+    if cmd == "encode":
+        inputs = list(getattr(args, "input_paths", []) or [])
+        known = [k for k in (_classify_input(p) for p in inputs) if k != "unknown"]
+        result["name"] = getattr(args, "name", "Media Data")
+        result["kind"] = known[0] if known else "unknown"
+        w = getattr(args, "width", None)
+        h = getattr(args, "height", None)
+        if w is not None or h is not None:
+            result["dimensions"] = [w, h]
+        rail = getattr(args, "rail_mode", None) or getattr(args, "instruments", None)
+        if rail and str(rail) not in ("auto:0.05", "auto", "all"):
+            result["instruments"] = [s.strip() for s in str(rail).split(",") if s.strip()]
+        result["total_ticks"] = _extract_ticks_from_logs(err_text)
+        result["warnings"] = _extract_warnings(err_text)
+        result["entity_count"] = count_entities(primary)
+        result["artifacts"] = []
+    elif cmd in ("export-display", "export-audio"):
+        result["name"] = getattr(args, "name", None)
+        result["format"] = "blueprint"
+        result["entity_count"] = count_entities(primary)
+    elif cmd == "export-logical":
+        result["name"] = getattr(args, "name", None)
+        result["blueprint"] = ""
+        result["text"] = primary
+        result["format"] = "toml"
+    elif cmd == "blueprint-to-yaml":
+        result["blueprint"] = ""
+        result["text"] = primary
+        result["format"] = "yaml"
+
+    if exit_code:
+        last = [ln for ln in err_text.strip().splitlines() if ln.strip()]
+        result["error"] = {
+            "code": "cli_error",
+            "message": last[-1] if last else f"command exited with code {exit_code}",
+        }
+    return {"version": __version__, "result": result}
+
+
 def main():  # pylint: disable=too-many-locals,too-many-statements
     """Parse CLI arguments and dispatch to the appropriate encoder/builder."""
     _fix_argv_encoding()
@@ -1065,6 +1136,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         "--debug-toml", type=str, default=None, metavar="DIR",
         help="Dump each intermediate LogicalBlueprint as TOML to DIR for debugging.",
     )
+    _add_json_option(encode_parser)
 
     # ==================================================================
     # Subcommand: export-display
@@ -1077,6 +1149,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     display_parser.add_argument("--width", type=int, default=None, help="Display width in tiles.")
     display_parser.add_argument("--height", type=int, default=None, help="Display height in tiles.")
     _add_power_option(display_parser)
+    _add_json_option(display_parser)
 
     # ==================================================================
     # Subcommand: export-audio
@@ -1093,6 +1166,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     audio_parser.add_argument("--format", type=str, choices=["blueprint", "logical"], default="blueprint",
                               help="Output format: 'blueprint' (draftsman string) or 'logical' (LLM-friendly TOML).")
     _add_power_option(audio_parser)
+    _add_json_option(audio_parser)
 
     # ==================================================================
     # Subcommand: export-logical
@@ -1106,6 +1180,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                                        help="Factorio instrument name")
     export_logical_parser.add_argument("-o", "--output", type=str, default=None,
                                        help="Write logical blueprint TOML to file instead of stdout.")
+    _add_json_option(export_logical_parser)
 
     # ==================================================================
     # Subcommand: blueprint-to-yaml
@@ -1122,22 +1197,76 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         "-o", "--output", type=str, default=None,
         help="Write YAML to file instead of stdout.",
     )
+    _add_json_option(b2y_parser)
+
+    # ==================================================================
+    # Subcommand: server
+    # ==================================================================
+    server_parser = subparsers.add_parser(
+        "server",
+        help="Run the FastAPI web server (requires the optional 'web' extra).",
+    )
+    server_parser.add_argument("--host", type=str, default="127.0.0.1",
+                               help="Bind host (default: 127.0.0.1).")
+    server_parser.add_argument("--port", type=int, default=8000,
+                               help="Bind port (default: 8000).")
+    server_parser.add_argument("--data-dir", type=str, default=None,
+                               help="Server data directory (default: server_data/).")
+    server_parser.add_argument("--max-workers", type=int, default=2,
+                               help="Max concurrent encode jobs (default: 2).")
+    server_parser.add_argument("--max-jobs-per-user", type=int, default=2,
+                               help="Max active jobs per caller (default: 2).")
+    server_parser.add_argument("--api-token", type=str, default=None,
+                               help="Optional shared-secret gate (Authorization: Bearer or X-API-Token).")
+    server_parser.add_argument("--base-url", type=str, default=None,
+                               help="Public base URL (default: http://<host>:<port>).")
+    server_parser.add_argument(
+        "--compress-artifacts", dest="compress_artifacts",
+        action=argparse.BooleanOptionalAction, default=True,
+        help="Gzip large text artifacts on disk (default: on).",
+    )
 
     args = parser.parse_args()
 
+    if getattr(args, "json", False):
+        import contextlib  # pylint: disable=import-outside-toplevel
+        import io  # pylint: disable=import-outside-toplevel
+        import json as _json  # pylint: disable=import-outside-toplevel
+
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        exit_code = 0
+        try:
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                _dispatch(args)
+        except SystemExit as exc:
+            code = exc.code
+            exit_code = int(code) if isinstance(code, int) else (1 if code else 0)
+        envelope = _json_envelope(args, out_buf.getvalue(), err_buf.getvalue(), exit_code)
+        sys.stdout.write(_json.dumps(envelope, ensure_ascii=False))
+        if exit_code:
+            sys.exit(exit_code)
+        return
+
+    _dispatch(args)
+
+
+def _dispatch(args) -> None:
+    """Dispatch parsed args to the appropriate encoder/builder."""
     from . import CLOCK_SIGNAL  # pylint: disable=import-outside-toplevel
 
     if args.command == "encode":
         _handle_encode(args)
 
     elif args.command == "export-display":
+        from .video.encoder import _to_fixed_string  # pylint: disable=import-outside-toplevel
         sys.stderr.write(f"Building display blueprint: {args.name}...\n")
         display_bp = build_display(
             name=args.name,
             width=args.width,
             height=args.height
         )
-        sys.stdout.write(display_bp + "\n")
+        sys.stdout.write(_to_fixed_string(display_bp) + "\n")
 
     elif args.command == "export-audio":
         instruments: list[str]
@@ -1204,6 +1333,34 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             sys.stderr.write(f"YAML written to: {args.output}\n")
         else:
             sys.stdout.write(yaml_text)
+
+    elif args.command == "server":
+        _handle_server(args)
+
+
+def _handle_server(args) -> None:
+    """Launch the FastAPI web server (requires the optional 'web' extra)."""
+    try:
+        from .api.server import serve  # pylint: disable=import-outside-toplevel
+        from .api.settings import Settings  # pylint: disable=import-outside-toplevel
+    except ImportError as exc:
+        sys.exit(
+            "The web server requires the optional 'web' extra.\n"
+            "Install it with:  pip install -e '.[web]'"
+        )
+
+    base_url = args.base_url or f"http://{args.host}:{args.port}"
+    settings = Settings(
+        data_dir=Path(args.data_dir) if args.data_dir else Path("server_data"),
+        max_workers=args.max_workers,
+        max_jobs_per_user=args.max_jobs_per_user,
+        api_token=args.api_token,
+        compress_artifacts=args.compress_artifacts,
+        host=args.host,
+        port=args.port,
+        base_url=base_url,
+    )
+    serve(settings)
 
 
 # ═══════════════════════════════════════════════════════════════════════

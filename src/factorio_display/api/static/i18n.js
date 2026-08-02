@@ -1,0 +1,453 @@
+// i18n.js — tiny client-side localization for the web UI (en / zh-CN).
+// The locale is persisted in localStorage and defaults to the browser language.
+
+/* eslint-env browser */
+
+const KEY_SAVE = "fd_locale";
+
+const DICT = {
+  en: {
+    // topbar
+    "topbar.tools": "Blueprint viewer",
+    "topbar.token": "API token",
+    "topbar.tokenTitle": "Only needed when the server runs with --api-token",
+    "topbar.dev": "dev",
+    "topbar.devTitle": "Developer mode — show raw JSON results and artifacts",
+    "topbar.about": "About",
+    // home
+    "home.title": "Turn media into a Factorio blueprint",
+    "home.hint": "Upload a video, a sequence of images, or audio, and generate a blueprint you can paste straight into Factorio.",
+    "home.cta": "Generate your first blueprint",
+    "home.listTitle": "Your blueprints",
+    "home.listCta": "Generate a new one",
+    "home.filterAll": "All statuses",
+    "home.filterQueued": "queued",
+    "home.filterRunning": "running",
+    "home.filterSucceeded": "succeeded",
+    "home.filterFailed": "failed",
+    "home.filterCancelled": "cancelled",
+    "home.refresh": "Refresh",
+    // wizard
+    "wizard.new": "New blueprint",
+    "wizard.back": "← Back",
+    "wizard.step1": "1 · Media",
+    "wizard.step2": "2 · Edit",
+    "wizard.step3": "3 · Generate",
+    // step 1
+    "s1.add": "Add media clips",
+    "s1.drop": "Drop video / audio / image clips here, or click to browse",
+    "s1.hint": "Add one or more clips. Each is automatically downsampled into a working cache used for editing, previewing and the final render.",
+    "s1.continue": "Continue →",
+    // step 2
+    "s2.preview": "Preview",
+    "s2.refresh": "Refresh preview",
+    "s2.hint": "Click the preview (or press Refresh) to re-render the final result after an edit. Small edits refresh automatically.",
+    "s2.timeline": "Timeline",
+    "s2.timelineHint": "Drag a block to align it, drag its edges to cut it, or click to edit precise start/end times below.",
+    "s2.railVideo": "Video",
+    "s2.railAudio": "Audio",
+    "s2.pos": "Pos (s)",
+    "s2.in": "In (s)",
+    "s2.out": "Out (s)",
+    "s2.dur": "Dur (s)",
+    "s2.edit": "Edit…",
+    "s2.back": "← Media",
+    // step 3
+    "s3.display": "Display size",
+    "s3.sizeHint": "Upload a video or image to see the recommended size.",
+    "s3.auto": "Auto (recommended)",
+    "s3.width": "Width (tiles)",
+    "s3.height": "Height (tiles)",
+    "s3.widthAuto": "auto",
+    "s3.previewFrame": "Preview frame at display size",
+    "s3.options": "Options",
+    "s3.compressEnable": "Compress videos before upload (lossy)",
+    "s3.quality": "Quality preset",
+    "s3.qualityHigh": "High (256px / ~1.2 Mbps)",
+    "s3.qualityMedium": "Medium (192px / ~700 kbps)",
+    "s3.qualityLow": "Low (128px / ~400 kbps)",
+    "s3.maxDim": "Max dimension (px)",
+    "s3.compressHint": "The backend display is small (≤ ~255px), so extra source resolution is discarded server-side anyway — downscaling here is free.",
+    "s3.bpName": "Blueprint name",
+    "s3.resultFormat": "Result format",
+    "s3.formatBlueprint": "blueprint",
+    "s3.formatInspect": "Inspect item (yaml)",
+    "s3.formatJson": "json",
+    "s3.output": "Output media",
+    "s3.outVideoSound": "Video with sound",
+    "s3.outVideoMuted": "Video (muted)",
+    "s3.outAudio": "Audio only",
+    "s3.power": "Power",
+    "s3.powerSubstation": "substation",
+    "s3.powerSmall": "small",
+    "s3.powerMedium": "medium",
+    "s3.powerNone": "none",
+    "s3.attachPlayer": "Attach player",
+    "s3.progressBar": "Progress bar",
+    "s3.videoSection": "Video",
+    "s3.fps": "FPS (0 = auto)",
+    "s3.skip": "Frame skip",
+    "s3.adaptive": "Adaptive",
+    "s3.off": "off",
+    "s3.on": "on",
+    "s3.threshold": "Threshold",
+    "s3.deduplicate": "Deduplicate",
+    "s3.timeChunks": "Time chunks",
+    "s3.chunkWorkers": "Chunk workers",
+    "s3.chunkWorkersAuto": "auto",
+    "s3.dedupCross": "Deduplicate across chunks",
+    "s3.midiSection": "MIDI / ADSR",
+    "s3.ticksPerBeat": "Ticks per beat",
+    "s3.boostMelody": "Boost melody",
+    "s3.velocityScale": "Velocity scale",
+    "s3.railMode": "Rail mode",
+    "s3.mapDrums": "Map drums",
+    "s3.drumGain": "Drum gain",
+    "s3.globalShift": "Global octave shift",
+    "s3.attackTicks": "Attack (ticks)",
+    "s3.decayTicks": "Decay (ticks)",
+    "s3.sustainLevel": "Sustain level",
+    "s3.releaseTicks": "Release (ticks)",
+    "s3.attackCurve": "Attack curve",
+    "s3.decayCurve": "Decay curve",
+    "s3.releaseCurve": "Release curve",
+    "s3.audioSection": "Audio file",
+    "s3.useBasicPitch": "Use AI transcription (Basic Pitch)",
+    "s3.activationThreshold": "Activation threshold",
+    "s3.midiThreshold": "MIDI threshold",
+    "s3.condenseMidi": "Condense MIDI notes",
+    "s3.maxPolyphony": "Max polyphony (0 = unlimited)",
+    "s3.advancedSection": "Advanced",
+    "s3.useCache": "Use on-disk cache",
+    "s3.callbackUrl": "Callback URL (webhook)",
+    "s3.callbackPlaceholder": "https://example.com/hook",
+    "s3.back": "← Edit",
+    "s3.generate": "Generate",
+    // editor modal
+    "ed.title": "Edit & preview",
+    "ed.trim": "Trim / cut",
+    "ed.start": "Start (s)",
+    "ed.end": "End (s)",
+    "ed.play": "Play selection",
+    "ed.crop": "Crop",
+    "ed.enableCrop": "Enable crop",
+    "ed.resetCrop": "Reset crop",
+    "ed.audio": "Audio",
+    "ed.offset": "Offset",
+    "ed.startAt": "Start at (s)",
+    "ed.mute": "Mute",
+    "ed.resolution": "Resolution preview",
+    "ed.previewSize": "Preview at display size",
+    "ed.apply": "Apply to this clip",
+    // viewer modal
+    "viewer.title": "Blueprint viewer",
+    "viewer.decode": "Decode & inspect",
+    "viewer.hint": "Paste a blueprint string to decode it into YAML and see its stats.",
+    "viewer.inspect": "Inspect",
+    // about / acknowledgements
+    "about.title": "About & Acknowledgements",
+    "about.fetchFail": "Could not load the acknowledgement text.",
+    // jobs
+    "jobs.inQueue": "In queue — will start as soon as a worker is free.",
+    "jobs.soundOnly": "♪ Sound only — no video preview",
+    "jobs.previewMedia": "Preview media",
+    "jobs.copyBlueprint": "Copy blueprint",
+    "jobs.cancel": "Cancel",
+    "jobs.delete": "Delete",
+    "jobs.artifacts": "Artifacts: ",
+    "jobs.loadingMedia": "Loading cached media…",
+    "jobs.noCachedMedia": "No cached media for this job.",
+    "jobs.cancelled": "Cancelled",
+    // result panel
+    "result.copy": "Copy",
+    "result.download": "Download",
+    "result.pastebin": "Pastebin ↗",
+    "result.fbe": "Open in FBE ↗",
+    "result.inspectItem": "Inspect item",
+    "result.couldNotLoad": "Could not load {fmt}: {msg}",
+    "result.entityCount": "entity count",
+    "result.totalTicks": "total ticks",
+    "result.dimensions": "dimensions",
+    "result.instruments": "instruments",
+    "result.kind": "kind",
+    // toasts / status
+    "t.addClipFirst": "Add at least one clip first",
+    "t.clipUpdated": "Clip updated",
+    "t.clipsNone": "No clips yet.",
+    "t.clipsEdit": "Edit",
+    "t.clipsCaching": "caching…",
+    "t.clipsCached": "cached",
+    "t.clipsFailed": "cache failed",
+    "t.edited": "edited",
+    "t.working": "working…",
+    "t.copied": "Copied",
+    "t.copyFailed": "Copy failed",
+    "t.noPreviewFirst": "Render the preview first",
+    "t.rendering": "Rendering final result…",
+    "t.renderingPct": "Rendering… {pct}%",
+    "t.rendered": "Rendered {sec}s",
+    "t.previewFailed": "Preview failed: {msg}",
+    "t.renderingEdited": "Rendering edited media…",
+    "t.compressing": "Compressing…",
+    "t.uploading": "Uploading…",
+    "t.submitting": "Submitting job…",
+    "t.jobQueued": "Job {id} queued",
+    "t.serverBusy": "Server busy — {msg}",
+    "t.failed": "Failed: {msg}",
+    "t.pastebinUploading": "Uploading to Pastebin…",
+    "t.pastebinFail": "Pastebin upload failed: {msg}",
+    "t.fbeFail": "Could not open FBE: {msg}",
+    "t.pasteBlueprint": "Paste a blueprint first",
+    "t.decoding": "Decoding…",
+    "t.decodeError": "Error: {msg}",
+  },
+
+  "zh-CN": {
+    // topbar
+    "topbar.tools": "蓝图查看器",
+    "topbar.token": "API 令牌",
+    "topbar.tokenTitle": "仅当服务器以 --api-token 启动时需要",
+    "topbar.dev": "开发",
+    "topbar.devTitle": "开发者模式——显示原始 JSON 结果与产物",
+    "topbar.about": "关于",
+    // home
+    "home.title": "将媒体转换为 Factorio 蓝图",
+    "home.hint": "上传视频、图片序列或音频，生成可直接粘贴到 Factorio 的蓝图。",
+    "home.cta": "生成你的第一个蓝图",
+    "home.listTitle": "我的蓝图",
+    "home.listCta": "生成新的蓝图",
+    "home.filterAll": "全部状态",
+    "home.filterQueued": "排队中",
+    "home.filterRunning": "运行中",
+    "home.filterSucceeded": "成功",
+    "home.filterFailed": "失败",
+    "home.filterCancelled": "已取消",
+    "home.refresh": "刷新",
+    // wizard
+    "wizard.new": "新建蓝图",
+    "wizard.back": "← 返回",
+    "wizard.step1": "1 · 媒体",
+    "wizard.step2": "2 · 编辑",
+    "wizard.step3": "3 · 生成",
+    // step 1
+    "s1.add": "添加媒体片段",
+    "s1.drop": "将视频 / 音频 / 图片片段拖到这里，或点击浏览",
+    "s1.hint": "添加一个或多个片段。每个片段会自动压缩为工作缓存，用于编辑、预览与最终生成。",
+    "s1.continue": "继续 →",
+    // step 2
+    "s2.preview": "预览",
+    "s2.refresh": "刷新预览",
+    "s2.hint": "编辑后点击预览（或按刷新）重新渲染最终结果。小改动会自动刷新。",
+    "s2.timeline": "时间线",
+    "s2.timelineHint": "拖动片段以对齐，拖动边缘以裁剪，或点击下方精确调整开始/结束时间。",
+    "s2.railVideo": "视频",
+    "s2.railAudio": "音频",
+    "s2.pos": "位置(秒)",
+    "s2.in": "入点(秒)",
+    "s2.out": "出点(秒)",
+    "s2.dur": "时长(秒)",
+    "s2.edit": "编辑…",
+    "s2.back": "← 媒体",
+    // step 3
+    "s3.display": "显示尺寸",
+    "s3.sizeHint": "上传视频或图片查看推荐尺寸。",
+    "s3.auto": "自动(推荐)",
+    "s3.width": "宽度(格)",
+    "s3.height": "高度(格)",
+    "s3.widthAuto": "自动",
+    "s3.previewFrame": "按显示尺寸预览画面",
+    "s3.options": "选项",
+    "s3.compressEnable": "上传前压缩视频(有损)",
+    "s3.quality": "质量预设",
+    "s3.qualityHigh": "高(256px / ~1.2 Mbps)",
+    "s3.qualityMedium": "中(192px / ~700 kbps)",
+    "s3.qualityLow": "低(128px / ~400 kbps)",
+    "s3.maxDim": "最大尺寸(px)",
+    "s3.compressHint": "后端显示很小(≤ ~255px)，多余分辨率本就会被丢弃——在此降采样不增加开销。",
+    "s3.bpName": "蓝图名称",
+    "s3.resultFormat": "结果格式",
+    "s3.formatBlueprint": "蓝图",
+    "s3.formatInspect": "检查项(yaml)",
+    "s3.formatJson": "json",
+    "s3.output": "输出媒体",
+    "s3.outVideoSound": "视频(带声音)",
+    "s3.outVideoMuted": "视频(静音)",
+    "s3.outAudio": "仅音频",
+    "s3.power": "供电",
+    "s3.powerSubstation": "变电站",
+    "s3.powerSmall": "小",
+    "s3.powerMedium": "中",
+    "s3.powerNone": "无",
+    "s3.attachPlayer": "附加播放器",
+    "s3.progressBar": "进度条",
+    "s3.videoSection": "视频",
+    "s3.fps": "帧率(0=自动)",
+    "s3.skip": "跳帧",
+    "s3.adaptive": "自适应",
+    "s3.off": "关",
+    "s3.on": "开",
+    "s3.threshold": "阈值",
+    "s3.deduplicate": "去重",
+    "s3.timeChunks": "分块数",
+    "s3.chunkWorkers": "分块线程",
+    "s3.chunkWorkersAuto": "自动",
+    "s3.dedupCross": "跨分块去重",
+    "s3.midiSection": "MIDI / ADSR",
+    "s3.ticksPerBeat": "每拍刻度",
+    "s3.boostMelody": "旋律增强",
+    "s3.velocityScale": "力度缩放",
+    "s3.railMode": "轨模式",
+    "s3.mapDrums": "映射鼓组",
+    "s3.drumGain": "鼓组增益",
+    "s3.globalShift": "全局八度移位",
+    "s3.attackTicks": "起音(刻度)",
+    "s3.decayTicks": "衰减(刻度)",
+    "s3.sustainLevel": "延音电平",
+    "s3.releaseTicks": "释放(刻度)",
+    "s3.attackCurve": "起音曲线",
+    "s3.decayCurve": "衰减曲线",
+    "s3.releaseCurve": "释放曲线",
+    "s3.audioSection": "音频文件",
+    "s3.useBasicPitch": "使用 AI 转录(Basic Pitch)",
+    "s3.activationThreshold": "激活阈值",
+    "s3.midiThreshold": "MIDI 阈值",
+    "s3.condenseMidi": "压缩 MIDI 音符",
+    "s3.maxPolyphony": "最大复音(0=不限)",
+    "s3.advancedSection": "高级",
+    "s3.useCache": "使用磁盘缓存",
+    "s3.callbackUrl": "回调 URL(Webhook)",
+    "s3.callbackPlaceholder": "https://example.com/hook",
+    "s3.back": "← 编辑",
+    "s3.generate": "生成",
+    // editor modal
+    "ed.title": "编辑与预览",
+    "ed.trim": "裁剪",
+    "ed.start": "开始(秒)",
+    "ed.end": "结束(秒)",
+    "ed.play": "播放所选",
+    "ed.crop": "裁剪",
+    "ed.enableCrop": "启用裁剪",
+    "ed.resetCrop": "重置裁剪",
+    "ed.audio": "音频",
+    "ed.offset": "偏移",
+    "ed.startAt": "开始于(秒)",
+    "ed.mute": "静音",
+    "ed.resolution": "分辨率预览",
+    "ed.previewSize": "按显示尺寸预览",
+    "ed.apply": "应用于该片段",
+    // viewer modal
+    "viewer.title": "蓝图查看器",
+    "viewer.decode": "解码与检查",
+    "viewer.hint": "粘贴蓝图字符串以解码为 YAML 并查看统计信息。",
+    "viewer.inspect": "检查",
+    // about / acknowledgements
+    "about.title": "关于与致谢",
+    "about.fetchFail": "无法加载致谢文本。",
+    // jobs
+    "jobs.inQueue": "排队中——有空闲工作线程时立即开始。",
+    "jobs.soundOnly": "♪ 仅音频——无视频预览",
+    "jobs.previewMedia": "预览媒体",
+    "jobs.copyBlueprint": "复制蓝图",
+    "jobs.cancel": "取消",
+    "jobs.delete": "删除",
+    "jobs.artifacts": "产物: ",
+    "jobs.loadingMedia": "正在加载缓存媒体…",
+    "jobs.noCachedMedia": "此任务没有缓存的媒体。",
+    "jobs.cancelled": "已取消",
+    // result panel
+    "result.copy": "复制",
+    "result.download": "下载",
+    "result.pastebin": "Pastebin ↗",
+    "result.fbe": "在 FBE 中打开 ↗",
+    "result.inspectItem": "检查项",
+    "result.couldNotLoad": "无法加载 {fmt}: {msg}",
+    "result.entityCount": "实体数量",
+    "result.totalTicks": "总刻度",
+    "result.dimensions": "尺寸",
+    "result.instruments": "乐器",
+    "result.kind": "类型",
+    // toasts / status
+    "t.addClipFirst": "请先添加至少一个片段",
+    "t.clipUpdated": "片段已更新",
+    "t.clipsNone": "暂无片段",
+    "t.clipsEdit": "编辑",
+    "t.clipsCaching": "缓存中…",
+    "t.clipsCached": "已缓存",
+    "t.clipsFailed": "缓存失败",
+    "t.edited": "已编辑",
+    "t.working": "处理中…",
+    "t.copied": "已复制",
+    "t.copyFailed": "复制失败",
+    "t.noPreviewFirst": "请先渲染预览",
+    "t.rendering": "正在渲染最终结果…",
+    "t.renderingPct": "渲染中… {pct}%",
+    "t.rendered": "已渲染 {sec} 秒",
+    "t.previewFailed": "预览失败: {msg}",
+    "t.renderingEdited": "正在渲染已编辑媒体…",
+    "t.compressing": "压缩中…",
+    "t.uploading": "上传中…",
+    "t.submitting": "提交任务…",
+    "t.jobQueued": "任务 {id} 已排队",
+    "t.serverBusy": "服务器繁忙——{msg}",
+    "t.failed": "失败: {msg}",
+    "t.pastebinUploading": "正在上传到 Pastebin…",
+    "t.pastebinFail": "Pastebin 上传失败: {msg}",
+    "t.fbeFail": "无法打开 FBE: {msg}",
+    "t.pasteBlueprint": "请先粘贴蓝图",
+    "t.decoding": "解码中…",
+    "t.decodeError": "错误: {msg}",
+  },
+};
+
+function currentLocale() {
+  const saved = localStorage.getItem(KEY_SAVE);
+  if (saved === "en" || saved === "zh-CN") return saved;
+  return (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+
+function setLocale(locale) {
+  if (locale === "en" || locale === "zh-CN") {
+    localStorage.setItem(KEY_SAVE, locale);
+    document.documentElement.lang = locale;
+  }
+}
+
+// t("key", {pct: 50}) — simple {token} interpolation.
+function t(key, vars) {
+  const dict = DICT[currentLocale()] || DICT.en;
+  let s = dict[key] != null ? dict[key] : (DICT.en[key] != null ? DICT.en[key] : key);
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      s = s.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
+    }
+  }
+  return s;
+}
+
+// Walk every [data-i18n] element and set its text (or the attribute named in
+// data-i18n-attr). For elements that also contain child nodes (labels wrapping
+// an <input>), only the first non-empty text node is replaced.
+function applyStaticI18n(root = document) {
+  for (const el of root.querySelectorAll("[data-i18n]")) {
+    const key = el.getAttribute("data-i18n");
+    const val = t(key);
+    const attr = el.getAttribute("data-i18n-attr");
+    if (attr) {
+      el.setAttribute(attr, val);
+    } else {
+      const textNodes = [...el.childNodes].filter((n) => n.nodeType === 3);
+      const target = textNodes.find((n) => n.textContent.trim().length > 0) || textNodes[0];
+      if (target) {
+        const lead = target.textContent.match(/^\s*/)[0];
+        const trail = target.textContent.match(/\s*$/)[0];
+        target.textContent = lead + val + trail;
+      } else {
+        el.textContent = val;
+      }
+    }
+    const titleKey = el.getAttribute("data-i18n-title");
+    if (titleKey) el.setAttribute("title", t(titleKey));
+  }
+}
+
+export { DICT, currentLocale, setLocale, t, applyStaticI18n };

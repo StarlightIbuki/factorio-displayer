@@ -105,6 +105,10 @@ def resolve_dimensions(
     if width is not None and height is not None:
         return width, height
 
+    # No valid source geometry (e.g. audio-only stream) — fall back to defaults.
+    if source_w is None or source_h is None or source_w <= 0 or source_h <= 0:
+        return width or DISPLAY_WIDTH, height or DISPLAY_HEIGHT
+
     # Neither given — fit within display bounds, preserving source ratio
     if width is None and height is None:
         w = DISPLAY_WIDTH

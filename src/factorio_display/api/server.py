@@ -1,0 +1,447 @@
+"""FastAPI application for factorio-display.
+
+Route layout (all under ``/api/v1``):
+
+- ``GET  /health``, ``GET /capabilities``            — public metadata
+- ``POST /uploads``, ``GET/DELETE /uploads/{id}``    — media uploads (auth-gated)
+- ``POST /jobs``, ``GET /jobs``                      — async encode jobs
+- ``GET /jobs/{id}``, ``POST /jobs/{id}/cancel``,
+  ``DELETE /jobs/{id}``
+- ``GET /jobs/{id}/result``                          — result (blueprint/toml/yaml/json)
+- ``GET /jobs/{id}/artifacts[/{name}]``              — intermediate artifacts
+- ``POST /blueprints/display|audio-decoder|logical|decode`` — fast sync builders
+
+Every upload/job/artifact is scoped to the caller's principal.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Literal
+
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
+
+from .. import __version__
+from .. import cli as _cli
+from .compression import CompressionMiddleware
+from .jobs import JobRunner
+from .principal import get_principal
+from .schemas import (
+    AudioDecoderRequest,
+    BuildOut,
+    CapabilitiesOut,
+    DecodeRequest,
+    DisplayRequest,
+    HealthOut,
+    JobCreate,
+    JobListOut,
+    JobOut,
+    LogicalRequest,
+    PastebinRequest,
+    UploadOut,
+)
+from .settings import Settings
+from .store import Store
+
+_POWER_TYPES = ["small", "medium", "substation", "none"]
+_RAIL_MODES = ["piano", "all", "auto[:threshold]", "comma-separated"]
+_RESULT_FORMATS = ["blueprint", "toml", "yaml", "json"]
+_INSTRUMENTS = ["piano", "bass", "celesta", "plucked", "drum"]
+
+_RESULT_ARTIFACT = {
+    "blueprint": "result.txt",
+    "json": "result.json",
+    "yaml": "result.yaml",
+    "toml": "result.toml",
+}
+_CONTENT_TYPE = {
+    "blueprint": "text/plain; charset=utf-8",
+    "toml": "text/plain; charset=utf-8",
+    "yaml": "application/yaml; charset=utf-8",
+    "json": "application/json; charset=utf-8",
+}
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build the FastAPI application (factory — no import-time side effects)."""
+    settings = (settings or Settings()).ensure()
+    store = Store(settings)
+    runner = JobRunner(settings, store)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        runner.shutdown(wait=False)
+
+    app = FastAPI(
+        title="factorio-display API",
+        version=__version__,
+        description="Encode media and build Factorio display/audio blueprints.",
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+    app.state.store = store
+    app.state.runner = runner
+    app.state.started_at = time.time()
+    app.add_middleware(CompressionMiddleware, minimum_size=settings.compress_min_size)
+
+    # ── public metadata ──────────────────────────────────────────────
+    @app.get("/api/v1/health", response_model=HealthOut, tags=["meta"])
+    def health() -> HealthOut:
+        busy, queued = _job_counts(settings, store)
+        return HealthOut(
+            version=__version__,
+            workers={"busy": busy, "queued": queued, "max": settings.max_workers},
+            uptime_seconds=time.time() - app.state.started_at,
+        )
+
+    @app.get("/api/v1/capabilities", response_model=CapabilitiesOut, tags=["meta"])
+    def capabilities() -> CapabilitiesOut:
+        return CapabilitiesOut(
+            version=__version__,
+            display={"default_width": 28, "default_height": 26},
+            input_extensions={
+                "video": sorted(_cli._VIDEO_EXTENSIONS),
+                "audio": sorted(_cli._AUDIO_EXTENSIONS),
+                "midi": [".mid", ".midi"],
+                "image": sorted(_cli._IMAGE_EXTENSIONS),
+            },
+            instruments=_INSTRUMENTS,
+            rail_modes=_RAIL_MODES,
+            result_formats=_RESULT_FORMATS,
+            power_types=_POWER_TYPES,
+        )
+
+    # ── uploads ──────────────────────────────────────────────────────
+    @app.post("/api/v1/uploads", response_model=list[UploadOut], status_code=201, tags=["uploads"])
+    async def upload_files(
+        files: list[UploadFile] = File(...),
+        principal: str = Depends(get_principal),
+    ) -> list[UploadOut]:
+        out: list[UploadOut] = []
+        for file in files:
+            data = await file.read()
+            rec = store.save_upload(principal, file.filename or "upload.bin", data)
+            out.append(UploadOut(**rec.to_dict()))
+        return out
+
+    @app.get("/api/v1/uploads/{upload_id}", response_model=UploadOut, tags=["uploads"])
+    def get_upload(upload_id: str, principal: str = Depends(get_principal)) -> UploadOut:
+        rec = store.load_upload(principal, upload_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "upload not found"))
+        return UploadOut(**rec.to_dict())
+
+    @app.delete("/api/v1/uploads/{upload_id}", status_code=204, tags=["uploads"])
+    def delete_upload(upload_id: str, principal: str = Depends(get_principal)) -> Response:
+        if not store.delete_upload(principal, upload_id):
+            raise HTTPException(status_code=404, detail=_err("not_found", "upload not found"))
+        return Response(status_code=204)
+
+    # ── jobs ─────────────────────────────────────────────────────────
+    @app.post("/api/v1/jobs", status_code=202, tags=["jobs"])
+    def create_job(
+        body: JobCreate,
+        principal: str = Depends(get_principal),
+    ) -> JSONResponse:
+        spec = {
+            "type": body.type,
+            "inputs": body.inputs,
+            "name": body.options.name,
+            "callback_url": body.callback_url,
+            "config": body.options.to_config_dict(),
+        }
+        try:
+            job_id = runner.submit(principal, spec)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=429, detail=_err("rate_limited", str(exc))) from exc
+        return JSONResponse(
+            status_code=202,
+            content={
+                "job_id": job_id,
+                "status": "queued",
+                "type": body.type,
+                "created_at": runner.get(principal, job_id)["created_at"],
+                "result_url": f"/api/v1/jobs/{job_id}/result",
+            },
+        )
+
+    @app.get("/api/v1/jobs", response_model=JobListOut, tags=["jobs"])
+    def list_jobs(
+        status: str | None = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        principal: str = Depends(get_principal),
+    ) -> JobListOut:
+        jobs = runner.list(principal, status=status, limit=limit, offset=offset)
+        return JobListOut(
+            jobs=[_job_out(j, principal) for j in jobs],
+            total=len(runner.list(principal, status=status)),
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get("/api/v1/jobs/{job_id}", response_model=JobOut, tags=["jobs"])
+    def get_job(job_id: str, principal: str = Depends(get_principal)) -> JobOut:
+        rec = runner.get(principal, job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        return _job_out(rec, principal)
+
+    @app.post("/api/v1/jobs/{job_id}/cancel", tags=["jobs"])
+    def cancel_job(job_id: str, principal: str = Depends(get_principal)) -> dict:
+        status = runner.cancel(principal, job_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        return {"job_id": job_id, "status": status}
+
+    @app.delete("/api/v1/jobs/{job_id}", status_code=204, tags=["jobs"])
+    def delete_job(job_id: str, principal: str = Depends(get_principal)) -> Response:
+        if not runner.delete(principal, job_id):
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        return Response(status_code=204)
+
+    @app.get("/api/v1/jobs/{job_id}/result", tags=["jobs"])
+    def job_result(
+        job_id: str,
+        format: Literal["blueprint", "toml", "yaml", "json"] = "blueprint",
+        principal: str = Depends(get_principal),
+    ) -> Response:
+        rec = runner.get(principal, job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        status = rec.get("status")
+        if status in ("queued", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail=_err("job_running", f"job is {status}; poll GET /jobs/{job_id}"),
+            )
+        if status == "failed":
+            raise HTTPException(status_code=422, detail=_err("job_failed", rec.get("error") or "job failed"))
+        if status == "cancelled":
+            raise HTTPException(status_code=422, detail=_err("job_failed", "job was cancelled"))
+
+        text = _materialize_result(store, runner, principal, job_id, rec, format)
+        return Response(content=text, media_type=_CONTENT_TYPE[format])
+
+    @app.get("/api/v1/jobs/{job_id}/artifacts", tags=["jobs"])
+    def list_artifacts(job_id: str, principal: str = Depends(get_principal)) -> dict:
+        if runner.get(principal, job_id) is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        paths = store.artifact_paths(principal, job_id)
+        return {
+            "artifacts": [
+                {
+                    "name": p.name,
+                    "size_bytes": p.stat().st_size,
+                    "url": f"/api/v1/jobs/{job_id}/artifacts/{p.name}",
+                }
+                for p in paths
+            ]
+        }
+
+    @app.get("/api/v1/jobs/{job_id}/artifacts/{artifact_name}", tags=["jobs"])
+    def download_artifact(
+        job_id: str, artifact_name: str, principal: str = Depends(get_principal)
+    ) -> FileResponse:
+        if runner.get(principal, job_id) is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        if "/" in artifact_name or "\\" in artifact_name or artifact_name in ("", ".", ".."):
+            raise HTTPException(status_code=400, detail=_err("validation_error", "bad artifact name"))
+        path = store.artifact_dir(principal, job_id) / artifact_name
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=_err("not_found", "artifact not found"))
+        return FileResponse(path)
+
+    # ── pastebin (1-click share / FBE source) ────────────────────────
+    @app.post("/api/v1/pastebin", tags=["meta"])
+    async def pastebin(body: PastebinRequest) -> dict:
+        """Proxy an anonymous Pastebin upload. Requires a dev key on the server
+        (Settings.pastebin_dev_key or the ``PASTEBIN_DEV_KEY`` env var)."""
+        import os  # pylint: disable=import-outside-toplevel
+        import httpx  # pylint: disable=import-outside-toplevel
+
+        key = settings.pastebin_dev_key or os.environ.get("PASTEBIN_DEV_KEY", "")
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail=_err(
+                    "no_pastebin_key",
+                    "Pastebin is not configured — set PASTEBIN_DEV_KEY on the server.",
+                ),
+            )
+        payload = {
+            "api_dev_key": key,
+            "api_option": "create",
+            "api_paste_code": body.text,
+            "api_paste_name": body.name,
+            "api_paste_format": body.format,
+            "api_paste_private": "1",   # unlisted
+            "api_paste_expire_date": "1M",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                r = await client.post("https://pastebin.com/api/api_post.php", data=payload)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            raise HTTPException(
+                status_code=502, detail=_err("pastebin_error", f"Pastebin unreachable: {exc}")
+            ) from exc
+        text = r.text.strip()
+        if not text.startswith("http"):
+            raise HTTPException(
+                status_code=502, detail=_err("pastebin_error", text or "Pastebin returned an error")
+            )
+        return {"url": text}
+
+    # ── fast sync builders ───────────────────────────────────────────
+    @app.post("/api/v1/blueprints/display", response_model=BuildOut, tags=["builders"])
+    def build_display(
+        body: DisplayRequest,
+        principal: str = Depends(get_principal),  # pylint: disable=unused-argument
+    ) -> BuildOut:
+        from .. import service  # pylint: disable=import-outside-toplevel
+
+        res = service.export_display(service.DisplayConfig(**body.model_dump()))
+        return _build_out(res)
+
+    @app.post("/api/v1/blueprints/audio-decoder", response_model=BuildOut, tags=["builders"])
+    def build_audio_decoder(
+        body: AudioDecoderRequest,
+        principal: str = Depends(get_principal),  # pylint: disable=unused-argument
+    ) -> BuildOut:
+        from .. import service  # pylint: disable=import-outside-toplevel
+
+        res = service.export_audio_decoder(service.AudioDecoderConfig(**body.model_dump()))
+        return _build_out(res)
+
+    @app.post("/api/v1/blueprints/logical", response_model=BuildOut, tags=["builders"])
+    def build_logical(
+        body: LogicalRequest,
+        principal: str = Depends(get_principal),  # pylint: disable=unused-argument
+    ) -> BuildOut:
+        from .. import service  # pylint: disable=import-outside-toplevel
+
+        res = service.export_logical(service.LogicalConfig(**body.model_dump()))
+        return _build_out(res)
+
+    @app.post("/api/v1/blueprints/decode", response_model=BuildOut, tags=["builders"])
+    def decode(
+        body: DecodeRequest,
+        principal: str = Depends(get_principal),  # pylint: disable=unused-argument
+    ) -> BuildOut:
+        from .. import service  # pylint: disable=import-outside-toplevel
+
+        res = service.decode_blueprint(body.blueprint)
+        return _build_out(res)
+
+    # ── static web app (mounted last so /api/v1/* routes win) ────────
+    static_dir = settings.static_dir or (Path(__file__).resolve().parent / "static")
+    if static_dir.is_dir():
+        app.mount(
+            "/", StaticFiles(directory=str(static_dir), html=True), name="static"
+        )
+
+    return app
+
+
+# ── helpers ────────────────────────────────────────────────────────────
+
+
+def _err(code: str, message: str) -> dict:
+    return {"error": {"code": code, "message": message}}
+
+
+def _job_out(rec: dict, principal: str) -> JobOut:
+    job_id = rec.get("job_id", "")
+    return JobOut(
+        job_id=job_id,
+        type=rec.get("type", ""),
+        name=rec.get("name", ""),
+        status=rec.get("status", "unknown"),
+        progress=rec.get("progress", {}),
+        created_at=rec.get("created_at", 0.0),
+        started_at=rec.get("started_at"),
+        finished_at=rec.get("finished_at"),
+        error=rec.get("error"),
+        result=rec.get("result"),
+        result_url=f"/api/v1/jobs/{job_id}/result",
+    )
+
+
+def _build_out(res) -> BuildOut:
+    return BuildOut(
+        blueprint=res.blueprint,
+        text=res.text,
+        format=res.format,
+        name=res.name,
+        entity_count=res.entity_count,
+        instruments=res.instruments,
+    )
+
+
+def _job_counts(settings: Settings, store: Store) -> tuple[int, int]:
+    busy = 0
+    queued = 0
+    data_dir = settings.data_dir
+    if data_dir.exists():
+        for owner_dir in data_dir.iterdir():
+            jobs_dir = owner_dir / "jobs"
+            if not jobs_dir.is_dir():
+                continue
+            for rec in store.list_jobs(owner_dir.name):
+                status = rec.get("status")
+                if status == "running":
+                    busy += 1
+                elif status == "queued":
+                    queued += 1
+    return busy, queued
+
+
+def _materialize_result(
+    store: Store, runner: JobRunner, principal: str, job_id: str, rec: dict, fmt: str
+) -> str:
+    """Return the result text for *fmt*, using the stored artifact or synthesising it."""
+    name = _RESULT_ARTIFACT[fmt]
+    text = store.read_artifact_text(principal, job_id, name)
+    if text is not None:
+        return text
+
+    # Not stored — synthesise from the blueprint (the common case for encode).
+    result = rec.get("result") or {}
+    blueprint = str(result.get("blueprint") or "")
+    if not blueprint:
+        raise HTTPException(
+            status_code=415,
+            detail=_err("unsupported_format", f"result format '{fmt}' is not available for this job"),
+        )
+    try:
+        if fmt == "json":
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        if fmt == "yaml":
+            from ..logical_blueprint import blueprint_string_to_yaml  # pylint: disable=import-outside-toplevel
+
+            return blueprint_string_to_yaml(blueprint)
+        if fmt == "toml":
+            from draftsman.blueprintable import Blueprint  # pylint: disable=import-outside-toplevel
+            from ..logical_blueprint import from_draftsman, to_toml  # pylint: disable=import-outside-toplevel
+
+            return to_toml(from_draftsman(Blueprint.from_string(blueprint)))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        raise HTTPException(
+            status_code=415,
+            detail=_err("unsupported_format", f"could not produce '{fmt}': {exc}"),
+        ) from exc
+    raise HTTPException(status_code=415, detail=_err("unsupported_format", f"unknown format '{fmt}'"))
+
+
+def serve(settings: Settings) -> None:
+    """Run the uvicorn server (blocking)."""
+    import uvicorn  # pylint: disable=import-outside-toplevel
+
+    app = create_app(settings)
+    uvicorn.run(app, host=settings.host, port=settings.port)

@@ -11,6 +11,8 @@ _diagnose
 .encode_vchunks*
 .blueprint_cache
 .factorio_display_cache
+server_data
+server_data/
 tmp_*
 tmp-*
 .venv*
