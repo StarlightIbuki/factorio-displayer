@@ -67,22 +67,16 @@ def test_wiring_red_and_green_on_separate_maps() -> None:
     assert "'0' = red network" in text
     assert "'0' = green network" in text
 
-    # Red map: DC cell (input=red1 '0', output=red2 '1') => "01".
-    # CC cell (no input '.', output red1 '0') => ".0".
-    # AC input is green-only, so on the red map its input is '.'.
-    #   .0
-    #   01
-    #   .2
-    #   1.
-    #   2.
-    assert ".0" in text
+    # Red map grid row (entities at y=0, columns 0..10):
+    #   CC '0'  |  DC '0'+'1'  |  AC '2'  |  L '1'  |  S '2'
+    assert "0 01 2  1 2" in text
+    # The DC's input (red net 0) and output (red net 1) are two separate red
+    # networks, so its cell shows both chars — without labelling which is
+    # input vs output (the entity map's direction glyph covers that).
     assert "01" in text
-    assert ".2" in text
-    assert "1." in text
-    assert "2." in text
 
-    # Green map: DC input on green1 '0', AC input on green1 '0'.
-    assert "0." in text
+    # Green map grid row: DC and AC both ride green1 '0'; other entities '.'.
+    assert ". 0  0  . ." in text
 
 
 def test_render_from_blueprint_string() -> None:

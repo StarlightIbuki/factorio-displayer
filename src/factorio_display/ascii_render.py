@@ -18,11 +18,15 @@ both a red and a green network at once, so the two colours must never share
 a character pool).  Within one colour every circuit network is assigned a
 character from ``0-9 A-Z a-z`` (62 per map); when a blueprint has more than
 62 networks of that colour the same characters are reused on that colour's
-next connection map.  For every entity the wiring cell shows two characters
-``{input}{output}`` (left = input-side network char, right = output-side
-network char); ``.`` means that side is not on any network of that colour.
-This makes it easy to eyeball e.g. whether a memory bank's data bus actually
-reaches the display lamps, and which networks are still disconnected.
+next connection map.  Each entity shows the character(s) of the network(s)
+it is wired into on that colour — e.g. a combinator whose input and output
+ride two separate red networks shows both chars (``01``).  ``.`` means the
+entity is not on any network of that colour.  Input vs output side is not
+shown: a circuit connection doesn't care which connector it lands on, and
+the combinator's facing in the entity map already tells you which side is
+the input vs the output.  This makes it easy to eyeball e.g. whether a
+memory bank's data bus actually reaches the display lamps, and which
+networks are still disconnected.
 """
 
 from __future__ import annotations
@@ -270,7 +274,11 @@ def render_blueprint(bp: Any, *, coords: bool = True) -> str:
     red_maps = _map_count("red")
     green_maps = _map_count("green")
 
-    # wire_cells[(color, mapnum, x, y)] -> char
+    # wire_cells[(color, mapnum, x, y)] -> single char.  Each entity shows the
+    # character(s) of the network(s) it connects to on that colour — a
+    # combinator wired into two separate networks shows both (e.g. "01").
+    # Input/output is NOT shown: the entity map's direction glyph already
+    # conveys which connector is the input vs the output side.
     wire_cells: dict[tuple[str, int, int, int], str] = {}
     for e in entities:
         anchor = _entity_anchor(e)
@@ -279,18 +287,22 @@ def render_blueprint(bp: Any, *, coords: bool = True) -> str:
         x, y = anchor
         oid = id(e)
         for color, n_maps in (("red", red_maps), ("green", green_maps)):
-            in_net = net_of_key.get((oid, "input", color))
-            out_net = net_of_key.get((oid, "output", color))
+            nets = sorted({
+                net_of_key[(oid, side, color)]
+                for side in ("input", "output")
+                if (oid, side, color) in net_of_key
+            })
+            if not nets:
+                for mapnum in range(1, n_maps + 1):
+                    wire_cells[(color, mapnum, x, y)] = "."
+                continue
             for mapnum in range(1, n_maps + 1):
-
-                def _ch(net: tuple[int, str] | None) -> str:
-                    if net is None:
-                        return "."
-                    m, c = net
-                    return c if m == mapnum else " "
-
-                wire_cells[(color, mapnum, x, y)] = _ch(in_net)
-                wire_cells[(color, mapnum, x + 1, y)] = _ch(out_net)
+                chars_this_map = [c for (m, c) in nets if m == mapnum]
+                if not chars_this_map:
+                    wire_cells[(color, mapnum, x, y)] = " "
+                else:
+                    for i, c in enumerate(sorted(chars_this_map)):
+                        wire_cells[(color, mapnum, x + i, y)] = c
 
     # ── Assemble output ─────────────────────────────────────────
     lines: list[str] = []
