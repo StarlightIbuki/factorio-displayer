@@ -374,6 +374,7 @@ pre.ascii {
   display: flex; flex-direction: column;
   overflow: hidden;
 }
+.modal-box.wide.inspect-box { max-width: min(1400px, calc(100vw - 48px)); }
 .inspect-box textarea#inspect-input { width: 100%; }
 .inspect-box #inspect-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .inspect-box #inspect-content { overflow: auto; min-height: 0; }

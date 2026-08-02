@@ -250,7 +250,7 @@ function svgView(model, doc) {
   // Zoom — scrollbars live in the canvas, so a scaled-up holder tracks them.
   const W = (model.max_x - model.min_x + 2) * TILE + PAD * 2;
   const H = (model.max_y - model.min_y + 3) * TILE + PAD * 2;
-  let zoom = 1;
+  let zoom = 0.8; // 80% default — fits more of the blueprint in view
   const applyZoom = () => {
     holder.style.width = (W * zoom) + "px";
     holder.style.height = (H * zoom) + "px";
@@ -263,6 +263,13 @@ function svgView(model, doc) {
   zoomIn.addEventListener("click", () => { zoom = Math.min(4, zoom * 1.25); applyZoom(); });
   zoomOut.addEventListener("click", () => { zoom = Math.max(0.25, zoom / 1.25); applyZoom(); });
   zoomReset.addEventListener("click", () => { zoom = 1; applyZoom(); });
+  // Ctrl/⌘ + mouse wheel zooms (plain wheel still pans/scrolls the canvas).
+  canvas.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    zoom = Math.min(4, Math.max(0.25, zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
+    applyZoom();
+  }, { passive: false });
   applyZoom();
 
   // legend
