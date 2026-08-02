@@ -161,7 +161,7 @@ $("#btn-new").addEventListener("click", () => { resetCreate(); showView("create"
 $("#btn-back").addEventListener("click", () => { resetCreate(); showView("home"); });
 // Blueprint viewer utility → the unified inspector modal (paste mode).
 $("#btn-tools").addEventListener("click", () =>
-  openBlueprintInspector({ api, renderYamlTree }));
+  openBlueprintInspector({}));
 
 // token
 const tokenInput = $("#token-input");
@@ -1417,14 +1417,14 @@ async function renderJobResult(host, job) {
     metaItem(t("result.instruments"), meta.instruments ? meta.instruments.join(", ") : null),
     metaItem(t("result.kind"), meta.kind),
   ]);
-  // Quick actions — the full inspection (string / YAML / ASCII / interactive
-  // preview) lives in the shared inspector modal.
+  // Quick actions — the full inspection (string / parts list / interactive
+  // preview with ASCII mode) lives in the shared inspector modal.
   const view = el("div");
   view.append(el("p", { class: "hint", text: t("result.viewHint") }));
   host.append(metaStrip,
     el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
       el("button", { class: "primary", text: t("result.view"), title: t("result.viewTitle"), onclick: () => viewJobInline(id, view) }),
-      el("button", { text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ api, renderYamlTree, jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
+      el("button", { text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
       el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
       el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, job.name) }),
       el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: () => shareJob(id) }),
@@ -1675,17 +1675,28 @@ async function renderHome() {
   }
   const emptyState = $("#empty-state");
   const listState = $("#list-state");
+  const emptyHint = $("#jobs-empty-hint");
   if (jobs.length === 0) {
-    emptyState.classList.remove("hidden");
-    listState.classList.add("hidden");
     // Drop any cards left over from a previous filter.
     jobsList.innerHTML = "";
     state.jobCache.clear();
     state.jobEls.clear();
+    if (filter) {
+      // A status tab is active: keep the list (and its tabs) visible and
+      // show a "no jobs in this status" hint — not the first-run empty state.
+      emptyState.classList.add("hidden");
+      listState.classList.remove("hidden");
+      if (emptyHint) emptyHint.classList.remove("hidden");
+    } else {
+      // No jobs at all → the first-run "Generate your first blueprint" state.
+      emptyState.classList.remove("hidden");
+      listState.classList.add("hidden");
+    }
     return;
   }
   emptyState.classList.add("hidden");
   listState.classList.remove("hidden");
+  if (emptyHint) emptyHint.classList.add("hidden");
 
   // Diff against what's already on screen: only re-render cards whose record
   // actually changed (e.g. a running job's status/progress), instead of wiping

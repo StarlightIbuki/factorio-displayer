@@ -1,16 +1,16 @@
 // inspect.js — unified Blueprint Inspector modal.
 //
 // A single modal is used both for the job's blueprint inspection and the
-// topbar "Blueprint viewer" utility.  It shows four tabs:
+// topbar "Blueprint viewer" utility.  It shows three tabs:
 //   * Blueprint — the raw string (+ copy).
-//   * Inspect   — the YAML tree (backend decode).
-//   * ASCII     — the ASCII render split into pages (Entities / RED / GREEN…).
-//   * Preview   — an interactive SVG: combinator outlines, red/green wire
-//                 overlays, network-coloured ports, hover-to-highlight.
+//   * Inspect   — the parts list: one card per entity with property
+//                 key-value rows (position, facing, condition).
+//   * Preview   — an interactive SVG (combinator outlines with facing,
+//                 red/green wire overlays, network-coloured ports, hover-
+//                 to-highlight) with ASCII as an alternative view mode.
 //
-// The ASCII text + structured model are rendered CLIENT-SIDE by ascii.js
-// (a port of the backend ascii_render.py), so the ASCII/preview tabs need
-// no backend round-trip.  Only the YAML tab still asks the backend.
+// Everything is rendered CLIENT-SIDE by ascii.js (a port of the backend
+// ascii_render.py); no backend round-trip is needed at all.
 
 /* eslint-env browser */
 import { t } from "./i18n.js";
@@ -126,9 +126,15 @@ function buildPreview(model) {
     for (const c of ["red", "green"]) for (const s of ["input", "output"]) {
       if (p[c][s] >= 0) nets.push(p[c][s]);
     }
-    const boxW = 1;
-    const boxH = ent.kind === "combinator" ? 2 : 1;
+    // Footprint-aware box: east/west combinators are 2x1, north/south are 1x2.
+    let boxW = 1, boxH = 1;
+    if (ent.kind === "combinator") {
+      if (ent.dir === 4 || ent.dir === 12) { boxW = 2; boxH = 1; }
+      else { boxW = 1; boxH = 2; }
+    }
     const rx = toX(ent.x), ry = toY(ent.y);
+    const cx = rx + (boxW * TILE) / 2;
+    const cy = ry + (boxH * TILE) / 2;
 
     const g = svgEl("g", { class: "ent", "data-nets": nets.join(",") });
     g.append(svgEl("rect", {
@@ -138,11 +144,24 @@ function buildPreview(model) {
     }));
     const letter = svgEl("text", {
       class: "ent-letter",
-      x: rx + (boxW * TILE) / 2, y: ry + (boxH * TILE) / 2 + 4,
-      "text-anchor": "middle",
+      x: cx, y: cy + 4, "text-anchor": "middle",
     });
     letter.textContent = ent.letter;
     g.append(letter);
+
+    // Combinator facing marker (mirrors the ASCII glyphs > < ^ V).
+    if (ent.kind === "combinator") {
+      let marker, mx, my;
+      if (ent.dir === 4) { marker = ">"; mx = rx + 1.75 * TILE; my = cy + 4; }
+      else if (ent.dir === 12) { marker = "<"; mx = rx + 0.25 * TILE; my = cy + 4; }
+      else if (ent.dir === 0) { marker = "^"; mx = cx; my = ry + 3; }
+      else { marker = "V"; mx = cx; my = ry + 2 * TILE + 7; }
+      const face = svgEl("text", {
+        class: "ent-facing", x: mx, y: my, "text-anchor": "middle", "font-size": 12,
+      });
+      face.textContent = marker;
+      g.append(face);
+    }
 
     for (const c of ["red", "green"]) for (const s of ["input", "output"]) {
       const n = p[c][s];
@@ -187,7 +206,7 @@ function clearHighlight(svg) {
   svg.querySelectorAll(".port, .wire, .ent").forEach((node) => node.classList.remove("hl", "dim"));
 }
 
-function previewView(model) {
+function svgView(model) {
   const wrap = el("div");
   const toolbar = el("div", { class: "preview-toolbar" });
   const showWires = el("label", { class: "row", style: "gap:6px;align-items:center" }, [
@@ -217,6 +236,29 @@ function previewView(model) {
   return wrap;
 }
 
+// Preview tab: SVG and ASCII are alternative views of the same blueprint.
+function previewView(model, asciiPages) {
+  const wrap = el("div");
+  const toggle = el("div", { class: "preview-mode" }, [
+    el("button", { "data-mode": "svg", class: "active", text: t("preview.modePreview") }),
+    el("button", { "data-mode": "ascii", text: t("preview.modeAscii") }),
+  ]);
+  const host = el("div");
+  const show = (mode) => {
+    $$("[data-mode]", toggle).forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+    host.innerHTML = "";
+    if (mode === "ascii") host.append(asciiView(asciiPages));
+    else host.append(svgView(model));
+  };
+  toggle.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-mode]");
+    if (b) show(b.dataset.mode);
+  });
+  wrap.append(toggle, host);
+  show("svg");
+  return wrap;
+}
+
 // ── ASCII pages view ──────────────────────────────────────────────────
 function asciiView(pages) {
   const wrap = el("div");
@@ -240,19 +282,127 @@ function asciiView(pages) {
   return wrap;
 }
 
+// ── parts list view (entity cards with property key-value rows) ───────
+const _ENTITY_LETTER = {
+  "decider-combinator": "D", "arithmetic-combinator": "A", "selector-combinator": "S",
+  "constant-combinator": "C", "programmable-speaker": "S", "small-lamp": "L",
+};
+const _FACING_NAMES = { 0: "north", 2: "northeast", 4: "east", 6: "southeast", 8: "south", 10: "southwest", 12: "west", 14: "northwest" };
+const _FACING_ARROW = { 0: "↑", 4: "→", 8: "↓", 12: "←" };
+
+function _entities(doc) {
+  if (!doc) return [];
+  if (doc.blueprint) return doc.blueprint.entities || [];
+  if (doc.blueprint_book && doc.blueprint_book.blueprints && doc.blueprint_book.blueprints.length) {
+    const b = doc.blueprint_book.blueprints[0].blueprint;
+    return (b && b.entities) || [];
+  }
+  return [];
+}
+
+function fmtPos(pos) {
+  if (!pos || pos.x == null || pos.y == null) return "—";
+  const f = (n) => (Number.isInteger(n) ? String(n) : String(Math.round(n * 10) / 10));
+  return `(${f(pos.x)}, ${f(pos.y)})`;
+}
+
+function facingOf(ent) {
+  const d = ent.direction ?? 0;
+  const name = _FACING_NAMES[d] || "north";
+  return _FACING_ARROW[d] ? `${name} ${_FACING_ARROW[d]}` : name;
+}
+
+// Circuit signal object → short name (each/anything/everything specials).
+const _SIG_SPECIAL = { "signal-each": "each", "signal-anything": "anything", "signal-everything": "everything" };
+function _sig(s) {
+  if (!s) return "";
+  return _SIG_SPECIAL[s.name] || s.name;
+}
+
+function describeCondition(ent) {
+  const cb = ent.control_behavior;
+  if (!cb) return "—";
+  if (cb.decider_conditions) {
+    const c = cb.decider_conditions;
+    const first = _sig(c.first_signal) || (c.use_parameters ? "parameters" : "?");
+    const second = c.second_signal ? _sig(c.second_signal)
+      : (c.constant != null ? String(c.constant) : (c.use_parameters ? "parameters" : ""));
+    const out = c.output_signal ? `[${_sig(c.output_signal)}]`
+      : (c.copy_count_from_input ? "[count]" : "1");
+    return `[${first}] ${c.comparator || "="} ${second} → ${out}`;
+  }
+  if (cb.arithmetic_conditions) {
+    const c = cb.arithmetic_conditions;
+    const first = c.first_signal ? `[${_sig(c.first_signal)}]`
+      : (c.first_constant != null ? String(c.first_constant) : "0");
+    const second = c.second_signal ? `[${_sig(c.second_signal)}]`
+      : (c.second_constant != null ? String(c.second_constant) : "0");
+    const out = c.output_signal ? `[${_sig(c.output_signal)}]` : "?";
+    return `${first} ${c.operation || "+"} ${second} → ${out}`;
+  }
+  if (Array.isArray(cb.filters) && cb.filters.length) {
+    return cb.filters
+      .filter((f) => f && f.signal)
+      .map((f) => `[${_sig(f.signal)}] ×${f.count ?? 1}`)
+      .join(", ");
+  }
+  if (cb.circuit_parameters) {
+    const cp = cb.circuit_parameters;
+    const sig = cp.circuit_value_signal ? `[${_sig(cp.circuit_value_signal)}]` : "";
+    return sig ? `${cp.signal_value_is_pitch ? "pitch" : "volume"} ← ${sig}` : "—";
+  }
+  if (cb.circuit_condition) {
+    const c = cb.circuit_condition;
+    const left = c.first_signal ? `[${_sig(c.first_signal)}]` : "?";
+    const right = c.second_signal ? `[${_sig(c.second_signal)}]`
+      : (c.constant != null ? String(c.constant) : "?");
+    return `${left} ${c.comparator || "="} ${right}`;
+  }
+  return "—";
+}
+
+function itemsView(doc) {
+  const ents = _entities(doc);
+  const wrap = el("div", { class: "inspect-items" });
+  if (!ents.length) {
+    wrap.append(el("p", { class: "hint", text: t("result.viewHint") }));
+    return wrap;
+  }
+  ents.forEach((ent, i) => {
+    const card = el("div", { class: "inspect-item" });
+    const head = el("div", { class: "inspect-item-head" }, [
+      el("span", { class: "inspect-item-badge", text: _ENTITY_LETTER[ent.name] || "." }),
+      el("span", { class: "inspect-item-name", text: `#${ent.entity_number ?? i + 1} ${ent.name}` }),
+    ]);
+    const rows = el("div", { class: "inspect-item-rows" });
+    const kv = (label, value) => el("div", { class: "inspect-item-row" }, [
+      el("span", { class: "inspect-item-key", text: label }),
+      el("span", { class: "inspect-item-val", text: value }),
+    ]);
+    rows.append(
+      kv(t("inspect.position"), fmtPos(ent.position)),
+      kv(t("inspect.facing"), facingOf(ent)),
+      kv(t("inspect.condition"), describeCondition(ent)),
+    );
+    card.append(head, rows);
+    wrap.append(card);
+  });
+  return wrap;
+}
+
 // ── modal state + tab rendering ───────────────────────────────────────
-const _state = { api: null, renderYamlTree: null, bpString: "", asciiPages: [], model: null, yaml: null };
+const _state = { bpString: "", doc: null, asciiPages: [], model: null };
 
 async function loadBlueprint(bpString) {
   _state.bpString = bpString;
-  _state.yaml = null;
   const content = $("#inspect-content");
   content.innerHTML = "";
   content.append(el("p", { class: "hint", text: t("t.decoding") }));
   try {
-    // ASCII + preview model are computed in-browser (ascii.js), so the
-    // inspector works without hitting the backend for these two tabs.
+    // Everything is computed in-browser (ascii.js): the parts list, the
+    // ASCII pages, and the preview model — no backend round-trip at all.
     const doc = await decodeBlueprintString(bpString);
+    _state.doc = doc;
     _state.asciiPages = splitAsciiPages(renderBlueprintAscii(doc));
     _state.model = renderBlueprintModel(doc);
   } catch (e) {
@@ -276,47 +426,28 @@ async function renderTab(key) {
     return;
   }
 
-  if (key === "ascii") {
+  if (key === "items") {
     content.innerHTML = "";
-    content.append(asciiView(_state.asciiPages));
+    if (_state.doc) content.append(itemsView(_state.doc));
+    else content.append(el("p", { class: "hint", text: t("result.viewHint") }));
     return;
   }
 
   if (key === "preview") {
     content.innerHTML = "";
-    if (_state.model) content.append(previewView(_state.model));
+    if (_state.model) content.append(previewView(_state.model, _state.asciiPages));
     else content.append(el("p", { class: "hint", text: t("result.viewHint") }));
     return;
-  }
-
-  if (key === "yaml") {
-    content.innerHTML = "";
-    if (!_state.yaml) {
-      content.append(el("p", { class: "hint", text: t("t.decoding") }));
-      try {
-        const res = await _state.api("/api/v1/blueprints/decode", { method: "POST", body: { blueprint: _state.bpString } });
-        const obj = await res.json();
-        _state.yaml = obj.text || "";
-      } catch (e) {
-        content.innerHTML = "";
-        content.append(el("p", { class: "hint", text: t("t.decodeError", { msg: e.message }) }));
-        return;
-      }
-    }
-    content.innerHTML = "";
-    content.append(_state.renderYamlTree ? _state.renderYamlTree(_state.yaml) : el("pre", { class: "mono", text: _state.yaml }));
   }
 }
 
 // ── public entry ──────────────────────────────────────────────────────
 export function openBlueprintInspector(opts) {
-  const { api, renderYamlTree, jobId, bpString, title, getResultText } = opts;
-  _state.api = api;
-  _state.renderYamlTree = renderYamlTree;
+  const { jobId, bpString, title, getResultText } = opts;
   _state.bpString = "";
+  _state.doc = null;
   _state.asciiPages = [];
   _state.model = null;
-  _state.yaml = null;
 
   $("#inspect-title").textContent = title || t("viewer.title");
   const paste = $("#inspect-paste");

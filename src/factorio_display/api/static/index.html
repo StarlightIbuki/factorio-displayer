@@ -46,6 +46,7 @@
           <button class="jobs-tab" data-status="cancelled" data-i18n="home.filterCancelled">cancelled</button>
         </div>
         <div id="jobs-list" class="jobs-list"></div>
+        <p id="jobs-empty-hint" class="hint hidden" data-i18n="home.filterEmpty">No jobs with this status yet.</p>
       </div>
     </section>
 
@@ -321,8 +322,7 @@
       <div id="inspect-body" class="hidden">
         <div id="inspect-tabs" class="result-tabs">
           <button class="active" data-tab="string" data-i18n="s3.formatBlueprint">Blueprint</button>
-          <button data-tab="yaml" data-i18n="result.inspectItem">Inspect item</button>
-          <button data-tab="ascii" data-i18n="result.ascii">Debug ASCII</button>
+          <button data-tab="items" data-i18n="result.inspectItem">Inspect item</button>
           <button data-tab="preview" data-i18n="result.preview">Preview</button>
         </div>
         <div id="inspect-content"></div>
