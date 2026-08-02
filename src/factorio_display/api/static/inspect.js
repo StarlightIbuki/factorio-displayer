@@ -391,47 +391,59 @@ function sigCtl(sig) { return ctlInput(sig ? _sig(sig) : ""); }
 function condRow(label, ...ctls) {
   return el("div", { class: "pv-row" }, [el("span", { class: "pv-row-label", text: label }), ...ctls]);
 }
-function copyCountCtl(c) {
+function boolCtl(label, value) {
   const box = el("input", { type: "checkbox", disabled: "" });
-  if (c.copy_count_from_input) box.checked = true;
+  if (value) box.checked = true;
   return el("label", { class: "pv-row" }, [
-    el("span", { class: "pv-row-label", text: t("inspect.copyCount") }),
+    el("span", { class: "pv-row-label", text: label }),
     box,
   ]);
 }
 
-// Split an entity's control_behavior into TWO numbered lists — conditions
-// (#1, #2, …) and outputs (#1, #2, …) — browsable independently.
-function conditionSections(cb) {
+// Build the two numbered lists (conditions / outputs) from an entity's REAL
+// serialized control_behavior.  In Factorio 2.0 / draftsman:
+//   * decider:      control_behavior.decider_conditions = { conditions: [...], outputs: [...] }
+//   * arithmetic:   control_behavior.arithmetic_conditions = { first_signal, operation, second_signal, output_signal }
+//   * constant:     control_behavior.filters = [{ signal, count }]
+//   * speaker:      control_behavior.circuit_condition (enable) + circuit_parameters,
+//                   volume signal at top-level entity.parameters.volume_signal_id
+//   * lamp:         control_behavior.circuit_condition
+function conditionSections(ent) {
   const conditions = [];
   const outputs = [];
+  const cb = ent && ent.control_behavior;
   if (!cb) return { conditions, outputs };
 
   if (cb.decider_conditions) {
-    const c = cb.decider_conditions;
-    conditions.push({ body: () => [
-      condRow(t("inspect.first"), sigCtl(c.first_signal)),
-      condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])),
-      condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "")),
-    ] });
-    outputs.push({ body: () => [
-      condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)),
-      copyCountCtl(c),
-    ] });
-    return { conditions, outputs };
+    const dc = cb.decider_conditions;
+    (Array.isArray(dc.conditions) ? dc.conditions : []).forEach((c) => {
+      conditions.push({ body: () => [
+        condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.first_constant != null ? c.first_constant : "")),
+        condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])),
+        condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "")),
+        ...(c.compare_type ? [condRow(t("inspect.combine"), ctlSelect(c.compare_type, ["and", "or"]))] : []),
+      ] });
+    });
+    (Array.isArray(dc.outputs) ? dc.outputs : []).forEach((o) => {
+      outputs.push({ body: () => [
+        condRow(t("inspect.signal"), o.signal ? sigCtl(o.signal) : ctlInput(o.constant != null ? o.constant : "")),
+        boolCtl(t("inspect.copyCount"), !!o.copy_count_from_input),
+      ] });
+    });
   }
+
   if (cb.arithmetic_conditions) {
-    const c = cb.arithmetic_conditions;
+    const ac = cb.arithmetic_conditions;
     conditions.push({ body: () => [
-      condRow(t("inspect.first"), c.first_signal ? sigCtl(c.first_signal) : ctlInput(c.first_constant != null ? c.first_constant : "0")),
-      condRow(t("inspect.operation"), ctlSelect(c.operation || "+", ["+", "-", "*", "/", "%", "^"])),
-      condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.second_constant != null ? c.second_constant : "0")),
+      condRow(t("inspect.first"), ac.first_signal ? sigCtl(ac.first_signal) : ctlInput(ac.first_constant != null ? ac.first_constant : "0")),
+      condRow(t("inspect.operation"), ctlSelect(ac.operation || "+", ["+", "-", "*", "/", "%", "^", "<<", ">>", "AND", "OR", "XOR"])),
+      condRow(t("inspect.second"), ac.second_signal ? sigCtl(ac.second_signal) : ctlInput(ac.second_constant != null ? ac.second_constant : "0")),
     ] });
     outputs.push({ body: () => [
-      condRow(t("inspect.outputSignal"), sigCtl(c.output_signal)),
+      condRow(t("inspect.outputSignal"), sigCtl(ac.output_signal)),
     ] });
-    return { conditions, outputs };
   }
+
   if (Array.isArray(cb.filters)) {
     cb.filters.filter((f) => f && f.signal).forEach((f) => {
       outputs.push({ body: () => [
@@ -439,16 +451,8 @@ function conditionSections(cb) {
         condRow(t("inspect.count"), ctlInput(f.count != null ? f.count : 1)),
       ] });
     });
-    return { conditions, outputs };
   }
-  if (cb.circuit_parameters) {
-    const cp = cb.circuit_parameters;
-    outputs.push({ body: () => [
-      condRow(t("inspect.mode"), ctlSelect(cp.signal_value_is_pitch ? "pitch" : "volume", ["volume", "pitch"])),
-      condRow(t("inspect.signal"), sigCtl(cp.circuit_value_signal)),
-    ] });
-    return { conditions, outputs };
-  }
+
   if (cb.circuit_condition) {
     const c = cb.circuit_condition;
     conditions.push({ body: () => [
@@ -456,8 +460,19 @@ function conditionSections(cb) {
       condRow(t("inspect.comparator"), ctlSelect(c.comparator || "=", [">", "<", "=", "≥", "≤", "≠"])),
       condRow(t("inspect.second"), c.second_signal ? sigCtl(c.second_signal) : ctlInput(c.constant != null ? c.constant : "?")),
     ] });
-    return { conditions, outputs };
   }
+
+  // Speaker output — the volume signal lives at top-level entity.parameters.
+  const params = ent.parameters || {};
+  if (cb.circuit_parameters || params.volume_signal_id || params.volume_controlled_by_signal) {
+    const cp = cb.circuit_parameters || {};
+    outputs.push({ body: () => [
+      ...(params.volume_signal_id ? [condRow(t("inspect.volumeSignal"), sigCtl(params.volume_signal_id))] : []),
+      ...(params.volume_controlled_by_signal != null ? [boolCtl(t("inspect.volumeControlled"), !!params.volume_controlled_by_signal)] : []),
+      ...(cp.instrument_id != null ? [condRow(t("inspect.instrument"), ctlInput(cp.instrument_id))] : []),
+    ] });
+  }
+
   return { conditions, outputs };
 }
 
@@ -480,9 +495,9 @@ function listItem(i, entry) {
 }
 
 // Two numbered list sections: "Condition" (#1, #2, …) and "Output" (#1, #2, …).
-function conditionView(cb) {
+function conditionView(ent) {
   const wrap = el("div", { class: "pv-list" });
-  const { conditions, outputs } = conditionSections(cb);
+  const { conditions, outputs } = conditionSections(ent);
   if (!conditions.length && !outputs.length) {
     wrap.append(el("p", { class: "hint", text: "—" }));
     return wrap;
@@ -517,7 +532,7 @@ function entityDetail(ent, idx) {
     kv(t("inspect.facing"), facingOf(ent)),
   );
   card.append(head, rows);
-  card.append(conditionView(ent.control_behavior));
+  card.append(conditionView(ent));
   return card;
 }
 
