@@ -84,6 +84,10 @@ const state = {
 
 // Cached 1s low-res preview node per job (job_id -> { node }).
 const jobPreviewCache = new Map();
+// Cached result texts (key `${job_id}:${format}`) so re-rendering the job list
+// (e.g. every 2s poll while other jobs run) doesn't re-fetch the large
+// blueprint from the backend on each refresh.
+const resultTextCache = new Map();
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -373,6 +377,13 @@ $("#btn-prev-generate").addEventListener("click", () => showStep(2));
 // ── timeline (step 2) ──────────────────────────────────────────────────
 const clipInfo = new Map();   // clipId -> { dur, w, h } (probed)
 let selectedClipId = null;
+// Cached timeline pixel scale.  Re-renders that only change clip positions
+// (dragging) reuse it, so a dragged block rests exactly under the mouse
+// instead of the whole timeline auto-rescaling and jumping on release.  The
+// scale is recomputed whenever the clip set or their durations change
+// (add/remove/trim/probe).
+let tlScaleSig = "";
+let tlScalePx = 0;
 
 function probeClip(c) {
   return new Promise((resolve) => {
@@ -472,7 +483,15 @@ async function renderTimeline() {
     audioEnd = Math.max(audioEnd, s + d);
   }
   const tlDur = Math.max(cursor, audioEnd, 1);
-  const pxPerSec = Math.max(20, 900 / tlDur);
+  const sig = state.clips.map((c) => `${c.id}:${c.kind}:${editedDurOf(c)}`).join("|");
+  let pxPerSec;
+  if (tlScaleSig === sig && tlScalePx > 0) {
+    pxPerSec = tlScalePx; // only positions changed → keep the scale
+  } else {
+    pxPerSec = Math.max(20, 900 / tlDur);
+    tlScaleSig = sig;
+    tlScalePx = pxPerSec;
+  }
 
   for (const c of state.clips) {
     const p = positions[c.id];
@@ -521,13 +540,16 @@ function wireBlock(block, c, pxPerSec) {
 function startAlignDrag(e, block, c, pxPerSec) {
   if (e.button !== 0) return;
   const startX = e.clientX;
-  const origStart = c.edit.start != null && c.edit.start >= 0 ? c.edit.start : currentPos(c).start;
+  const startPx = block.offsetLeft; // the block's actual on-screen left edge
   try { block.setPointerCapture(e.pointerId); } catch (_) { /* noop */ }
   const onMove = (ev) => {
-    const newStart = snapFrame(Math.max(0, origStart + (ev.clientX - startX) / pxPerSec));
+    // Follow the mouse 1:1 in pixels so the block stays exactly under the
+    // cursor while dragging (the scale is cached across renders).
+    const leftPx = Math.max(0, startPx + (ev.clientX - startX));
+    const newStart = snapFrame(leftPx / pxPerSec);
     if (!isSoundKind(c.kind) && newStart < prevVisualEnd(c.id)) return; // no overlap on the video rail
     c.edit.start = newStart;
-    block.style.left = `${newStart * pxPerSec}px`;
+    block.style.left = `${leftPx}px`;
   };
   const onUp = () => {
     block.removeEventListener("pointermove", onMove);
@@ -1402,8 +1424,18 @@ async function renderJobResult(host, job) {
     const format = tabFormat(key);
     $$(".result-tabs button", tabs).forEach((b) => b.classList.toggle("active", b.dataset.fmt === key));
     try {
-      const res = await api(`/api/v1/jobs/${id}/result?format=${format}`);
-      currentText = await res.text();
+      // Cache the result text so re-rendering the job list (e.g. during the 2s
+      // poll while other jobs run) doesn't re-fetch the large blueprint from
+      // the backend on every refresh.  The DOM is still rebuilt fresh each
+      // time, so tabs/buttons keep their handlers.
+      const cacheKey = `${id}:${format}`;
+      let text = resultTextCache.get(cacheKey);
+      if (text == null) {
+        const res = await api(`/api/v1/jobs/${id}/result?format=${format}`);
+        text = await res.text();
+        resultTextCache.set(cacheKey, text);
+      }
+      currentText = text;
       view.innerHTML = "";
       if (key === "inspect") {
         view.append(renderYamlTree(currentText));
@@ -1445,7 +1477,9 @@ async function renderJobResult(host, job) {
         toast(t("t.pastebinUploading"));
         shareUrl = await createShareUrl(id);
       }
-      window.open(`https://fbe.teoxoy.com/?source=${encodeURIComponent(shareUrl)}`, "_blank", "noopener");
+      // FBE's naive `?source=` parser splits on '=' and never URL-decodes, so
+      // the share URL must be passed RAW (it only contains URL-safe chars).
+      window.open(`https://fbe.teoxoy.com/?source=${shareUrl}`, "_blank", "noopener");
     } catch (e) {
       toast(t("t.fbeFail", { msg: e.message }), "error");
     }
@@ -1788,6 +1822,7 @@ async function deleteJob(id) {
     await api(`/api/v1/jobs/${id}`, { method: "DELETE" });
     state.expanded.delete(id);
     jobPreviewCache.delete(id);
+    for (const k of [...resultTextCache.keys()]) if (k.startsWith(id + ":")) resultTextCache.delete(k);
     try { await deleteMedia(id); } catch (_) { /* non-fatal */ }
     try { await deleteMedia("preview:" + id); } catch (_) { /* non-fatal */ }
     renderHome();
