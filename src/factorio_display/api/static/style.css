@@ -82,6 +82,15 @@ button.big { font-size: 16px; padding: 12px 26px; border-radius: 6px; }
 .empty h2 { font-size: 26px; margin-bottom: 10px; }
 .empty .hint { font-size: 14px; margin-bottom: 24px; }
 .hidden { display: none !important; }
+/* Anonymous (not signed in) public-data warning banner below the topbar. */
+.anon-warning {
+  background: rgba(217, 142, 43, 0.12);
+  border-bottom: 1px solid var(--amber);
+  color: var(--amber);
+  padding: 8px 20px;
+  font-size: 13px;
+}
+.warning { color: var(--amber); }
 .modal {
   position: fixed; inset: 0; background: rgba(0,0,0,.6);
   display: flex; align-items: center; justify-content: center;
@@ -376,6 +385,15 @@ pre.ascii {
 .inspect-item-rows { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; }
 .inspect-item-key { color: var(--muted); font-size: 12px; }
 .inspect-item-val { font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-word; }
+.inspect-item-config-title { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.inspect-item-config {
+  font-family: var(--mono); font-size: 10px; line-height: 1.35;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px; margin-top: 4px; max-height: 160px; overflow: auto; white-space: pre;
+  color: var(--text);
+}
+.preview-detail { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.preview-detail .inspect-item { background: var(--bg); }
 
 /* ── interactive SVG preview ─────────── */
 .preview-mode { display: flex; gap: 4px; margin-bottom: 8px; }
@@ -388,13 +406,14 @@ pre.ascii {
   border-radius: 6px; max-width: 100%; height: auto;
 }
 .preview-svg .ent-letter { font-family: var(--mono); fill: var(--text); font-size: 13px; pointer-events: none; }
-.preview-svg .ent-facing { font-family: var(--mono); fill: var(--amber); font-size: 12px; font-weight: 700; pointer-events: none; }
+.preview-svg .ent-facing { fill: var(--amber); pointer-events: none; }
 .preview-svg .port { cursor: pointer; }
 .preview-svg .dim { opacity: 0.12; }
 .preview-svg .hl { stroke-width: 3.5; }
 .preview-svg .port.hl { filter: drop-shadow(0 0 3px #fff); }
 .preview-svg .wire.hl { stroke-opacity: 1; filter: drop-shadow(0 0 3px currentColor); }
 .preview-svg .ent-box.hl { stroke: #fff; stroke-width: 2.5; }
+.preview-svg .ent.selected .ent-box { stroke: var(--amber); stroke-width: 2.5; }
 .preview-svg .wire.hidden { display: none; }
 .preview-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 11px; color: var(--muted); }
 .preview-legend-item { display: inline-flex; align-items: center; gap: 5px; }

@@ -96,7 +96,7 @@ function portAnchor(ent, side) {
   return null;
 }
 
-function buildPreview(model) {
+function buildPreview(model, onSelect) {
   const minX = model.min_x, minY = model.min_y;
   const w = (model.max_x - model.min_x + 2) * TILE + PAD * 2;
   const h = (model.max_y - model.min_y + 3) * TILE + PAD * 2;
@@ -137,6 +137,7 @@ function buildPreview(model) {
     const cy = ry + (boxH * TILE) / 2;
 
     const g = svgEl("g", { class: "ent", "data-nets": nets.join(",") });
+    g.dataset.idx = i;
     g.append(svgEl("rect", {
       class: "ent-box",
       x: rx + 1, y: ry + 1, width: boxW * TILE - 2, height: boxH * TILE - 2,
@@ -149,18 +150,15 @@ function buildPreview(model) {
     letter.textContent = ent.letter;
     g.append(letter);
 
-    // Combinator facing marker (mirrors the ASCII glyphs > < ^ V).
+    // Combinator facing: a small triangle ("angle in the shape") pointing the
+    // way the combinator faces — inside the box, near the facing edge.
     if (ent.kind === "combinator") {
-      let marker, mx, my;
-      if (ent.dir === 4) { marker = ">"; mx = rx + 1.75 * TILE; my = cy + 4; }
-      else if (ent.dir === 12) { marker = "<"; mx = rx + 0.25 * TILE; my = cy + 4; }
-      else if (ent.dir === 0) { marker = "^"; mx = cx; my = ry + 3; }
-      else { marker = "V"; mx = cx; my = ry + 2 * TILE + 7; }
-      const face = svgEl("text", {
-        class: "ent-facing", x: mx, y: my, "text-anchor": "middle", "font-size": 12,
-      });
-      face.textContent = marker;
-      g.append(face);
+      let pts;
+      if (ent.dir === 4) pts = `${rx + 2 * TILE - 3},${cy} ${rx + 2 * TILE - 11},${cy - 6} ${rx + 2 * TILE - 11},${cy + 6}`;
+      else if (ent.dir === 12) pts = `${rx + 3},${cy} ${rx + 11},${cy - 6} ${rx + 11},${cy + 6}`;
+      else if (ent.dir === 0) pts = `${cx},${ry + 3} ${cx - 6},${ry + 11} ${cx + 6},${ry + 11}`;
+      else pts = `${cx},${ry + 2 * TILE - 3} ${cx - 6},${ry + 2 * TILE - 11} ${cx + 6},${ry + 2 * TILE - 11}`;
+      g.append(svgEl("polygon", { class: "ent-facing", points: pts }));
     }
 
     for (const c of ["red", "green"]) for (const s of ["input", "output"]) {
@@ -186,6 +184,13 @@ function buildPreview(model) {
     highlight(svg, nets);
   });
   svg.addEventListener("mouseleave", () => clearHighlight(svg));
+  // Click an entity → select it and report its index for the config panel.
+  svg.addEventListener("click", (e) => {
+    const g = e.target.closest(".ent");
+    svg.querySelectorAll(".ent.selected").forEach((n) => n.classList.remove("selected"));
+    if (g) g.classList.add("selected");
+    if (onSelect) onSelect(g ? Number(g.dataset.idx) : null);
+  });
   return svg;
 }
 
@@ -206,7 +211,7 @@ function clearHighlight(svg) {
   svg.querySelectorAll(".port, .wire, .ent").forEach((node) => node.classList.remove("hl", "dim"));
 }
 
-function svgView(model) {
+function svgView(model, doc) {
   const wrap = el("div");
   const toolbar = el("div", { class: "preview-toolbar" });
   const showWires = el("label", { class: "row", style: "gap:6px;align-items:center" }, [
@@ -217,7 +222,17 @@ function svgView(model) {
   wrap.append(toolbar);
 
   const body = el("div");
-  const svg = buildPreview(model);
+  const detail = el("div", { class: "preview-detail" });
+  // Raw blueprint entities (with position/direction/control_behavior) — the
+  // render model entities are only {x,y,name,dir,letter,kind}.
+  const entities = _entities(doc);
+  const showDetail = (idx) => {
+    detail.innerHTML = "";
+    if (idx == null) detail.append(el("p", { class: "hint", text: t("preview.clickHint") }));
+    else detail.append(entityDetail(entities[idx], idx, true));
+  };
+  showDetail(null);
+  const svg = buildPreview(model, showDetail);
   body.append(svg);
 
   // legend
@@ -228,7 +243,7 @@ function svgView(model) {
       el("span", { text: `${net.char} ${net.color} · ${net.endpoints.length} pt` }),
     ]));
   });
-  wrap.append(body, legend);
+  wrap.append(body, detail, legend);
 
   $("#preview-wires", wrap).addEventListener("change", (e) => {
     body.querySelectorAll(".wire").forEach((w) => w.classList.toggle("hidden", !e.target.checked));
@@ -237,7 +252,7 @@ function svgView(model) {
 }
 
 // Preview tab: SVG and ASCII are alternative views of the same blueprint.
-function previewView(model, asciiPages) {
+function previewView(model, asciiPages, doc) {
   const wrap = el("div");
   const toggle = el("div", { class: "preview-mode" }, [
     el("button", { "data-mode": "svg", class: "active", text: t("preview.modePreview") }),
@@ -248,7 +263,7 @@ function previewView(model, asciiPages) {
     $$("[data-mode]", toggle).forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
     host.innerHTML = "";
     if (mode === "ascii") host.append(asciiView(asciiPages));
-    else host.append(svgView(model));
+    else host.append(svgView(model, doc));
   };
   toggle.addEventListener("click", (e) => {
     const b = e.target.closest("[data-mode]");
@@ -361,6 +376,32 @@ function describeCondition(ent) {
   return "—";
 }
 
+// One entity card, shared by the parts list and the preview click panel.
+// When includeConfig is true, the raw control_behavior is shown too.
+function entityDetail(ent, idx, includeConfig = false) {
+  const card = el("div", { class: "inspect-item" });
+  const head = el("div", { class: "inspect-item-head" }, [
+    el("span", { class: "inspect-item-badge", text: _ENTITY_LETTER[ent.name] || "." }),
+    el("span", { class: "inspect-item-name", text: `#${ent.entity_number ?? idx + 1} ${ent.name}` }),
+  ]);
+  const rows = el("div", { class: "inspect-item-rows" });
+  const kv = (label, value) => el("div", { class: "inspect-item-row" }, [
+    el("span", { class: "inspect-item-key", text: label }),
+    el("span", { class: "inspect-item-val", text: value }),
+  ]);
+  rows.append(
+    kv(t("inspect.position"), fmtPos(ent.position)),
+    kv(t("inspect.facing"), facingOf(ent)),
+    kv(t("inspect.condition"), describeCondition(ent)),
+  );
+  card.append(head, rows);
+  if (includeConfig && ent.control_behavior) {
+    card.append(el("div", { class: "inspect-item-config-title", text: t("preview.config") }));
+    card.append(el("pre", { class: "mono inspect-item-config", text: JSON.stringify(ent.control_behavior, null, 2) }));
+  }
+  return card;
+}
+
 function itemsView(doc) {
   const ents = _entities(doc);
   const wrap = el("div", { class: "inspect-items" });
@@ -368,25 +409,7 @@ function itemsView(doc) {
     wrap.append(el("p", { class: "hint", text: t("result.viewHint") }));
     return wrap;
   }
-  ents.forEach((ent, i) => {
-    const card = el("div", { class: "inspect-item" });
-    const head = el("div", { class: "inspect-item-head" }, [
-      el("span", { class: "inspect-item-badge", text: _ENTITY_LETTER[ent.name] || "." }),
-      el("span", { class: "inspect-item-name", text: `#${ent.entity_number ?? i + 1} ${ent.name}` }),
-    ]);
-    const rows = el("div", { class: "inspect-item-rows" });
-    const kv = (label, value) => el("div", { class: "inspect-item-row" }, [
-      el("span", { class: "inspect-item-key", text: label }),
-      el("span", { class: "inspect-item-val", text: value }),
-    ]);
-    rows.append(
-      kv(t("inspect.position"), fmtPos(ent.position)),
-      kv(t("inspect.facing"), facingOf(ent)),
-      kv(t("inspect.condition"), describeCondition(ent)),
-    );
-    card.append(head, rows);
-    wrap.append(card);
-  });
+  ents.forEach((ent, i) => wrap.append(entityDetail(ent, i)));
   return wrap;
 }
 
@@ -435,7 +458,7 @@ async function renderTab(key) {
 
   if (key === "preview") {
     content.innerHTML = "";
-    if (_state.model) content.append(previewView(_state.model, _state.asciiPages));
+    if (_state.model) content.append(previewView(_state.model, _state.asciiPages, _state.doc));
     else content.append(el("p", { class: "hint", text: t("result.viewHint") }));
     return;
   }
