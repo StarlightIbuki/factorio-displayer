@@ -1759,8 +1759,15 @@ async function renderHome() {
   // Diff against what's already on screen: only re-render cards whose record
   // actually changed (e.g. a running job's status/progress), instead of wiping
   // the whole list on every poll.
+  //
+  // The API returns jobs newest-first (sorted by created_at desc), so the DOM
+  // must stay in that order.  A card that already exists is replaced in place;
+  // a brand-new card is inserted *before* the first already-rendered card that
+  // follows it in the list — a plain append would drop the newest job to the
+  // bottom.
   const seen = new Set();
-  for (const job of jobs) {
+  for (let idx = 0; idx < jobs.length; idx++) {
+    const job = jobs[idx];
     seen.add(job.job_id);
     const sig = jobSig(job);
     if (state.jobCache.get(job.job_id) === sig) continue; // unchanged
@@ -1770,8 +1777,18 @@ async function renderHome() {
     const card = buildJobCard(job);
     const old = state.jobEls.get(job.job_id);
     state.jobEls.set(job.job_id, card);
-    if (old && old.parentNode) old.replaceWith(card);
-    else jobsList.append(card);
+    if (old && old.parentNode) {
+      old.replaceWith(card);
+    } else {
+      // New card: insert at the correct newest-first position.
+      let ref = null;
+      for (let k = idx + 1; k < jobs.length; k++) {
+        const laterEl = state.jobEls.get(jobs[k].job_id);
+        if (laterEl && laterEl.parentNode) { ref = laterEl; break; }
+      }
+      if (ref) jobsList.insertBefore(card, ref);
+      else jobsList.append(card);
+    }
   }
   // Remove cards for jobs that vanished from the (filtered) list.
   for (const [id, el] of state.jobEls) {
