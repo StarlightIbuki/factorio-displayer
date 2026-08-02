@@ -1412,84 +1412,41 @@ async function renderJobResult(host, job) {
     metaItem(t("result.instruments"), meta.instruments ? meta.instruments.join(", ") : null),
     metaItem(t("result.kind"), meta.kind),
   ]);
+  // Lazy result panel — the (large) blueprint text is NOT fetched on render;
+  // it is only loaded when the user views / copies / downloads it.
   const tabs = el("div", { class: "result-tabs" });
   const view = el("div");
-  let active = "blueprint";
-  let currentText = "";
-  let shareUrl = null;
-
   const tabFormat = (key) => (key === "inspect" ? "yaml" : key);
   const renderTab = async (key) => {
-    active = key;
-    const format = tabFormat(key);
     $$(".result-tabs button", tabs).forEach((b) => b.classList.toggle("active", b.dataset.fmt === key));
     try {
-      // Cache the result text so re-rendering the job list (e.g. during the 2s
-      // poll while other jobs run) doesn't re-fetch the large blueprint from
-      // the backend on every refresh.  The DOM is still rebuilt fresh each
-      // time, so tabs/buttons keep their handlers.
-      const cacheKey = `${id}:${format}`;
-      let text = resultTextCache.get(cacheKey);
-      if (text == null) {
-        const res = await api(`/api/v1/jobs/${id}/result?format=${format}`);
-        text = await res.text();
-        resultTextCache.set(cacheKey, text);
-      }
-      currentText = text;
+      const text = await getResultText(id, tabFormat(key));
       view.innerHTML = "";
-      if (key === "inspect") {
-        view.append(renderYamlTree(currentText));
-      } else if (key === "json") {
-        try { view.append(renderTreeView(JSON.parse(currentText))); }
-        catch (_) { view.append(el("textarea", { class: "mono bpview", readonly: "", text: currentText })); }
-      } else {
-        view.append(el("textarea", { class: "mono bpview", readonly: "", text: currentText }));
-      }
+      if (key === "inspect") view.append(renderYamlTree(text));
+      else if (key === "json") {
+        try { view.append(renderTreeView(JSON.parse(text))); }
+        catch (_) { view.append(el("textarea", { class: "mono bpview", readonly: "", text })); }
+      } else view.append(el("textarea", { class: "mono bpview", readonly: "", text }));
     } catch (e) {
       view.innerHTML = "";
-      view.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: format, msg: e.message }) }));
+      view.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: tabFormat(key), msg: e.message }) }));
     }
   };
-
   const tabDefs = [["blueprint", t("s3.formatBlueprint")], ["inspect", t("result.inspectItem")]];
   if (isDev()) tabDefs.push(["json", t("s3.formatJson")]);
   for (const [key, label] of tabDefs) {
-    tabs.append(el("button", { "data-fmt": key, class: key === active ? "active" : "", text: label, onclick: () => renderTab(key) }));
+    tabs.append(el("button", { "data-fmt": key, text: label, onclick: () => renderTab(key) }));
   }
-  host.append(metaStrip, tabs, view);
-
-  const doShare = async () => {
-    if (!currentText) return;
-    try {
-      if (!shareUrl) {
-        toast(t("t.pastebinUploading"));
-        shareUrl = await createShareUrl(id);
-      }
-      await copyText(shareUrl);
-      toast(`${t("result.pastebin")} ${shareUrl}`);
-    } catch (e) {
-      toast(t("t.pastebinFail", { msg: e.message }), "error");
-    }
-  };
-  const doFBE = async () => {
-    try {
-      if (!shareUrl) {
-        toast(t("t.pastebinUploading"));
-        shareUrl = await createShareUrl(id);
-      }
-      // FBE's naive `?source=` parser splits on '=' and never URL-decodes, so
-      // the share URL must be passed RAW (it only contains URL-safe chars).
-      window.open(`https://fbe.teoxoy.com/?source=${shareUrl}`, "_blank", "noopener");
-    } catch (e) {
-      toast(t("t.fbeFail", { msg: e.message }), "error");
-    }
-  };
-  host.append(el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
-    el("button", { class: "primary", text: t("result.copy"), onclick: () => currentText && copyText(currentText) }),
-    el("button", { text: t("result.download"), onclick: () => currentText && downloadText(currentText, `${job.name || "result"}.${FORMAT_EXT[tabFormat(active)] || "txt"}`) }),
-    el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: doShare }),
-    el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: doFBE }),
-  ]));
+  view.append(el("p", { class: "hint", text: t("result.viewHint") }));
+  host.append(metaStrip, tabs,
+    el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
+      el("button", { class: "primary", text: t("result.view"), title: t("result.viewTitle"), onclick: () => renderTab("blueprint") }),
+      el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
+      el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, job.name) }),
+      el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: () => shareJob(id) }),
+      el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: () => openFBE(id) }),
+    ]),
+    view);
 
   try {
     const res = await api(`/api/v1/jobs/${id}/artifacts`);
@@ -1508,8 +1465,6 @@ async function renderJobResult(host, job) {
       host.append(list);
     }
   } catch (_) { /* non-fatal */ }
-
-  await renderTab(active);
 }
 
 // ── temporary share link (Pastebin / FBE source) ──────────────────────
@@ -1520,6 +1475,50 @@ async function createShareUrl(jobId) {
   const data = await res.json();
   const base = await currentApiBase();
   return (base || location.origin) + data.url;
+}
+
+// Shared result helpers — the (large) blueprint text is only fetched when the
+// user actually views / copies / downloads it, never when the job list renders.
+async function getResultText(jobId, format = "blueprint") {
+  const cacheKey = `${jobId}:${format}`;
+  let text = resultTextCache.get(cacheKey);
+  if (text == null) {
+    const res = await api(`/api/v1/jobs/${jobId}/result?format=${format}`);
+    text = await res.text();
+    resultTextCache.set(cacheKey, text);
+  }
+  return text;
+}
+
+async function copyJobResult(jobId) {
+  try { await copyText(await getResultText(jobId, "blueprint")); }
+  catch (e) { toast(e.message, "error"); }
+}
+
+async function downloadJobResult(jobId, name) {
+  try {
+    const text = await getResultText(jobId, "blueprint");
+    downloadText(text, `${name || "result"}.txt`);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function shareJob(jobId) {
+  try {
+    toast(t("t.pastebinUploading"));
+    const url = await createShareUrl(jobId);
+    await copyText(url);
+    toast(`${t("result.pastebin")} ${url}`);
+  } catch (e) { toast(t("t.pastebinFail", { msg: e.message }), "error"); }
+}
+
+async function openFBE(jobId) {
+  try {
+    toast(t("t.pastebinUploading"));
+    const url = await createShareUrl(jobId);
+    // FBE's naive `?source=` parser splits on '=' and never URL-decodes, so
+    // the share URL must be passed RAW (it only contains URL-safe chars).
+    window.open(`https://fbe.teoxoy.com/?source=${url}`, "_blank", "noopener");
+  } catch (e) { toast(t("t.fbeFail", { msg: e.message }), "error"); }
 }
 
 // ── structured viewers ────────────────────────────────────────────────
@@ -1694,10 +1693,8 @@ async function renderHome() {
 }
 
 async function copyJobBlueprint(id) {
-  try {
-    const res = await api(`/api/v1/jobs/${id}/result?format=blueprint`);
-    await copyText(await res.text());
-  } catch (e) { toast(e.message, "error"); }
+  try { await copyText(await getResultText(id, "blueprint")); }
+  catch (e) { toast(e.message, "error"); }
 }
 
 // Preview the locally cached (compressed) media used for this job.
@@ -1766,6 +1763,8 @@ function buildJobCard(job) {
   actions.append(el("button", { text: t("jobs.previewMedia"), onclick: (ev) => { ev.stopPropagation(); toggleMediaPreview(job.job_id); } }));
   if (job.status === "succeeded") {
     actions.append(el("button", { text: t("jobs.copyBlueprint"), onclick: (ev) => { ev.stopPropagation(); copyJobBlueprint(job.job_id); } }));
+    actions.append(el("button", { text: t("result.pastebin"), title: "Create a temporary public link", onclick: (ev) => { ev.stopPropagation(); shareJob(job.job_id); } }));
+    actions.append(el("button", { text: t("result.fbe"), title: "Open in the Factorio Blueprint Editor", onclick: (ev) => { ev.stopPropagation(); openFBE(job.job_id); } }));
   }
   if (["queued", "running"].includes(job.status)) {
     actions.append(el("button", { class: "danger", text: t("jobs.cancel"), onclick: (ev) => { ev.stopPropagation(); cancelJob(job.job_id); } }));

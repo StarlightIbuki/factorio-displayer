@@ -181,6 +181,9 @@ const DICT = {
     // result panel
     "result.copy": "Copy",
     "result.download": "Download",
+    "result.view": "View",
+    "result.viewTitle": "Load and show the blueprint string",
+    "result.viewHint": "The blueprint is not loaded until you view or export it.",
     "result.pastebin": "Share link ↗",
     "result.fbe": "Open in FBE ↗",
     "result.inspectItem": "Inspect item",
@@ -399,6 +402,9 @@ const DICT = {
     // result panel
     "result.copy": "复制",
     "result.download": "下载",
+    "result.view": "查看",
+    "result.viewTitle": "加载并显示蓝图字符串",
+    "result.viewHint": "蓝图不会自动加载，点击查看或导出后才会获取。",
     "result.pastebin": "分享链接 ↗",
     "result.fbe": "在 FBE 中打开 ↗",
     "result.inspectItem": "检查项",
