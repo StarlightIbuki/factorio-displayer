@@ -75,6 +75,8 @@ html, body {
 .topbar-right select { width: auto; min-width: 0; }
 button.link { background: none; border: none; color: var(--muted); padding: 4px 8px; cursor: pointer; font-size: 13px; white-space: nowrap; }
 button.link:hover { color: var(--amber); }
+.auth-user { cursor: pointer; color: var(--green); font-size: 13px; white-space: nowrap; padding: 4px 8px; }
+.auth-user:hover { color: var(--amber); }
 button.big { font-size: 16px; padding: 12px 26px; border-radius: 6px; }
 .empty { text-align: center; padding: 90px 20px; }
 .empty h2 { font-size: 26px; margin-bottom: 10px; }

@@ -1261,6 +1261,25 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         help="Regex of allowed CORS origins (replaces the default "
              "https://[a-z0-9-]+\\.github\\.io).",
     )
+    server_parser.add_argument(
+        "--github-client-id", type=str, default=None,
+        help="GitHub OAuth App client id (env GITHUB_OAUTH_CLIENT_ID).",
+    )
+    server_parser.add_argument(
+        "--github-client-secret", type=str, default=None,
+        help="GitHub OAuth App client secret (env GITHUB_OAUTH_CLIENT_SECRET). "
+             "Stored server-side only.",
+    )
+    server_parser.add_argument(
+        "--github-redirect-uri", type=str, default=None,
+        help="OAuth callback URL, e.g. https://factorio.qvq.moe:60012/auth/github/callback "
+             "(env GITHUB_OAUTH_REDIRECT_URI).",
+    )
+    server_parser.add_argument(
+        "--frontend-url", type=str, default=None,
+        help="Where to redirect back after OAuth — the SPA origin, e.g. "
+             "https://StarlightIbuki.github.io/factorio-displayer/ (env FRONTEND_URL).",
+    )
 
     args = parser.parse_args()
 
@@ -1422,6 +1441,19 @@ def _handle_server(args) -> None:
         base_url=base_url,
         cors_allow_origins=cors_origins or Settings.cors_allow_origins,
         cors_allow_origin_regex=cors_regex or Settings.cors_allow_origin_regex,
+        # GitHub OAuth — CLI wins, then env vars.
+        github_oauth_client_id=args.github_client_id
+        or os.environ.get("GITHUB_OAUTH_CLIENT_ID", "")
+        or Settings.github_oauth_client_id,
+        github_oauth_client_secret=args.github_client_secret
+        or os.environ.get("GITHUB_OAUTH_CLIENT_SECRET", "")
+        or Settings.github_oauth_client_secret,
+        github_oauth_redirect_uri=args.github_redirect_uri
+        or os.environ.get("GITHUB_OAUTH_REDIRECT_URI", "")
+        or Settings.github_oauth_redirect_uri,
+        frontend_url=args.frontend_url
+        or os.environ.get("FRONTEND_URL", "")
+        or Settings.frontend_url,
     )
     serve(settings)
 

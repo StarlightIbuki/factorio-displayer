@@ -24,12 +24,20 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from .. import cli as _cli
 from .compression import CompressionMiddleware
+from .github_auth import (
+    GitHubAuthError,
+    build_authorize_url,
+    exchange_code,
+    fetch_user,
+    is_configured,
+    user_login,
+)
 from .jobs import JobRunner
 from .principal import get_principal
 from .schemas import (
@@ -48,6 +56,7 @@ from .schemas import (
 )
 from .settings import Settings
 from .store import Store
+from .tokens import sign
 
 _POWER_TYPES = ["small", "medium", "substation", "none"]
 _RAIL_MODES = ["piano", "all", "auto[:threshold]", "comma-separated"]
@@ -131,7 +140,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rail_modes=_RAIL_MODES,
             result_formats=_RESULT_FORMATS,
             power_types=_POWER_TYPES,
+            auth={"github": _github_capabilities(settings)},
         )
+
+    # ── GitHub OAuth (login with GitHub) ──────────────────────────────
+    @app.get("/auth/github/login", tags=["auth"])
+    def auth_github_login(state: str = Query("")) -> RedirectResponse:
+        if not is_configured(settings):
+            raise HTTPException(
+                status_code=503,
+                detail=_err("oauth_not_configured", "GitHub OAuth is not configured on this server."),
+            )
+        return RedirectResponse(build_authorize_url(settings, state))
+
+    @app.get("/auth/github/callback", tags=["auth"])
+    async def auth_github_callback(
+        code: str | None = Query(None),
+        state: str = Query(""),
+        error: str | None = Query(None),
+    ) -> RedirectResponse:
+        if not is_configured(settings):
+            raise HTTPException(
+                status_code=503,
+                detail=_err("oauth_not_configured", "GitHub OAuth is not configured on this server."),
+            )
+        # User denied / GitHub reported an error → send them back with it.
+        if error or not code:
+            return _oauth_redirect(settings, {"error": error or "access_denied", "state": state})
+        try:
+            access_token = await exchange_code(settings, code)
+            user = await fetch_user(access_token)
+        except GitHubAuthError as exc:
+            return _oauth_redirect(settings, {"error": f"oauth_failed: {exc}", "state": state})
+        login = user_login(user)
+        our_token = sign(
+            settings.token_key,
+            sub=f"github:{login}",
+            ttl_seconds=7 * 24 * 3600,
+            scope="*",
+        )
+        return _oauth_redirect(settings, {"fd_token": our_token, "state": state})
 
     # ── uploads ──────────────────────────────────────────────────────
     @app.post("/api/v1/uploads", response_model=list[UploadOut], status_code=201, tags=["uploads"])
@@ -370,6 +418,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def _err(code: str, message: str) -> dict:
     return {"error": {"code": code, "message": message}}
+
+
+def _github_capabilities(settings: Settings) -> dict | None:
+    """Public GitHub OAuth info for the frontend (never the client secret)."""
+    if not is_configured(settings):
+        return None
+    return {
+        "client_id": settings.github_oauth_client_id,
+        "redirect_uri": settings.github_oauth_redirect_uri,
+        "frontend_url": settings.frontend_url,
+    }
+
+
+def _oauth_redirect(settings: Settings, params: dict) -> RedirectResponse:
+    """Redirect the browser back to the SPA with OAuth params appended."""
+    from urllib.parse import urlencode  # pylint: disable=import-outside-toplevel
+
+    base = settings.frontend_url or "http://127.0.0.1:8000/"
+    sep = "&" if "?" in base else "?"
+    return RedirectResponse(base + sep + urlencode(params))
 
 
 def _job_out(rec: dict, principal: str) -> JobOut:

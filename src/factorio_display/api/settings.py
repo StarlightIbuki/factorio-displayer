@@ -15,6 +15,12 @@ class Settings:
     max_jobs_per_user: int = 2
     api_token: str | None = None
     token_key: str | None = None  # HMAC key for signed access tokens (--token-key)
+    # GitHub OAuth (login with GitHub).  client_secret stays server-side only.
+    github_oauth_client_id: str = ""
+    github_oauth_client_secret: str = ""
+    github_oauth_redirect_uri: str = ""  # e.g. https://factorio.qvq.moe:60012/auth/github/callback
+    github_oauth_scope: str = "read:user"
+    frontend_url: str = ""  # where to redirect back after OAuth (e.g. the GH Pages URL)
     compress_artifacts: bool = True
     compress_threshold: int = 262144  # 256 KiB
     compress_min_size: int = 1024

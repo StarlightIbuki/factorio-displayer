@@ -158,3 +158,4 @@ class CapabilitiesOut(BaseModel):
     rail_modes: list[str]
     result_formats: list[str]
     power_types: list[str]
+    auth: dict = Field(default_factory=dict)  # {"github": {...} | None}

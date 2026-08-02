@@ -14,6 +14,12 @@ const DICT = {
     "topbar.dev": "dev",
     "topbar.devTitle": "Developer mode — show raw JSON results and artifacts",
     "topbar.about": "About",
+    // auth (GitHub OAuth)
+    "auth.login": "Login with GitHub",
+    "auth.signedIn": "Signed in as {user}.",
+    "auth.signOutConfirm": "Sign out of factorio-display?",
+    "auth.stateMismatch": "Login state did not match. Please try again.",
+    "auth.oauthError": "GitHub login failed: {msg}",
     // home
     "home.title": "Turn media into a Factorio blueprint",
     "home.hint": "Upload a video, a sequence of images, or audio, and generate a blueprint you can paste straight into Factorio.",
@@ -218,6 +224,12 @@ const DICT = {
     "topbar.dev": "开发",
     "topbar.devTitle": "开发者模式——显示原始 JSON 结果与产物",
     "topbar.about": "关于",
+    // auth (GitHub OAuth)
+    "auth.login": "使用 GitHub 登录",
+    "auth.signedIn": "已登录为 {user}。",
+    "auth.signOutConfirm": "退出 factorio-display 登录？",
+    "auth.stateMismatch": "登录状态不匹配，请重试。",
+    "auth.oauthError": "GitHub 登录失败：{msg}",
     // home
     "home.title": "将媒体转换为 Factorio 蓝图",
     "home.hint": "上传视频、图片序列或音频，生成可直接粘贴到 Factorio 的蓝图。",

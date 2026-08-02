@@ -162,7 +162,95 @@ tokenInput.addEventListener("change", () => {
   state.token = tokenInput.value.trim();
   if (state.token) localStorage.setItem("fd_token", state.token);
   else localStorage.removeItem("fd_token");
+  renderAuth();
 });
+
+// ── GitHub login ──────────────────────────────────────────────────────
+let githubAuth = null; // { client_id, redirect_uri, frontend_url } | null
+const $login = $("#btn-login");
+const $authUser = $("#auth-user");
+
+// Persist an access token (used by the API client + the token input).
+function setToken(t) {
+  state.token = t;
+  if (t) localStorage.setItem("fd_token", t);
+  else localStorage.removeItem("fd_token");
+  if (tokenInput) tokenInput.value = t;
+}
+
+// Decode the current token's subject (e.g. "github:octocat" → "octocat").
+function currentUser() {
+  if (!state.token) return null;
+  try {
+    const b64 = state.token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
+    const sub = String(payload.sub || "");
+    return sub.startsWith("github:") ? sub.slice(7) : null;
+  } catch (_) { return null; }
+}
+
+function renderAuth() {
+  const user = currentUser();
+  if (user) {
+    if ($authUser) { $authUser.textContent = "👤 " + user; $authUser.classList.remove("hidden"); }
+    if ($login) $login.classList.add("hidden");
+  } else if (githubAuth) {
+    if ($authUser) $authUser.classList.add("hidden");
+    if ($login) $login.classList.remove("hidden");
+  } else {
+    if ($authUser) $authUser.classList.add("hidden");
+    if ($login) $login.classList.add("hidden");
+  }
+}
+
+async function initAuth() {
+  // OAuth return: the backend redirected here with ?fd_token=…&state=…
+  const params = new URLSearchParams(location.search);
+  const tok = params.get("fd_token");
+  const st = params.get("state");
+  if (tok) {
+    const expected = sessionStorage.getItem("fd_oauth_state");
+    if (st && expected && st === expected) {
+      setToken(tok);
+      toast(t("auth.signedIn", { user: currentUser() || "" }));
+    } else if (params.get("error")) {
+      toast(t("auth.oauthError", { msg: params.get("error") }), "error");
+    } else {
+      toast(t("auth.stateMismatch"), "error");
+    }
+    sessionStorage.removeItem("fd_oauth_state");
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+  // Does this backend support GitHub login?  (public info from /capabilities)
+  try {
+    const res = await api("/api/v1/capabilities");
+    githubAuth = (await res.json()).auth?.github || null;
+  } catch (_) { githubAuth = null; }
+  renderAuth();
+}
+
+if ($login) {
+  $login.addEventListener("click", () => {
+    if (!githubAuth) return;
+    const state = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
+    sessionStorage.setItem("fd_oauth_state", state);
+    const url = new URL("https://github.com/login/oauth/authorize");
+    url.searchParams.set("client_id", githubAuth.client_id);
+    url.searchParams.set("redirect_uri", githubAuth.redirect_uri);
+    url.searchParams.set("state", state);
+    url.searchParams.set("scope", "read:user");
+    location.href = url.toString();
+  });
+}
+if ($authUser) {
+  $authUser.addEventListener("click", () => {
+    if (confirm(t("auth.signOutConfirm"))) {
+      setToken("");
+      renderAuth();
+      renderHome();
+    }
+  });
+}
 
 // ── developer mode ────────────────────────────────────────────────────
 // Hides raw JSON (results/artifacts) from non-developers; removes TOML.
@@ -1585,5 +1673,6 @@ if ($backendReset) {
 applyStaticI18n();
 renderFormatSelectOptions();
 showView("home");
+initAuth();
 
 
