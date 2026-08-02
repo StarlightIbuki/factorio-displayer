@@ -608,6 +608,7 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
     if own_blueprint:
         blueprint = Blueprint()
         blueprint.label = name
+        blueprint.icons = ["signal-0"]
 
     # ── Build all rails ────────────────────────────────────────────
     endpoints: list[_RailEndpoints] = []

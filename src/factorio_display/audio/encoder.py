@@ -344,6 +344,7 @@ def encode_audio_memory(
     if own_blueprint:
         blueprint = Blueprint()
         blueprint.label = f"Audio Memory: {output_name}"
+        blueprint.icons = ["signal-0"]
 
     # Each entry: (dc_id, page_idx, tick_start, conditions, outputs)
     PageEntry = tuple[str, int, int, list, list]
@@ -862,6 +863,7 @@ def _encode_midi(
     with _cl.redirect_stdout(_io.StringIO()):
         combined = Blueprint()
         combined.label = f"Audio: {path}"
+        combined.icons = ["signal-0"]
 
         # Build rails one at a time: player + memory per rail, side by side.
         # Memory sits directly above its player at the same X offset.

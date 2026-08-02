@@ -1806,6 +1806,9 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
     if bp is None:
         bp = Blueprint()
         bp.label = lb.label
+        # Factorio blueprints must carry at least one icon — FBE's schema
+        # requires the `icons` array, otherwise it rejects the blueprint.
+        bp.icons = ["signal-0"]
 
     # Pre-build the common circuit condition for speakers when skipping
     # validation (every speaker uses signal-no-entry = 0).

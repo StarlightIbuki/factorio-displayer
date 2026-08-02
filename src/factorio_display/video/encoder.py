@@ -885,6 +885,7 @@ def encode_frames(
         sys.stderr.write("No frames to encode.\n")
         bp = Blueprint()
         bp.label = f"Video Memory: {output_name}"
+        bp.icons = ["signal-0"]
         return bp
 
     # ==================================================================
@@ -1209,6 +1210,7 @@ def encode_frames_chunked(
         sys.stderr.write("No frames to encode.\n")
         bp = Blueprint()
         bp.label = f"Video Memory: {output_name}"
+        bp.icons = ["signal-0"]
         return {"full": bp, "chunks": []}
 
     # ── Determine signal pool for mapping ─────────────────────────────
