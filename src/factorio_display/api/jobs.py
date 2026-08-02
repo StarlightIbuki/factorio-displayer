@@ -18,7 +18,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .settings import Settings
+from .settings import ANONYMOUS, Settings
 from .store import Store
 
 _VALID_BUILDER_TYPES = {"display", "audio-decoder", "logical"}
@@ -52,21 +52,59 @@ class JobRunner:
                     rec["progress"] = {"phase": "failed"}
                     self.store.save_job(owner, rec["job_id"], rec)
 
-    def _active_count(self, owner: str) -> int:
+    def active_counts(self, owner: str) -> tuple[int, int]:
+        """Return ``(running, queued)`` job counts for *owner*."""
+        running = 0
+        queued = 0
+        for r in self.store.list_jobs(owner):
+            status = r.get("status")
+            if status == "running":
+                running += 1
+            elif status == "queued":
+                queued += 1
+        return running, queued
+
+    def recent_submissions(self, owner: str, window_seconds: float = 3600.0) -> int:
+        """Number of jobs *owner* has created within the last *window_seconds*."""
+        cutoff = time.time() - window_seconds
         return sum(
-            1 for r in self.store.list_jobs(owner) if r.get("status") in ("queued", "running")
+            1
+            for r in self.store.list_jobs(owner)
+            if (r.get("created_at") or 0) >= cutoff
         )
 
     def can_submit(self, owner: str) -> bool:
-        return self._active_count(owner) < self.settings.max_jobs_per_user
+        running, queued = self.active_counts(owner)
+        # The shared anonymous bucket is rate-limited separately: at most one
+        # job processing, a small queue, and a rolling hourly cap, so a flood
+        # of anonymous callers can't monopolize the server.
+        if owner == ANONYMOUS:
+            if self.recent_submissions(owner) >= self.settings.anonymous_max_per_hour:
+                return False
+            return (
+                running < self.settings.anonymous_max_processing
+                and queued < self.settings.anonymous_max_queued
+            )
+        return (running + queued) < self.settings.max_jobs_per_user
+
+    def _limit_message(self, owner: str) -> str:
+        if owner == ANONYMOUS:
+            return (
+                "Too many anonymous jobs (max "
+                f"{self.settings.anonymous_max_processing} processing, "
+                f"{self.settings.anonymous_max_queued} queued and "
+                f"{self.settings.anonymous_max_per_hour} per hour). "
+                "Wait for one to finish or cancel it."
+            )
+        return (
+            f"Too many active jobs for this caller (limit {self.settings.max_jobs_per_user}). "
+            "Wait for one to finish or cancel it."
+        )
 
     def submit(self, owner: str, spec: dict) -> str:
         """Create a job from *spec* and enqueue it. Returns the job id."""
         if not self.can_submit(owner):
-            raise RuntimeError(
-                f"Too many active jobs for this caller (limit {self.settings.max_jobs_per_user}). "
-                "Wait for one to finish or cancel it."
-            )
+            raise RuntimeError(self._limit_message(owner))
         job_id = "j_" + uuid.uuid4().hex[:12]
         record = {
             "job_id": job_id,

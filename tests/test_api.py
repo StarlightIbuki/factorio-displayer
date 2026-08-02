@@ -502,3 +502,100 @@ def test_encode_job_with_relative_data_dir(tmp_path, monkeypatch) -> None:
                 break
             time.sleep(0.5)
         assert status == "succeeded", c.get(f"/api/v1/jobs/{job_id}").json().get("error")
+
+
+def _seed_job(store: Store, principal: str, job_id: str, status: str, created_at: float) -> None:
+    store.save_job(principal, job_id, {
+        "job_id": job_id,
+        "owner": principal,
+        "type": "encode",
+        "name": "x",
+        "status": status,
+        "progress": {"phase": status},
+        "created_at": created_at,
+        "started_at": created_at,
+        "finished_at": created_at,
+        "error": None,
+        "result": None,
+        "inputs": [],
+        "callback_url": None,
+        "config": {},
+    })
+
+
+def test_anonymous_rate_limit_processing_and_queued(tmp_path) -> None:
+    """The anonymous bucket allows at most 1 processing and 5 queued jobs."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        max_workers=1,
+        max_jobs_per_user=100,          # non-anonymous callers would be fine
+        anonymous_max_processing=1,
+        anonymous_max_queued=2,         # 1 running + 2 queued → next is rejected
+        anonymous_max_per_hour=100,
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        now = time.time()
+        for i, status in enumerate(["running", "queued", "queued"]):
+            _seed_job(app.state.store, "anonymous", f"j_{i}", status, now)
+        r = c.post("/api/v1/jobs", json={"type": "encode", "inputs": [], "options": {}})
+        assert r.status_code == 429
+        assert r.json()["detail"]["error"]["code"] == "rate_limited"
+
+
+def test_anonymous_rate_limit_per_hour(tmp_path) -> None:
+    """The anonymous bucket also caps submissions at 20 (here: 3) per hour."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        max_workers=1,
+        max_jobs_per_user=100,
+        anonymous_max_processing=5,     # active-count limits won't trigger
+        anonymous_max_queued=50,
+        anonymous_max_per_hour=3,
+    )
+    app = create_app(settings)
+    with TestClient(app) as c:
+        now = time.time()
+        for i in range(3):  # 3 recent jobs (succeeded) → hourly cap reached
+            _seed_job(app.state.store, "anonymous", f"j_{i}", "succeeded", now - i)
+        r = c.post("/api/v1/jobs", json={"type": "encode", "inputs": [], "options": {}})
+        assert r.status_code == 429
+
+        # Old jobs (outside the 1h window) don't count against the hourly cap.
+        for i in range(3, 6):
+            _seed_job(app.state.store, "anonymous", f"j_old_{i}", "succeeded", now - 7200)
+        # But we still need a free active slot to reach the hourly check.
+        app.state.store.delete_job("anonymous", "j_0")
+        app.state.store.delete_job("anonymous", "j_1")
+        app.state.store.delete_job("anonymous", "j_2")
+        r = c.post("/api/v1/jobs", json={"type": "encode", "inputs": [], "options": {}})
+        assert r.status_code == 202
+
+
+def test_anonymous_limits_do_not_apply_to_token_users(tmp_path) -> None:
+    """Rate limits for the anonymous bucket don't leak to signed-in users."""
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        max_workers=1,
+        max_jobs_per_user=1,            # signed-in users capped at 1 active job
+        token_key="tok",
+        anonymous_max_processing=1,
+        anonymous_max_queued=1,
+        anonymous_max_per_hour=1,
+    )
+    app = create_app(settings)
+    from factorio_display.api.tokens import sign
+    with TestClient(app) as c:
+        token = sign("tok", "alice")
+        now = time.time()
+        # Fill the anonymous bucket to its limits.
+        for i, status in enumerate(["running", "queued"]):
+            _seed_job(app.state.store, "anonymous", f"j_{i}", status, now)
+        _seed_job(app.state.store, "anonymous", "j_hour", "succeeded", now)
+        # A signed-in user with a free slot can still submit.
+        r = c.post(
+            "/api/v1/jobs",
+            json={"type": "encode", "inputs": [], "options": {}},
+            headers={"X-API-Token": token},
+        )
+        assert r.status_code == 202

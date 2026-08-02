@@ -24,6 +24,14 @@
     </div>
   </header>
 
+  <!-- Shown while the user is not signed in: anonymous uploads/blueprints are
+       stored in the shared public space. -->
+  <div id="anon-warning" class="anon-warning hidden" role="note"
+       data-i18n="auth.anonWarning">
+    ⚠️ You are not signed in — your uploaded media and generated blueprints are
+    public and may be visible to other users. Sign in to keep them private.
+  </div>
+
   <main>
     <!-- ═══════════ Home ═══════════ -->
     <section id="view-home">
@@ -385,6 +393,7 @@
         <button id="login-modal-close" class="link">✕</button>
       </div>
       <p class="hint" data-i18n="auth.loginHint">Sign in with GitHub to create and manage jobs.</p>
+      <p class="hint warning" data-i18n="auth.anonWarningModal">While signed out, your uploads and blueprints are public.</p>
       <div class="row" style="gap:8px;margin-top:12px">
         <button id="login-modal-btn" class="primary big" data-i18n="auth.login">Login with GitHub</button>
         <button id="login-modal-dismiss" data-i18n="auth.cancel">Cancel</button>

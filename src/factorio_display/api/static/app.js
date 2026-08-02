@@ -75,6 +75,7 @@ function isSoundKind(k) { return k === "audio" || k === "midi"; }
 // ── API client ─────────────────────────────────────────────────────────
 const state = {
   token: localStorage.getItem("fd_token") || "",
+  anonToken: "",            // server-signed default token for anonymous users (not persisted)
   clips: [],        // [{ id, file, name, size, kind, edit, cacheStatus }]
   editorClipId: null,
   running: new Set(),
@@ -96,7 +97,11 @@ const resultTextCache = new Map();
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (state.token) headers["X-API-Token"] = state.token;
+  // A signed-in user's token wins; otherwise fall back to the server's default
+  // anonymous token (if the backend provides one) so anonymous jobs are
+  // attributed to the shared "anonymous" bucket.
+  const token = state.token || state.anonToken;
+  if (token) headers["X-API-Token"] = token;
   if (options.body && !(options.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(options.body);
@@ -187,15 +192,34 @@ function setToken(t) {
   if (tokenInput) tokenInput.value = t;
 }
 
-// Decode the current token's subject (e.g. "github:octocat" → "octocat").
-function currentUser() {
+// Decode the current token's subject claim (e.g. "github:octocat" or "anonymous").
+function tokenSubject() {
   if (!state.token) return null;
   try {
     const b64 = state.token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     const payload = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
-    const sub = String(payload.sub || "");
-    return sub.startsWith("github:") ? sub.slice(7) : null;
+    return String(payload.sub || "");
   } catch (_) { return null; }
+}
+
+// Decode the current token's subject (e.g. "github:octocat" → "octocat").
+function currentUser() {
+  const sub = tokenSubject();
+  return sub && sub.startsWith("github:") ? sub.slice(7) : null;
+}
+
+// Is the caller effectively anonymous (the shared public bucket)?
+function isAnonymous() {
+  const sub = tokenSubject();
+  // No token → server treats the caller as anonymous.  A token with an empty
+  // or "anonymous" subject is the default anonymous token.
+  return !sub || sub === "" || sub === "anonymous";
+}
+
+// Show/hide the "not signed in → data is public" warning.
+function renderAnonWarning() {
+  const el = $("#anon-warning");
+  if (el) el.classList.toggle("hidden", !isAnonymous());
 }
 
 function renderAuth() {
@@ -210,6 +234,7 @@ function renderAuth() {
     if ($authUser) $authUser.classList.add("hidden");
     if ($login) $login.classList.add("hidden");
   }
+  renderAnonWarning();
 }
 
 async function initAuth() {
@@ -241,7 +266,12 @@ async function initAuth() {
   // Does this backend support GitHub login?  (public info from /capabilities)
   try {
     const res = await api("/api/v1/capabilities");
-    githubAuth = (await res.json()).auth?.github || null;
+    const authInfo = (await res.json()).auth || {};
+    githubAuth = authInfo.github || null;
+    // Default anonymous token (if the backend is token-gated): the client
+    // sends this when the user isn't signed in so anonymous jobs land in the
+    // shared "anonymous" bucket.  Never persisted (it can expire server-side).
+    state.anonToken = authInfo.anonymous_token || "";
   } catch (_) { githubAuth = null; }
   renderAuth();
 }
@@ -298,6 +328,9 @@ if ($authUser) {
 }
 
 // ── login prompt (shown when creating a job without being signed in) ──
+// When generate() opens the modal, dismissing it ("continue as guest") runs
+// this callback so the wizard proceeds as an anonymous user.
+let loginProceed = null;
 function openLoginModal() {
   const modal = $("#login-modal");
   if (!modal) return;
@@ -309,6 +342,9 @@ function openLoginModal() {
     hint.classList.toggle("hidden", !!githubAuth);
     hint.textContent = t("auth.noGithub");
   }
+  // "Continue as guest" when we were interrupted mid-generate, else "Cancel".
+  const dismiss = $("#login-modal-dismiss");
+  if (dismiss) dismiss.textContent = loginProceed ? t("auth.continueGuest") : t("auth.cancel");
 }
 function closeLoginModal() {
   const modal = $("#login-modal");
@@ -321,11 +357,20 @@ if ($loginModal) {
   });
 }
 const $loginModalBtn = $("#login-modal-btn");
-if ($loginModalBtn) $loginModalBtn.addEventListener("click", () => { closeLoginModal(); startOAuth(); });
+if ($loginModalBtn) $loginModalBtn.addEventListener("click", () => {
+  loginProceed = null;
+  closeLoginModal();
+  startOAuth();
+});
 const $loginModalClose = $("#login-modal-close");
 if ($loginModalClose) $loginModalClose.addEventListener("click", closeLoginModal);
 const $loginModalDismiss = $("#login-modal-dismiss");
-if ($loginModalDismiss) $loginModalDismiss.addEventListener("click", closeLoginModal);
+if ($loginModalDismiss) $loginModalDismiss.addEventListener("click", () => {
+  closeLoginModal();
+  const proceed = loginProceed;
+  loginProceed = null;
+  if (proceed) proceed();
+});
 
 // ── developer mode ────────────────────────────────────────────────────
 // Hides raw JSON (results/artifacts) from non-developers; removes TOML.
@@ -1246,13 +1291,18 @@ generateBtn.addEventListener("click", generate);
 
 async function generate() {
   if (!state.clips.length) return;
-  // Creating a job requires a token on the deployed backend — prompt for
-  // login (in a popup, so the wizard state is kept) instead of failing with a
-  // developer-facing error.
-  if (!state.token && githubAuth) {
+  // Not signed in → warn that uploads/blueprints are public; let the user log
+  // in (popup, wizard state preserved) or continue as an anonymous guest
+  // (subject to the server's anonymous rate limit of 1 processing / 5 queued).
+  if (isAnonymous() && githubAuth) {
+    loginProceed = () => { runGenerate(); };
     openLoginModal();
     return;
   }
+  await runGenerate();
+}
+
+async function runGenerate() {
   const quality = $("#compress-quality").value;
   const outputMode = $("#opt-output-mode").value;
   // Videos are always compressed to the display resolution (non-optional).

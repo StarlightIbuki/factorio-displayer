@@ -62,8 +62,8 @@ def test_verify_malformed_rejected() -> None:
 
 def test_token_key_requires_valid_token(tmp_path) -> None:
     with _client(tmp_path, token_key=KEY) as c:
-        # no token → 401 (auth-gated endpoint)
-        assert c.get("/api/v1/jobs").status_code == 401
+        # no token → anonymous is allowed by default (shared anonymous bucket)
+        assert c.get("/api/v1/jobs").status_code == 200
         # wrong token → 401
         assert c.get("/api/v1/jobs", headers={"X-API-Token": "bogus"}).status_code == 401
         # valid token → 200
@@ -73,6 +73,51 @@ def test_token_key_requires_valid_token(tmp_path) -> None:
         # expired token → 401
         expired = sign(KEY, "alice", ttl_seconds=1, iat=int(time.time()) - 100)
         assert c.get("/api/v1/jobs", headers={"X-API-Token": expired}).status_code == 401
+
+
+def test_default_anonymous_token_is_signed_and_shared(tmp_path) -> None:
+    """A missing token becomes the default anonymous token; sub="anonymous"
+    tokens land in the same shared bucket, and real users stay isolated."""
+    with _client(tmp_path, token_key=KEY) as c:
+        # No token → the anonymous bucket.
+        assert c.get("/api/v1/jobs").status_code == 200
+
+        # An explicit token signed with sub="anonymous" shares the same bucket:
+        # an upload created with it is visible to a no-token request, and vice
+        # versa.
+        anon = sign(KEY, "anonymous")
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+        up = c.post(
+            "/api/v1/uploads",
+            files={"files": ("a.png", png, "image/png")},
+            headers={"X-API-Token": anon},
+        )
+        assert up.status_code == 201
+        upload_id = up.json()[0]["upload_id"]
+
+        assert c.get(f"/api/v1/uploads/{upload_id}").status_code == 200
+        assert c.get(f"/api/v1/uploads/{upload_id}", headers={"X-API-Token": anon}).status_code == 200
+
+        # A real (non-anonymous) user must not see the anonymous upload.
+        alice = sign(KEY, "alice")
+        assert c.get(f"/api/v1/uploads/{upload_id}", headers={"X-API-Token": alice}).status_code == 404
+
+
+def test_capabilities_expose_anonymous_token_and_limits(tmp_path) -> None:
+    with _client(tmp_path, token_key=KEY) as c:
+        r = c.get("/api/v1/capabilities")
+        assert r.status_code == 200
+        auth = r.json()["auth"]
+        assert verify(KEY, auth["anonymous_token"])["sub"] == "anonymous"
+        assert auth["anonymous_limits"] == {
+            "max_processing": 1,
+            "max_queued": 5,
+            "max_per_hour": 20,
+        }
+    # Without a token key there is no anonymous token (nothing to sign with).
+    with _client(tmp_path) as c:
+        auth = c.get("/api/v1/capabilities").json()["auth"]
+        assert auth["anonymous_token"] is None
 
 
 def test_token_users_are_isolated(tmp_path) -> None:

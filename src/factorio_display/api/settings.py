@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+# Principal bucket used for unauthenticated callers (no auth configured) and
+# for callers that fall back to the default anonymous token.
+ANONYMOUS = "anonymous"
+
 
 @dataclass
 class Settings:
@@ -13,6 +17,12 @@ class Settings:
     data_dir: Path = Path("server_data")
     max_workers: int = 2
     max_jobs_per_user: int = 2
+    # Rate limits for the shared anonymous bucket ("anonymous").  This is the
+    # default token granted to callers without their own token, so all
+    # anonymous users share one processing slot and a small queue.
+    anonymous_max_processing: int = 1  # at most this many jobs running at once
+    anonymous_max_queued: int = 5      # at most this many jobs queued at once
+    anonymous_max_per_hour: int = 20   # at most this many jobs per rolling hour
     max_upload_bytes: int = 256 * 1024 * 1024  # reject uploads above 256 MiB (--max-upload-mb)
     api_token: str | None = None
     token_key: str | None = None  # HMAC key for signed access tokens (--token-key)

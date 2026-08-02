@@ -2,7 +2,7 @@
 
 **Status:** IMPLEMENTED (v3) — step wizard (Media → Edit → Generate); per-clip downsampled working caches; two-rail drag-edit timeline; live final-result preview; 1s job thumbnails; dev-mode result panel with structured YAML + Pastebin/FBE sharing. See the design sections below.
 **Depends on:** the API (implemented) — `src/factorio_display/api/server.py`, endpoints under `/api/v1`, static files mounted at `/`.
-**Auth:** not needed for v1. The app works anonymously (or with an optional API-token field when the server runs with `--api-token`). OIDC UI lands with the final auth phase.
+**Auth:** anonymous by default — requests without their own token are treated as the server's **default anonymous token** (shared `anonymous` bucket, rate-limited to 1 processing / 5 queued / 20 per hour). Optional API-token field when the server runs with `--api-token`, or **Login with GitHub** (OAuth) when the backend advertises `auth.github` (see `docs/deploy.md`). While signed out, the UI shows a persistent **"your uploads and blueprints are public"** warning and offers a "continue as guest" path at generation time.
 
 ---
 
@@ -56,7 +56,7 @@ Jobs may be queued when workers are busy; the job list shows `queued` (with a "w
 - **Result panel** (expand a succeeded job): tabs **blueprint** / **Inspect item** (structured, collapsible YAML tree viewer). **TOML is removed**, and **JSON (results + `.json` artifacts) is hidden unless Developer mode** is on (a `dev` toggle in the top bar, persisted in `localStorage`).
 - **1-click share**: **Share link ↗** calls `POST /api/v1/jobs/{id}/share`; the backend mints a short-lived public token (default 24 h, `share_ttl_hours`) and returns a link. The public `GET /api/v1/share/{token}` serves the raw blueprint with `Access-Control-Allow-Origin: *`, so any origin can fetch it — no third-party paste service or server key. **Open in FBE ↗** opens `https://fbe.teoxoy.com/?source=<share link>` (creating the link first if needed); FBE loads it through its own CORS proxy and renders it in the Factorio Blueprint Editor.
 
-## 2. App shell
+## 2c. App shell
 
 Top nav bar with 4 tabs; one screen visible at a time. State is in-memory JS; jobs/upload lists are fetched from the API.
 
@@ -176,4 +176,4 @@ video file
 
 **Resolved (from feedback):** full options form in the first cut · dark Factorio theme with custom CSS · Jobs tab + inline job card after submit · vanilla JS + Web Worker stack (recommendation above).
 
-**Remaining decision:** video compression defaults — **VP9 → WebM** as the default codec (recommended, no muxer dependency) vs **H.264 → MP4** (smaller files, needs a vendored `mp4-muxer`). Everything else is settled and I can start implementing on your go-ahead.
+**Remaining decision — resolved:** video compression defaults were settled as **VP9 → VP8 → WebM** (feature-detected, no muxer dependency), with **H.264 → MP4** kept as a possible future option (needs a vendored `mp4-muxer`). Implemented in `src/factorio_display/api/static/compress.js`.

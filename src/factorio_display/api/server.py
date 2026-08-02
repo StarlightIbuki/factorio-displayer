@@ -61,7 +61,7 @@ from .schemas import (
 )
 from .settings import Settings
 from .store import Store
-from .tokens import sign
+from .tokens import sign, sign_anonymous
 
 _POWER_TYPES = ["small", "medium", "substation", "none"]
 _RAIL_MODES = ["piano", "all", "auto[:threshold]", "comma-separated"]
@@ -104,6 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.runner = runner
     app.state.started_at = time.time()
     app.state.share_tokens: dict[str, dict] = {}  # token -> {job_id, principal, expires_at}
+    # Default token for anonymous users (only meaningful when --token-key is
+    # set).  Requests without their own token are treated as this identity, so
+    # all anonymous users share the "anonymous" bucket and its rate limits.
+    app.state.anonymous_token: str | None = (
+        sign_anonymous(settings.token_key) if settings.token_key else None
+    )
     app.add_middleware(CompressionMiddleware, minimum_size=settings.compress_min_size)
 
     # CORS — allow the GitHub Pages frontend (and localhost dev origins) to
@@ -146,7 +152,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rail_modes=_RAIL_MODES,
             result_formats=_RESULT_FORMATS,
             power_types=_POWER_TYPES,
-            auth={"github": _github_capabilities(settings)},
+            auth={
+                "github": _github_capabilities(settings),
+                # Default anonymous token — the frontend attaches this when the
+                # user isn't signed in, so anonymous jobs are attributed to the
+                # shared "anonymous" bucket (and its 1-processing/5-queued limit).
+                "anonymous_token": app.state.anonymous_token,
+                "anonymous_limits": {
+                    "max_processing": settings.anonymous_max_processing,
+                    "max_queued": settings.anonymous_max_queued,
+                    "max_per_hour": settings.anonymous_max_per_hour,
+                },
+            },
         )
 
     # ── GitHub OAuth (login with GitHub) ──────────────────────────────

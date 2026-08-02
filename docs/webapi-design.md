@@ -1,7 +1,7 @@
 # factorio-display Web API — Design Proposal
 
-**Status:** DRAFT — awaiting approval before implementation
-**Scope:** (1) CLI improvements that make a solid web API possible, (2) the REST API surface, (3) roadmap for a web frontend.
+**Status:** implemented — this file is the design record for the shipped API.
+**Scope:** (1) CLI improvements that make the web API possible, (2) the REST API surface, (3) the web frontend.  For the live system see `docs/deploy.md` (run & deploy) and `docs/webapp-design.md` (frontend).
 
 > **Implementation status (2026-08-02):** The initial API is **implemented and tested**.
 > - `src/factorio_display/service.py` — typed configs, results, in-process builders, `MediaConfig.to_argv()`.
@@ -9,9 +9,10 @@
 > - `src/factorio_display/__main__.py` — `python -m factorio_display` (used by the job runner).
 > - `src/factorio_display/api/` — `settings`, `principal` (per-caller isolation + `--api-token` gate), `store` (per-principal dirs, gzip artifacts), `jobs` (async runner, encode runs as an isolated subprocess, persisted `job.json`, webhooks), `schemas`, `compression` (gzip + brotli), `server` (FastAPI factory, lifespan shutdown).
 > - CLI `factorio-display server` subcommand; `pyproject.toml` `web` extra.
-> - Tests: `tests/test_service.py`, `tests/test_api.py` (23 tests incl. end-to-end encode job, principal isolation, compression); full suite 433 passed / 2 skipped.
+> - Tests: `tests/test_service.py`, `tests/test_api.py`; full suite green.
 > - Verified: server boots via `factorio-display server`, `/health` + `/capabilities` respond.
-> - **Not yet done:** webpage (step 4) and OIDC auth (step 5, decoupled & last).
+> - The web frontend (step 4) is implemented — see `docs/webapp-design.md`.
+> - Auth (step 5) shipped as **GitHub OAuth** (`/auth/github/login`, `/auth/github/callback`), not the Google OIDC sketched in §B.8 — see `docs/deploy.md` → "GitHub login (OAuth)".
 
 ---
 
@@ -168,7 +169,7 @@ class ProgressReporter(Protocol):
 - Add `factorio-display server` subcommand to launch the web service (`--host`, `--port`, `--data-dir`, `--max-workers`, `--max-jobs-per-user`, `--compress-artifacts`).
 - Add `--no-color`/plain progress (progress bars are noisy in server logs).
 - Add a `capabilities` JSON dump (`factorio-display capabilities`) listing supported instruments, rail modes, input extensions, formats — served by `GET /api/v1/capabilities`.
-- Optional `--api-token` (shared secret) middleware: a trivial interim gate so the core phase is not wide open. It carries **no identity** — the real auth layer (OIDC, final phase) replaces it.
+- Optional `--api-token` (shared secret) middleware: a trivial interim gate so the core phase is not wide open. It carries **no identity** — the real auth layer (GitHub OAuth) replaces it.
 
 ---
 
@@ -183,7 +184,7 @@ class ProgressReporter(Protocol):
 - **Progress via polling** — clients poll `GET /jobs/{id}`; no SSE/WebSocket.
 - **Concurrency is configurable** via CLI/server settings (global + per-user caps).
 - **Compression everywhere** — large text payloads (blueprint strings, TOML, YAML, draftsman JSON) are compressed at the HTTP layer and on disk; see B.7.
-- **Auth is decoupled and LAST** — the core API is built and works without it. The final phase (B.8) adds an **OAuth 2.0 / OpenID Connect (Google)** identity layer whose **sole goal is DoS protection** (rate limiting + identity gate). Per-user artifact permission is a byproduct, not a design driver.
+- **Auth is decoupled and shipped last** — the core API works without it (optional `--api-token` gate). The final phase added a **GitHub OAuth** identity layer (see `docs/deploy.md`); the Google-OIDC sketch in §B.8 was not built. Per-user artifact isolation is a byproduct of the per-principal store, not a design driver.
 
 ### B.1. Core resources
 
@@ -214,10 +215,8 @@ Artifact — an output file attached to a job (blueprint text, toml, yaml, chunk
 | `POST` | `/api/v1/blueprints/audio-decoder` | Sync `export-audio` | sync |
 | `POST` | `/api/v1/blueprints/logical` | Sync `export-logical` (TOML) | sync |
 | `POST` | `/api/v1/blueprints/decode` | Blueprint string → YAML | sync |
-| `GET` | `/api/v1/auth/login` | Redirect to Google OIDC authorize endpoint | — |
-| `GET` | `/api/v1/auth/callback` | OIDC callback → exchanges code → sets session | — |
-| `POST` | `/api/v1/auth/logout` | Destroy session | — |
-| `GET` | `/api/v1/auth/me` | Current authenticated user (for the web UI) | — |
+| `GET` | `/auth/github/login` | Redirect to GitHub OAuth authorize endpoint | — |
+| `GET` | `/auth/github/callback` | OAuth callback → exchanges code → issues a signed token | — |
 
 ### B.3. Detailed endpoint specs
 
@@ -359,7 +358,15 @@ queued → running → succeeded
 
 - A bounded **worker pool**; the cap is **configurable** via server settings:
   - `--max-workers` — global concurrency (default = CPU count),
-  - `--max-jobs-per-user` — per-user cap (default e.g. 2) to prevent one account from flooding the queue. In the unauthenticated core phase the "user" is the anonymous bucket; per-user caps become meaningful once auth lands in B.8.
+  - `--max-jobs-per-user` — per-user cap (default e.g. 2) to prevent one account from flooding the queue. In the unauthenticated core phase the "user" is the anonymous bucket; per-user caps become meaningful once auth lands (GitHub OAuth).
+- The **anonymous bucket** (`anonymous` — callers without their own token) is
+  rate-limited separately and strictly, so anonymous traffic can't monopolize
+  the server:
+  - `--anonymous-max-processing` — max concurrently-**running** jobs (default 1),
+  - `--anonymous-max-queued` — max **queued** jobs (default 5),
+  - `--anonymous-max-per-hour` — max jobs per rolling hour (default 20).
+  All three must pass before an anonymous submission is accepted (`429
+  rate_limited` otherwise).  Signed-in (token) users are unaffected.
 - Encode already uses `ProcessPoolExecutor` internally for chunked work; the job runner stays a single OS thread/process per job and lets the encoder manage its own parallelism. Because two encode jobs can both spawn process pools, the global cap should stay conservative on encode-heavy loads — but it is fully tunable.
 - State is persisted to `server_data/jobs/{job_id}/job.json` so the server can restart mid-flight and jobs are visible via `GET /jobs`.
 
@@ -398,67 +405,35 @@ Blueprint strings are already zlib-compressed inside Factorio's string format, b
 
 **Effect on the API contract:** none — compression is transparent. `Content-Encoding` and `Vary: Accept-Encoding` headers are set; clients that don't advertise gzip get plain bodies.
 
-### B.8. Authentication — final phase, decoupled (OAuth 2.0 / OpenID Connect — Google)
+## Part C — Web frontend (implemented)
 
-**Status: LAST step, fully decoupled.** The core API (uploads, jobs, sync builders, compression) is built and functional without this section. This phase is added at the end and only touches the middleware/dependency layer — no changes to the service layer.
+The single-page frontend sketched here is shipped: vanilla JS ES modules served
+by FastAPI static files, no build step.  See `docs/webapp-design.md` for the
+design and `src/factorio_display/api/static/` for the implementation.
 
-**Goal: prevent DoS.** Require an authenticated identity for uploads and job creation, using a standards-based IdP, plus rate limiting and per-user concurrency caps. **Per-user artifact permission is a byproduct** of having an identity — jobs/uploads are scoped to the session that created them — but it is not the design driver.
-
-- **Flow:** OIDC **Authorization Code + PKCE**, Google as the IdP.
-  - `GET /api/v1/auth/login` → builds Google authorize URL (`response_type=code`, `scope=openid email profile`, `code_challenge`) → 302.
-  - Google redirects to `GET /api/v1/auth/callback?code=...` → server exchanges code for tokens (verifies PKCE verifier + `id_token` signature against Google's JWKS) → creates a server session → sets `HttpOnly; Secure; SameSite=Lax` session cookie.
-- **Session:** opaque random session id stored server-side (`server_data/sessions/{sid}.json`, with expiry). No JWT-to-the-browser needed; the cookie is HttpOnly so the JS frontend never touches tokens. Frontend reads identity via `GET /api/v1/auth/me`.
-- **Enforcement:**
-  - `POST /uploads`, `POST /jobs`, `POST /jobs/{id}/cancel`, `DELETE /jobs/{id}`, `GET /jobs/{id}/result`, `GET /artifacts/{id}`, `POST /blueprints/*` → **require** a valid session.
-  - `GET /health`, `GET /capabilities`, `GET /jobs` (own jobs only), `GET /auth/*` → anonymous OK (limited).
-- **Per-user DoS controls:** `--max-jobs-per-user`, plus optional `--rate-limit` (requests/min per session) using `slowapi`/`limits`.
-- **Configuration (secrets via env, never committed):**
-  - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
-  - `FACTORIO_DISPLAY_BASE_URL` (e.g. `http://localhost:8000`) to build the callback URL,
-  - `SESSION_SECRET` (for signing/encrypting stored sessions if needed).
-- **Local development fallback:** `--dev-no-auth` starts the server in unauthenticated mode for local testing (warns loudly). Production runs require OIDC.
-
----
-
-## Part C — Web frontend (roadmap, detailed design after API approval)
-
-Single-page app (vanilla JS or a light framework) served by FastAPI static files, **not** a separate build step. Screens:
-
-1. **Dashboard** — list jobs, live status via polling, cancel/delete, link to results.
-2. **Encoder** — upload media, configure options (grouped form mirroring the CLI: video / MIDI+ADSR / audio / output), submit job, watch progress, copy blueprint / download file.
-3. **Builder** — quick forms for `export-display` / `export-audio` / `export-logical` / decode.
-4. **Blueprint viewer** — paste or load a result; preview decoded stats (entity count, ticks, dims); copy to clipboard.
-
-> The full page design (layout, component tree, interactions, wire-up points) will be drafted as a separate document and reviewed with you **before any code is written**.
-
----
-
-## Suggested implementation order (after approval)
-
-1. Add `service.py` + Pydantic configs; refactor `cli.py` to use them; add `--json`; add tests. (No behavior change.)
-2. Add `api/` package: schemas, jobs runner (worker pool + persisted state), FastAPI app, uploads, sync builders, **compression**, optional `--api-token` interim gate, polling progress.
-3. Add `factorio-display server` subcommand + `pyproject.toml` optional `web` extra (`fastapi`, `uvicorn`, `python-multipart`, `brotli`, `httpx`).
-4. Design webpage → review → implement.
-5. **LAST — auth (decoupled):** OIDC (Google) + rate limiting + per-user caps + artifact ownership. Add `authlib`/`httpx` + `PyJWT`/`python-jose`, `slowapi` to the `web` extra. No changes to steps 1–4 code paths.
+> Auth shipped as **GitHub OAuth** (`/auth/github/login`, `/auth/github/callback`)
+> instead of the Google OIDC originally proposed in this document — see
+> `docs/deploy.md` → "GitHub login (OAuth)".  There is no `/auth/logout` or
+> `/auth/me`; identity is advertised via `/api/v1/capabilities` (`auth.github`)
+> and the frontend stores its signed token client-side.
+>
+> Since 2026-08-02 there is also a **default anonymous token**: when the server
+> runs with `--token-key`, a request without its own token (or one whose `sub`
+> is `anonymous`) is treated as the shared `anonymous` bucket instead of being
+> rejected.  The token is signed server-side and advertised via
+> `/api/v1/capabilities` → `auth.anonymous_token` (plus `auth.anonymous_limits`)
+> so the frontend can attach it explicitly.  Anonymous users share one
+> processing slot, a 5-deep queue and a 20/hour cap (see §B.5), and the UI
+> warns that their uploads/blueprints are public.
 
 ## Approved decisions (2026-08-02)
 
 | Decision | Choice |
 |---|---|
 | Async model | Yes — background job + polling (`GET /jobs/{id}`), sync path for fast builders |
-| Auth | **Decoupled & LAST** — OAuth2/OIDC via Google added as the final phase; goal is **DoS protection** only (artifact permission is a byproduct). Core API works without it (optional `--api-token` interim gate). |
+| Auth | **Decoupled & shipped last** — implemented as **GitHub OAuth** (`/auth/github/*`), not the Google OIDC originally proposed; goal was DoS protection, with per-principal artifact isolation as a byproduct. Core API works without it (optional `--api-token` gate). |
 | Progress | **Polling only** (no SSE/WebSocket) |
 | Result formats | blueprint string + logical TOML + YAML + draftsman JSON |
 | Concurrency | **Configurable** (`--max-workers` global, `--max-jobs-per-user` per user) |
 | Webhooks | Yes — optional `callback_url` notified on completion |
 | Compression | **Transport (gzip/br) + storage (gz for large text artifacts)** — transparent to the API contract |
-
-## Open questions for you
-
-1. ~~Async model~~ *(approved)*
-2. ~~Auth~~ *(approved — OAuth2/OIDC via Google as the FINAL decoupled phase; DoS protection only, artifact permission is a byproduct; you'll provision `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` + callback URI when we get there)*
-3. ~~Progress streaming~~ *(approved — polling)*
-4. ~~Result formats~~ *(approved — all four)*
-5. ~~Concurrency~~ *(approved — configurable)*
-6. ~~Webhook~~ *(approved — included)*
-7. **Is there a deployment target for the server** (localhost only, LAN, or a public host with TLS via a reverse proxy)? This affects callback URL setup and whether we need HTTPS for the OAuth cookie.

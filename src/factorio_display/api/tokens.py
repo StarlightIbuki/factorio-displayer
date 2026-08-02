@@ -27,6 +27,22 @@ class TokenError(Exception):
     """Raised when a token is malformed, expired, or fails its signature check."""
 
 
+# Subject of the server-wide default token granted to callers that don't
+# present their own token.  All anonymous callers share this identity so they
+# can be rate-limited as one bucket.
+ANONYMOUS_SUB = "anonymous"
+
+
+def sign_anonymous(key: str, ttl_seconds: int = 30 * 24 * 3600) -> str:
+    """Sign the default anonymous access token for *key*.
+
+    This is the token served to anonymous users (see the API ``/capabilities``
+    endpoint).  It grants no more access than presenting no token at all — the
+    server resolves both to the shared ``anonymous`` bucket.
+    """
+    return sign(key, ANONYMOUS_SUB, ttl_seconds=ttl_seconds, scope="*")
+
+
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
