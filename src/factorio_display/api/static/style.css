@@ -396,6 +396,8 @@ pre.ascii {
 .inspect-item-config-title { font-size: 11px; color: var(--muted); margin-top: 6px; }
 /* numbered, browsable condition/output list */
 .pv-list { display: flex; flex-direction: column; gap: 4px; }
+.pv-section { font-size: 11px; color: var(--green); margin: 8px 0 3px; }
+.pv-section:first-child { margin-top: 0; }
 .pv-item { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--bg); }
 .pv-item-head {
   display: flex; align-items: center; gap: 8px; width: 100%;
@@ -403,7 +405,7 @@ pre.ascii {
   font-family: inherit; font-size: 12px; color: var(--text); text-align: left;
 }
 .pv-item-num { background: var(--bg-3); color: var(--amber); border-radius: 4px; padding: 0 5px; font-family: var(--mono); font-weight: 700; }
-.pv-item-title { color: var(--muted); }
+.pv-item-caret { margin-left: auto; color: var(--muted); font-size: 11px; }
 .pv-item-body { display: none; padding: 6px 8px; }
 .pv-item-body.open { display: flex; flex-direction: column; gap: 4px; }
 .pv-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
