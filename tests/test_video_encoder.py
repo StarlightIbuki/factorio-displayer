@@ -807,6 +807,72 @@ class TestSmokeEncodeFrames:
             f"got: {report['errors']}"
         )
 
+    def test_large_single_image_compose_wires_within_reach(self):
+        """Regression: a single-frame image whose data-bus chain ends are far
+        from the right-placed sources must still produce placeable wires.
+
+        Reported for a 23×30 image: the video-memory gate was bridged to a
+        lamp at the *far* chain-end (27 tiles) instead of the nearest one,
+        and the gate was not placed next to the timer (14-tile clock wire) —
+        both exceed Factorio's 9-tile circuit-wire reach and are silently
+        dropped in-game, disconnecting the display.  Every materialised wire
+        must be within reach.
+        """
+        from factorio_display.cli import (
+            _build_timer_for_memory,
+            _connect_data_ports,
+            _declare_memory_ports,
+        )
+        from factorio_display.composer import PortConnection, compose
+        from factorio_display.logical_blueprint import to_draftsman
+        from factorio_display.video.player_blueprint import build_display_logical
+
+        total_w, total_h = 23, 30  # same size as the reported broken job
+        frame = np.full((total_h, total_w, 3), (128, 128, 128), dtype=np.uint8)
+        video_bp = encode_frames(
+            iter([frame]),
+            output_name="Regress Wire Reach",
+            fps=60,
+            total_width=total_w,
+            total_height=total_h,
+            source_id="regress_wire_reach",
+            use_cache=False,
+        )
+
+        video_lb = from_draftsman(video_bp)
+        video_lb.label = "Video Memory: Regress Wire Reach"
+        _declare_memory_ports(video_lb)
+
+        display_lb = build_display_logical("Display", width=total_w, height=total_h)
+        timer_lb = _build_timer_for_memory(video_lb)
+
+        connections = [PortConnection("Timer", "clock", video_lb.label, "clock")]
+        _connect_data_ports(connections, video_lb, display_lb)
+
+        merged = compose(
+            components=[timer_lb, video_lb, display_lb],
+            connections=connections,
+            output_name="RegressWireReachCompose",
+            use_cache=False,
+        )
+        final_bp = to_draftsman(merged)
+        _check_bp(final_bp, label="regress_wire_reach")
+
+        # Every materialised wire must be within Factorio's 9-tile reach,
+        # measured between connection points (draftsman global positions).
+        too_long: list[str] = []
+        for w in final_bp.wires:
+            e1 = w[0]()
+            e2 = w[2]()
+            p1, p2 = e1.global_position, e2.global_position
+            d = math.dist((p1.x, p1.y), (p2.x, p2.y))
+            if d > 9.0:
+                too_long.append(f"{e1.id} ↔ {e2.id} ({d:.1f} tiles)")
+        assert not too_long, (
+            f"{len(too_long)} wire(s) exceed Factorio's 9-tile reach:\n"
+            + "\n".join(too_long[:10])
+        )
+
     def test_encode_triggers_vertical_chunk_split(self):
         """Large display (many pixels) triggers vertical chunk splitting."""
         # 28×70 = 1960 px, default pool ~780 signals → should split into ~3 chunks

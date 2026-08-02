@@ -36,6 +36,7 @@ Usage in the encoding pipeline
 from __future__ import annotations
 
 import itertools
+import math
 import tomllib
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -54,6 +55,13 @@ from .debug_source import (
 # ═══════════════════════════════════════════════════════════════════════
 # Data model
 # ═══════════════════════════════════════════════════════════════════════
+
+# Factorio's maximum circuit-wire reach, in Euclidean tiles between the two
+# entities' connection points.  Draftsman raises ``ConnectionDistanceWarning``
+# above this, and the game silently *drops* any wire longer than this when a
+# blueprint is placed — leaving the network disconnected.  Combinators and
+# lamps all expose ``circuit_wire_max_distance = 9``.
+MAX_CIRCUIT_WIRE_DISTANCE = 9.0
 
 _VALID_COLORS = {"red", "green", "copper"}
 _VALID_PORTS = {"input", "output"}
@@ -205,6 +213,13 @@ class LogicalBlueprint:
     _network_bounds_cache: dict[str, tuple[int, int, int, int]] = field(
         default_factory=dict, repr=False, compare=False,
     )
+    # True once a layout pass has assigned final positions to every entity
+    # (set by the composer's ``_layout_components``).  Distance-sensitive
+    # logic — like re-routing a pre-wired chain so an external endpoint joins
+    # it at a nearby position — must only run on final positions.  Before
+    # layout, entities may still hold their per-component internal positions,
+    # so a distance computed there is meaningless.
+    _positions_finalized: bool = field(default=False, repr=False, compare=False)
 
     # ── entity helpers ──────────────────────────────────────────────
 
@@ -354,12 +369,42 @@ class LogicalBlueprint:
                 bridge_a = _pick_bridge_endpoint(net_a.endpoints, degree_a, ep_a)
                 bridge_b = _pick_bridge_endpoint(net_b.endpoints, degree_b, ep_b)
                 if bridge_a is not None and bridge_b is not None:
-                    merged_pairs = pairs_a + pairs_b
-                    bridge_pair = (bridge_a, bridge_b)
-                    bridge_pair_rev = (bridge_b, bridge_a)
-                    if bridge_pair not in merged_pairs and bridge_pair_rev not in merged_pairs:
-                        merged_pairs.append(bridge_pair)
-                    net_a.prewired_pairs = merged_pairs
+                    rebuild_pairs: list[tuple[Endpoint, Endpoint]] | None = None
+                    if (
+                        self._positions_finalized
+                        and _wire_distance(bridge_a, bridge_b, self) > MAX_CIRCUIT_WIRE_DISTANCE
+                    ):
+                        # The naive bridge exceeds Factorio's circuit-wire
+                        # reach (9 tiles).  This happens when one side is a
+                        # pre-wired chain (e.g. the lamp display's data bus)
+                        # whose only spare degree-1 endpoints sit far from the
+                        # external source (e.g. the video-memory gate).  In
+                        # that case appending a bridge to a chain-end produces
+                        # a wire the game silently drops.  Rebuild the wiring
+                        # of the *combined* endpoint set so the external
+                        # endpoint joins the chain at a nearby position.
+                        candidate = _wire_horizontal_first(
+                            list(endpoints_a | endpoints_b), self,
+                            max_euclidean=MAX_CIRCUIT_WIRE_DISTANCE,
+                        )
+                        if _pairs_connect_all(candidate, endpoints_a | endpoints_b):
+                            # Only commit when the rebuild joins every endpoint
+                            # within the wire reach.  Otherwise the two networks
+                            # are genuinely too far apart in the final layout
+                            # (e.g. a multi-chunk display whose chunk gates sit
+                            # far from the timer); committing would split a
+                            # logically-contiguous network, so fall back to the
+                            # naive bridge (legacy behaviour) instead.
+                            rebuild_pairs = candidate
+                    if rebuild_pairs is not None:
+                        net_a.prewired_pairs = rebuild_pairs
+                    else:
+                        merged_pairs = pairs_a + pairs_b
+                        bridge_pair = (bridge_a, bridge_b)
+                        bridge_pair_rev = (bridge_b, bridge_a)
+                        if bridge_pair not in merged_pairs and bridge_pair_rev not in merged_pairs:
+                            merged_pairs.append(bridge_pair)
+                        net_a.prewired_pairs = merged_pairs
                 else:
                     # No degree headroom to add a safe bridge; fall back to
                     # generic materialisation for the merged network.
@@ -1550,6 +1595,41 @@ def _endpoint_position(ep: Endpoint, lb: LogicalBlueprint) -> tuple[int, int]:
     return (0, 0)
 
 
+def _entity_wire_point(ep: Endpoint, lb: LogicalBlueprint) -> tuple[float, float]:
+    """Return the physical connection point (x, y) of *ep*'s entity.
+
+    Factorio measures circuit-wire reach between the entities' connection
+    points, which sit roughly at the *centre* of each entity's footprint —
+    not at the tile position (the footprint's top-left corner).  This
+    matches how draftsman computes ``ConnectionDistanceWarning`` so our
+    distance checks agree with the game.
+
+    Combinators are 1x2 (north/south) or 2x1 (east/west); everything else
+    is 1x1.  Falls back to the tile position when the entity is missing or
+    unpositioned, and treats unknown directions as north-facing.
+    """
+    ent = lb.entities.get(ep.entity_id)
+    if ent is None or ent.position is None:
+        return _endpoint_position(ep, lb)
+    x, y = ent.position
+    if ent.type in ("arithmetic-combinator", "decider-combinator"):
+        if ent.direction in (2, 6):  # east/west → 2 wide × 1 tall
+            return (x + 1.0, y + 0.5)
+        return (x + 0.5, y + 1.0)  # north/south → 1 wide × 2 tall
+    return (x + 0.5, y + 0.5)  # 1x1 entities
+
+
+def _wire_distance(ep_a: Endpoint, ep_b: Endpoint, lb: LogicalBlueprint) -> float:
+    """Euclidean distance (in tiles) between two endpoints' connection points.
+
+    Uses :func:`_entity_wire_point` so the measurement matches what Factorio
+    actually enforces for circuit wires.
+    """
+    pa = _entity_wire_point(ep_a, lb)
+    pb = _entity_wire_point(ep_b, lb)
+    return math.dist(pa, pb)
+
+
 def _chebyshev(p1: tuple[int, int], p2: tuple[int, int]) -> int:
     """Chebyshev distance between two tile positions."""
     return max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
@@ -1569,9 +1649,43 @@ def _sort_endpoints_by_position(
     ))
 
 
+def _pairs_connect_all(
+    pairs: list[tuple[Endpoint, Endpoint]],
+    endpoints: set[Endpoint],
+) -> bool:
+    """Return True if *pairs* connect every endpoint in *endpoints* together.
+
+    Union-find over the pair list; a single root for all endpoints means the
+    wiring forms one connected component (a tree or denser graph).  This is
+    used to decide whether a re-built wiring is actually complete before we
+    commit to it — an incomplete rebuild would silently split a network.
+    """
+    if len(endpoints) <= 1:
+        return True
+    parent: dict[Endpoint, Endpoint] = {}
+
+    def find(x: Endpoint) -> Endpoint:
+        parent.setdefault(x, x)
+        while parent[x] is not x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: Endpoint, b: Endpoint) -> None:
+        ra, rb = find(a), find(b)
+        if ra is not rb:
+            parent[ra] = rb
+
+    for a, b in pairs:
+        union(a, b)
+    roots = {find(e) for e in endpoints}
+    return len(roots) == 1
+
+
 def _wire_horizontal_first(
     eps: list[Endpoint], lb: LogicalBlueprint,
     max_distance: int = 64,
+    max_euclidean: float | None = None,
 ) -> list[tuple[Endpoint, Endpoint]]:
     """Materialize a network into pairwise connections using horizontal-first
     chaining with rightmost bridge merging.
@@ -1586,11 +1700,17 @@ def _wire_horizontal_first(
         "Rightmost" means largest ``min(x_a, x_b)`` (both ends at the
         right edge); tie-break on shortest distance (keeps rows
         adjacent), then bottom‑most *y*.  Pairs exceeding
-        *max_distance* are never chosen.  This reproduces lamp‑matrix
+        *max_distance* (Chebyshev) — or, when *max_euclidean* is given,
+        pairs whose connection points are farther apart than that in
+        Euclidean tiles — are never chosen.  This reproduces lamp‑matrix
         wiring: rows chained left‑to‑right, rightmost column bridging
         adjacent rows in a chain.
     4.  Stop when all endpoints are in one subset, or when no pair of
-        subsets can be bridged within *max_distance* Chebyshev tiles.
+        subsets can be bridged within the distance limits.
+
+    *max_euclidean* mirrors Factorio's hard circuit-wire reach; set it to
+    :data:`MAX_CIRCUIT_WIRE_DISTANCE` when the result must be placeable
+    in-game (e.g. when rebuilding a merged network's pre-wiring).
 
     Returns a list of ``(ep_a, ep_b)`` pairs to wire.
     """
@@ -1679,6 +1799,11 @@ def _wire_horizontal_first(
                 d = _chebyshev(pi, pj)
                 if d > max_distance:
                     continue
+                if max_euclidean is not None:
+                    eid_i = sorted_eps[i]
+                    eid_j = sorted_eps[j]
+                    if _wire_distance(eid_i, eid_j, lb) > max_euclidean:
+                        continue
 
                 # Rightmost preference: the *lesser* x of the two
                 # endpoints must be as large as possible — this

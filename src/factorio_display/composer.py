@@ -31,6 +31,7 @@ from .logical_blueprint import (
     Endpoint,
     LogicalBlueprint,
     LogicalEntity,
+    MAX_CIRCUIT_WIRE_DISTANCE,
     Network,
     _endpoint_position,
     _chebyshev,
@@ -847,6 +848,18 @@ def _layout_components(
         dst_band = _band(dst_in, sink_prefix, _align_axis)
         if not src_band or not dst_band:
             continue
+        # Skip the alignment when the sink's input port is spread across more
+        # than the circuit-wire reach on the stacking axis.  A single source
+        # position cannot be within Factorio's 9-tile wire reach of every
+        # endpoint of a large band (e.g. a lamp display whose data bus covers
+        # the whole grid), so aligning to the band *centre* is meaningless and
+        # — worse — can shove the source far away from its *other* wiring
+        # partners (e.g. pushing the video-memory gate 14 tiles from the
+        # timer, producing a wire the game drops).  Localised ports (e.g. the
+        # audio player's page-data selectors at a fixed row) still align.
+        dst_span = max(dst_band) - min(dst_band)
+        if dst_span > MAX_CIRCUIT_WIRE_DISTANCE:
+            continue
         src_c = sum(src_band) / len(src_band)
         dst_c = sum(dst_band) / len(dst_band)
         shift = int(round(dst_c - src_c))
@@ -881,6 +894,10 @@ def _layout_components(
             else:
                 ent.position = (x + shift, y)
         aligned_boxes[src_p] = shifted_box
+
+    # Every entity now has its final position; downstream wiring may rely on
+    # distances computed from these positions.
+    merged._positions_finalized = True
 
 
 def compose(
