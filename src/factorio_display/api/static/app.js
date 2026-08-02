@@ -1417,20 +1417,18 @@ async function renderJobResult(host, job) {
     metaItem(t("result.instruments"), meta.instruments ? meta.instruments.join(", ") : null),
     metaItem(t("result.kind"), meta.kind),
   ]);
-  // Quick actions — the full inspection (string / parts list / interactive
-  // preview with ASCII mode) lives in the shared inspector modal.
-  const view = el("div");
-  view.append(el("p", { class: "hint", text: t("result.viewHint") }));
+  // Quick actions — the single "Inspect" button opens the shared inspector
+  // modal (string / parts list / interactive preview).  Opening it fetches
+  // the blueprint text when it isn't cached yet (getResultText), then the
+  // modal decodes and renders everything client-side.
   host.append(metaStrip,
     el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
-      el("button", { class: "primary", text: t("result.view"), title: t("result.viewTitle"), onclick: () => viewJobInline(id, view) }),
-      el("button", { text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
+      el("button", { class: "primary", text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
       el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
       el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, job.name) }),
       el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: () => shareJob(id) }),
       el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: () => openFBE(id) }),
-    ]),
-    view);
+    ]));
 
   try {
     const res = await api(`/api/v1/jobs/${id}/artifacts`);
@@ -1933,19 +1931,6 @@ function startPolling() {
 }
 function stopPolling() {
   if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; }
-}
-
-// Load a job's blueprint string inline (used by the result panel "View"
-// button).  The full inspection lives in the shared inspector modal.
-async function viewJobInline(id, view) {
-  try {
-    const text = await getResultText(id, "blueprint");
-    view.innerHTML = "";
-    view.append(el("textarea", { class: "mono bpview", readonly: "", text }));
-  } catch (e) {
-    view.innerHTML = "";
-    view.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: "blueprint", msg: e.message }) }));
-  }
 }
 
 // boot
