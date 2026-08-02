@@ -384,10 +384,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=_err("share_expired", "share link is invalid or expired"),
             )
         text = _materialize_result(store, runner, rec["principal"], rec["job_id"], job_rec, "blueprint")
-        # FBE's schema only allows {name,type} on signals — drop the Space Age
-        # `quality`/`id` fields so FBE can load the shared blueprint.  The real
-        # blueprint (with quality) is still served by the result endpoint.
-        text = _strip_blueprint_quality(text)
+        # Adapt the blueprint for FBE: drop the Space Age `quality`/`id` fields
+        # and remap signal names FBE's data doesn't know, so FBE can load it.  The
+        # real blueprint (with quality and original signals) is still served by
+        # the result endpoint.
+        text = _make_fbe_compatible(text)
         return Response(
             content=text,
             media_type=_CONTENT_TYPE["blueprint"],
@@ -546,14 +547,95 @@ def _ensure_blueprint_icons(text: str) -> str:
         return text
 
 
-def _strip_blueprint_quality(text: str) -> str:
-    """Remove ``quality``/``id`` from signal objects so FBE can load the blueprint.
+# Item names used by this project's signal pool (see integer2signal/mapping.py)
+# that FBE's bundled Factorio data (2.0.68, base game) does not include.  FBE's
+# ajv keywords (itemName/itemFluidSignalRecipeEntityName) check these against its
+# data and reject the whole blueprint as "modded" if any are present, so on the
+# share path we remap them to known items.
+_FBE_UNKNOWN_ITEMS = {
+    "agricultural-tower",
+    "artificial-jellynut-soil",
+    "artificial-yumako-soil",
+    "big-mining-drill",
+    "biochamber",
+    "biolab",
+    "captive-biter-spawner",
+    "cryogenic-plant",
+    "electromagnetic-plant",
+    "foundation",
+    "foundry",
+    "fusion-generator",
+    "fusion-reactor",
+    "heating-tower",
+    "ice-platform",
+    "lightning-collector",
+    "lightning-rod",
+    "overgrowth-jellynut-soil",
+    "overgrowth-yumako-soil",
+    "quality-module",
+    "quality-module-2",
+    "quality-module-3",
+    "rail-ramp",
+    "rail-support",
+    "recycler",
+    "stack-inserter",
+    "turbo-loader",
+    "turbo-splitter",
+    "turbo-transport-belt",
+    "turbo-underground-belt",
+}
 
-    FBE's blueprint schema defines signals as ``{name, type}`` with
-    ``additionalProperties: false``, so the Space Age ``quality`` field (used by
-    this project to multiplex signal channels) fails FBE's validation.  FBE is a
-    viewer — the authoritative blueprint with quality is still served by the
-    result endpoint.  Applied only to the public share link.
+# Known-safe fallback items (all present in FBE's 2.0.68 data) substituted for
+# the unknown ones.  Each unknown name maps to a distinct fallback so the
+# channels still look different in FBE.
+_FBE_FALLBACK_ITEMS = [
+    "wooden-chest",
+    "iron-chest",
+    "steel-chest",
+    "storage-tank",
+    "transport-belt",
+    "fast-transport-belt",
+    "express-transport-belt",
+    "underground-belt",
+    "fast-underground-belt",
+    "express-underground-belt",
+    "splitter",
+    "fast-splitter",
+    "express-splitter",
+    "burner-inserter",
+    "inserter",
+    "long-handed-inserter",
+    "fast-inserter",
+    "bulk-inserter",
+    "small-electric-pole",
+    "medium-electric-pole",
+    "big-electric-pole",
+    "substation",
+    "pipe",
+    "pipe-to-ground",
+    "pump",
+    "boiler",
+    "steam-engine",
+    "small-lamp",
+    "constant-combinator",
+    "arithmetic-combinator",
+]
+
+_FBE_ITEM_REMAP = {
+    name: _FBE_FALLBACK_ITEMS[i % len(_FBE_FALLBACK_ITEMS)]
+    for i, name in enumerate(sorted(_FBE_UNKNOWN_ITEMS))
+}
+
+
+def _make_fbe_compatible(text: str) -> str:
+    """Adapt a blueprint for FBE (Factorio 2.0.68, base game) so it can load it.
+
+    FBE's schema only allows ``{name, type}`` on signals (``additionalProperties:
+    false``), so we drop the Space Age ``quality``/``id`` fields; and any signal
+    name FBE's bundled data doesn't know is remapped to a known item, otherwise
+    FBE rejects the blueprint as "modded".  FBE is a viewer — the authoritative
+    blueprint (with quality and original signals) is still served by the result
+    endpoint.  Applied only to the public share link.
     """
     if not text or not text.startswith("0"):
         return text
@@ -568,6 +650,8 @@ def _strip_blueprint_quality(text: str) -> str:
             if "name" in node and "type" in node:
                 node.pop("quality", None)
                 node.pop("id", None)
+                if node.get("type") == "item" and node.get("name") in _FBE_ITEM_REMAP:
+                    node["name"] = _FBE_ITEM_REMAP[node["name"]]
             for v in node.values():
                 _clean(v)
         elif isinstance(node, list):

@@ -159,21 +159,30 @@ def test_ensure_blueprint_icons_injects_missing() -> None:
     assert _ensure_blueprint_icons(bpstr) == bpstr
 
 
-def test_strip_blueprint_quality_removes_signal_quality() -> None:
-    """The share path strips Space Age `quality` from signals (FBE rejects it)."""
-    from factorio_display.api.server import _strip_blueprint_quality
+def test_make_fbe_compatible_strips_quality_and_remaps_unknown_items() -> None:
+    """The share path strips `quality` and remaps item names FBE doesn't know."""
+    from factorio_display.api import server
+    from factorio_display.api.server import _make_fbe_compatible
 
     data = {"blueprint": {"item": "blueprint", "version": 1, "icons": [], "entities": [
         {"entity_number": 1, "name": "decider-combinator", "position": {"x": 0, "y": 0},
          "control_behavior": {"decider_conditions": {"outputs": [
              {"signal": {"type": "item", "name": "iron-chest", "quality": "uncommon"}},
+             {"signal": {"type": "item", "name": "turbo-transport-belt", "quality": "rare"}},
+             {"signal": {"type": "virtual", "name": "signal-0", "quality": "legendary"}},
          ]}}},
     ]}}
     bp = "0" + base64.b64encode(zlib.compress(json.dumps(data, separators=(",", ":")).encode())).decode()
-    out = json.loads(zlib.decompress(base64.b64decode(_strip_blueprint_quality(bp)[1:])).decode())
-    sig = out["blueprint"]["entities"][0]["control_behavior"]["decider_conditions"]["outputs"][0]["signal"]
-    assert "quality" not in sig
-    assert sig["name"] == "iron-chest"
+    out = json.loads(zlib.decompress(base64.b64decode(_make_fbe_compatible(bp)[1:])).decode())
+    outs = out["blueprint"]["entities"][0]["control_behavior"]["decider_conditions"]["outputs"]
+    sig_known, sig_unknown, sig_virtual = (o["signal"] for o in outs)
+    assert "quality" not in sig_known
+    assert "quality" not in sig_unknown
+    assert "quality" not in sig_virtual
+    assert sig_known["name"] == "iron-chest"
+    assert sig_unknown["name"] != "turbo-transport-belt"  # remapped to a known item
+    assert sig_unknown["name"] in server._FBE_FALLBACK_ITEMS
+    assert sig_virtual["name"] == "signal-0"  # virtual signals keep their name
 
 
 def test_cors_allows_github_pages_by_default(client: TestClient) -> None:
