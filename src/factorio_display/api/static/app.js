@@ -709,7 +709,11 @@ function addFiles(files) {
   $("#btn-next-media").disabled = state.clips.length === 0;
 }
 
-dropzone.addEventListener("click", () => fileInput.click());
+dropzone.addEventListener("click", (e) => {
+  // Interacting with a listed clip (edit/move/remove) must not reopen the picker.
+  if (e.target.closest("button, a, .upload-chip")) return;
+  fileInput.click();
+});
 dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("drag"); });
 dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag"));
 dropzone.addEventListener("drop", (e) => {
@@ -724,11 +728,12 @@ const btnAddMedia = $("#btn-add-media");
 if (btnAddMedia) btnAddMedia.addEventListener("click", () => fileInput.click());
 
 function renderPlaylist() {
+  // Chosen files are displayed inside the dotted box — hide the drop hint
+  // once something is listed.
+  const hint = $("#dropzone-hint");
+  if (hint) hint.classList.toggle("hidden", state.clips.length > 0);
   playlistEl.innerHTML = "";
-  if (!state.clips.length) {
-    playlistEl.append(el("p", { class: "hint", text: t("t.clipsNone") }));
-    return;
-  }
+  if (!state.clips.length) return;
   for (const c of state.clips) {
     playlistEl.append(el("div", { class: "upload-chip", dataset: { id: c.id } }, [
       el("span", { class: "badge " + c.kind, text: c.kind }),

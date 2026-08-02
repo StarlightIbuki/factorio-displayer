@@ -70,12 +70,12 @@
         <fieldset class="panel">
           <legend data-i18n="s1.add">Add media clips</legend>
           <div id="dropzone" class="dropzone" tabindex="0">
-            <p data-i18n="s1.drop">Drop video / audio / image clips here, or click to browse</p>
+            <p id="dropzone-hint" data-i18n="s1.drop">Drop video / audio / image clips here, or click to browse</p>
+            <div id="playlist" class="upload-list"></div>
           </div>
           <input id="file-input" type="file" multiple hidden
                  accept=".mp4,.avi,.mov,.mkv,.webm,.gif,.png,.jpg,.jpeg,.bmp,.tiff,.tif,.wav,.flac,.ogg,.mp3,.m4a,.aac,.mid,.midi" />
           <p class="hint" data-i18n="s1.hint">Add one or more clips. Each is automatically downsampled into a working cache used for editing, previewing and the final render.</p>
-          <div id="playlist" class="upload-list"></div>
         </fieldset>
         <div class="actions">
           <button id="btn-next-media" class="primary" data-i18n="s1.continue">Continue →</button>

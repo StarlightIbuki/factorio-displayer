@@ -187,6 +187,10 @@ button.primary:hover { background: #5d4a24; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button.danger:hover { border-color: var(--red); color: var(--red); }
 
+/* The global `input { display:block }` rule overrides the `hidden` attribute's
+   UA display:none — without this the native "Choose File" control shows up. */
+[hidden] { display: none !important; }
+
 /* ── uploads ─────────────────────────── */
 .dropzone {
   border: 2px dashed var(--border);
@@ -197,7 +201,8 @@ button.danger:hover { border-color: var(--red); color: var(--red); }
   color: var(--muted);
 }
 .dropzone:hover, .dropzone.drag { border-color: var(--amber); color: var(--text); }
-.upload-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.dropzone .upload-list { margin-top: 12px; }
+.upload-list { display: flex; flex-direction: column; gap: 6px; }
 .upload-chip {
   display: flex;
   align-items: center;
