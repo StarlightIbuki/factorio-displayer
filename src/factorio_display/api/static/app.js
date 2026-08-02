@@ -1865,9 +1865,10 @@ if (localeSelect) {
   });
 }
 
-// About / Acknowledgements
+// About / Acknowledgements — the first-visit page shows only the terms plus
+// an OK button; the Backend API panel is a developer-only affordance.
 $("#btn-about").addEventListener("click", openAbout);
-$("#about-close").addEventListener("click", () => $("#about-modal").classList.add("hidden"));
+$("#about-ok").addEventListener("click", () => $("#about-modal").classList.add("hidden"));
 $("#about-modal").addEventListener("click", (e) => {
   if (e.target === e.currentTarget) e.currentTarget.classList.add("hidden");
 });
@@ -1885,6 +1886,9 @@ async function openAbout() {
   } catch (_) {
     body.textContent = t("about.fetchFail");
   }
+  // Backend config panel — developer-only (hidden for normal users).
+  const backend = $("#about-backend");
+  if (backend) backend.classList.toggle("hidden", !isDev());
   // Backend config panel — show what's currently in use.
   const input = $("#backend-input");
   const status = $("#backend-status");

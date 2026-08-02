@@ -331,10 +331,11 @@
     <div class="modal-box wide">
       <div class="row between">
         <h2 data-i18n="about.title">About &amp; Acknowledgements</h2>
-        <button id="about-close" class="link">✕</button>
       </div>
       <pre id="about-body" class="logbox" style="max-height:45vh"></pre>
-      <div class="about-backend">
+      <!-- Backend API config is a developer affordance — hidden unless
+           Developer mode is on (toggled in app.js openAbout). -->
+      <div id="about-backend" class="about-backend hidden">
         <h3 data-i18n="about.backendTitle">Backend API</h3>
         <p class="hint" data-i18n="about.backendHint">Leave empty for automatic: use the local backend, falling back to the public server.</p>
         <div class="row" style="gap:8px;flex-wrap:wrap">
@@ -343,6 +344,9 @@
           <button id="backend-reset" data-i18n="about.backendResetBtn">Use auto</button>
         </div>
         <p class="hint" id="backend-status"></p>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:12px">
+        <button id="about-ok" class="primary big" data-i18n="about.ok">OK</button>
       </div>
     </div>
   </div>

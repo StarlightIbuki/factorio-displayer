@@ -157,6 +157,7 @@ const DICT = {
     "viewer.inspect": "Inspect",
     // about / acknowledgements
     "about.title": "About & Acknowledgements",
+    "about.ok": "OK",
     "about.fetchFail": "Could not load the acknowledgement text.",
     "about.backendTitle": "Backend API",
     "about.backendHint": "Leave empty for automatic: use the local backend, falling back to the public server.",
@@ -374,6 +375,7 @@ const DICT = {
     "viewer.inspect": "检查",
     // about / acknowledgements
     "about.title": "关于与致谢",
+    "about.ok": "确定",
     "about.fetchFail": "无法加载致谢文本。",
     "about.backendTitle": "后端 API",
     "about.backendHint": "留空则自动选择：优先使用本地后端，失败时回退到公共服务器。",
