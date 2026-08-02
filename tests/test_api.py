@@ -113,10 +113,11 @@ def test_share_link_lifecycle(client: TestClient) -> None:
     assert share["url"].startswith("/api/v1/share/")
     token = share["url"].rsplit("/", 1)[1]
 
-    # Public link is reachable WITHOUT auth, serves the blueprint, and is CORS-open.
+    # Public link is reachable WITHOUT auth, serves a valid blueprint, and is CORS-open.
     r = client.get(f"/api/v1/share/{token}")
     assert r.status_code == 200
-    assert r.text.startswith("0eN")
+    body = json.loads(zlib.decompress(base64.b64decode(r.text[1:])).decode())
+    assert "blueprint" in body
     assert r.headers.get("access-control-allow-origin") == "*"
 
     # Unknown / expired token → 410 Gone.
@@ -156,6 +157,23 @@ def test_ensure_blueprint_icons_injects_missing() -> None:
     assert out["blueprint"]["icons"]
     # Already carrying icons → left untouched.
     assert _ensure_blueprint_icons(bpstr) == bpstr
+
+
+def test_strip_blueprint_quality_removes_signal_quality() -> None:
+    """The share path strips Space Age `quality` from signals (FBE rejects it)."""
+    from factorio_display.api.server import _strip_blueprint_quality
+
+    data = {"blueprint": {"item": "blueprint", "version": 1, "icons": [], "entities": [
+        {"entity_number": 1, "name": "decider-combinator", "position": {"x": 0, "y": 0},
+         "control_behavior": {"decider_conditions": {"outputs": [
+             {"signal": {"type": "item", "name": "iron-chest", "quality": "uncommon"}},
+         ]}}},
+    ]}}
+    bp = "0" + base64.b64encode(zlib.compress(json.dumps(data, separators=(",", ":")).encode())).decode()
+    out = json.loads(zlib.decompress(base64.b64decode(_strip_blueprint_quality(bp)[1:])).decode())
+    sig = out["blueprint"]["entities"][0]["control_behavior"]["decider_conditions"]["outputs"][0]["signal"]
+    assert "quality" not in sig
+    assert sig["name"] == "iron-chest"
 
 
 def test_cors_allows_github_pages_by_default(client: TestClient) -> None:

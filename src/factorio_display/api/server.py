@@ -384,6 +384,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=_err("share_expired", "share link is invalid or expired"),
             )
         text = _materialize_result(store, runner, rec["principal"], rec["job_id"], job_rec, "blueprint")
+        # FBE's schema only allows {name,type} on signals — drop the Space Age
+        # `quality`/`id` fields so FBE can load the shared blueprint.  The real
+        # blueprint (with quality) is still served by the result endpoint.
+        text = _strip_blueprint_quality(text)
         return Response(
             content=text,
             media_type=_CONTENT_TYPE["blueprint"],
@@ -535,6 +539,42 @@ def _ensure_blueprint_icons(text: str) -> str:
     if not isinstance(bp, dict) or bp.get("icons"):
         return text
     bp["icons"] = [{"index": 1, "signal": {"type": "virtual", "name": "signal-0"}}]
+    try:
+        raw = zlib.compress(json.dumps(data, separators=(",", ":")).encode("utf-8"))
+        return "0" + base64.b64encode(raw).decode("ascii")
+    except Exception:  # pylint: disable=broad-exception-caught
+        return text
+
+
+def _strip_blueprint_quality(text: str) -> str:
+    """Remove ``quality``/``id`` from signal objects so FBE can load the blueprint.
+
+    FBE's blueprint schema defines signals as ``{name, type}`` with
+    ``additionalProperties: false``, so the Space Age ``quality`` field (used by
+    this project to multiplex signal channels) fails FBE's validation.  FBE is a
+    viewer — the authoritative blueprint with quality is still served by the
+    result endpoint.  Applied only to the public share link.
+    """
+    if not text or not text.startswith("0"):
+        return text
+    try:
+        raw = base64.b64decode(text[1:])
+        data = json.loads(zlib.decompress(raw).decode("utf-8"))
+    except Exception:  # pylint: disable=broad-exception-caught
+        return text
+
+    def _clean(node):
+        if isinstance(node, dict):
+            if "name" in node and "type" in node:
+                node.pop("quality", None)
+                node.pop("id", None)
+            for v in node.values():
+                _clean(v)
+        elif isinstance(node, list):
+            for v in node:
+                _clean(v)
+
+    _clean(data)
     try:
         raw = zlib.compress(json.dumps(data, separators=(",", ":")).encode("utf-8"))
         return "0" + base64.b64encode(raw).decode("ascii")
