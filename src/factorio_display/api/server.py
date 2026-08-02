@@ -47,6 +47,7 @@ from .jobs import JobRunner
 from .principal import get_principal
 from .schemas import (
     AudioDecoderRequest,
+    BugReportRequest,
     BuildOut,
     CapabilitiesOut,
     DecodeRequest,
@@ -335,6 +336,82 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not path.exists():
             raise HTTPException(status_code=404, detail=_err("not_found", "artifact not found"))
         return FileResponse(path)
+
+    @app.post("/api/v1/jobs/{job_id}/bug-report", tags=["jobs"])
+    def create_bug_report(
+        job_id: str,
+        principal: str = Depends(get_principal),
+        body: BugReportRequest | None = None,
+    ) -> dict:
+        """Snapshot a finished job for bug reporting.
+
+        Records the job id, its generated blueprint (plus the FBE-compatible
+        adaptation), the job config/error, and copies + marks the input
+        uploads for long-term retention so the issue can be reproduced later.
+        An optional ``comment``/``contact`` from the user is stored too.
+        """
+        rec = runner.get(principal, job_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=_err("not_found", "job not found"))
+        status = rec.get("status")
+        if status not in ("succeeded", "failed", "cancelled"):
+            raise HTTPException(
+                status_code=409,
+                detail=_err("job_running", f"job is {status}; wait until it finishes"),
+            )
+
+        payload: dict = {
+            "job_id": job_id,
+            "owner": principal,
+            "status": status,
+            "name": rec.get("name"),
+            "reported_at": time.time(),
+            "job_created_at": rec.get("created_at"),
+            "error": rec.get("error"),
+            "config": rec.get("config"),
+            "comment": (body.comment if body else "").strip(),
+            "contact": (body.contact if body else "").strip(),
+        }
+
+        # Generated blueprint (real + FBE-compatible adaptation).
+        if status == "succeeded":
+            try:
+                blueprint = _materialize_result(
+                    store, runner, principal, job_id, rec, "blueprint"
+                )
+                payload["blueprint"] = blueprint
+                payload["blueprint_compatible"] = _make_fbe_compatible(blueprint)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                payload["blueprint_error"] = str(exc)
+
+        # Preserve + snapshot the input uploads.
+        uploads: list[dict] = []
+        for upload_id in rec.get("inputs", []):
+            up = store.load_upload(principal, upload_id)
+            if up is None:
+                continue
+            store.mark_upload_preserved(principal, upload_id)
+            store.copy_upload_files(
+                principal, upload_id, store.bug_report_files_dir(principal, job_id)
+            )
+            uploads.append(
+                {
+                    "upload_id": up.upload_id,
+                    "name": up.name,
+                    "size_bytes": up.size_bytes,
+                    "media_type": up.media_type,
+                    "preserved": True,
+                }
+            )
+        payload["inputs"] = uploads
+
+        report_path = store.save_bug_report(principal, job_id, payload)
+        return {
+            "job_id": job_id,
+            "report": str(report_path),
+            "status": status,
+            "preserved_uploads": len(uploads),
+        }
 
     # ── temporary public share links ────────────────────────────────
     @app.post("/api/v1/jobs/{job_id}/share", tags=["jobs"])

@@ -67,6 +67,7 @@ class UploadRecord:
     path: str
     created_at: float
     probe: dict | None = None
+    preserved: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -146,6 +147,61 @@ class Store:
             shutil.rmtree(d, ignore_errors=True)
             return True
         return False
+
+    def mark_upload_preserved(self, principal: str, upload_id: str) -> bool:
+        """Flag an upload for long-term retention so future cleanup skips it.
+
+        Uploads tied to a submitted bug report are marked preserved so the
+        original input files survive any later job/upload pruning.
+        """
+        rec = self.load_upload(principal, upload_id)
+        if rec is None:
+            return False
+        rec.preserved = True
+        _atomic_write_text(
+            self.uploads_dir(principal) / _safe(upload_id) / "meta.json",
+            json.dumps(rec.to_dict()),
+        )
+        return True
+
+    def copy_upload_files(
+        self, principal: str, upload_id: str, dest_dir: Path
+    ) -> list[str]:
+        """Copy an upload's file(s) into *dest_dir* for self-contained retention.
+
+        Returns the list of copied filenames.
+        """
+        rec = self.load_upload(principal, upload_id)
+        if rec is None:
+            return []
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        copied: list[str] = []
+        src = Path(rec.path)
+        if src.exists():
+            dst = dest_dir / src.name
+            shutil.copy2(src, dst)
+            copied.append(dst.name)
+        return copied
+
+    # ── bug reports (long-term, global) ──────────────────────────────
+    def bug_reports_dir(self) -> Path:
+        p = self.settings.data_dir / "bug_reports"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def save_bug_report(
+        self, principal: str, job_id: str, payload: dict
+    ) -> Path:
+        """Persist a bug report payload as JSON and return its path."""
+        path = self.bug_reports_dir() / f"{_safe(principal)}_{_safe(job_id)}.json"
+        _atomic_write_text(
+            path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+        return path
+
+    def bug_report_files_dir(self, principal: str, job_id: str) -> Path:
+        return self.bug_reports_dir() / f"{_safe(principal)}_{_safe(job_id)}_files"
 
     # ── jobs ─────────────────────────────────────────────────────────
     def save_job(self, principal: str, job_id: str, record: dict) -> None:

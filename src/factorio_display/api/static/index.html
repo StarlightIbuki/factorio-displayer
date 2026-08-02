@@ -37,16 +37,13 @@
           <h2 data-i18n="home.listTitle">Your blueprints</h2>
           <button id="btn-new" class="primary big" data-i18n="home.listCta">Generate a new one</button>
         </div>
-        <div class="row">
-          <select id="jobs-filter">
-            <option value="" data-i18n="home.filterAll">All statuses</option>
-            <option value="queued" data-i18n="home.filterQueued">queued</option>
-            <option value="running" data-i18n="home.filterRunning">running</option>
-            <option value="succeeded" data-i18n="home.filterSucceeded">succeeded</option>
-            <option value="failed" data-i18n="home.filterFailed">failed</option>
-            <option value="cancelled" data-i18n="home.filterCancelled">cancelled</option>
-          </select>
-          <button id="jobs-refresh" data-i18n="home.refresh">Refresh</button>
+        <div id="jobs-tabs" class="jobs-tabs" role="tablist">
+          <button class="jobs-tab active" data-status="" data-i18n="home.filterAll">All</button>
+          <button class="jobs-tab" data-status="queued" data-i18n="home.filterQueued">queued</button>
+          <button class="jobs-tab" data-status="running" data-i18n="home.filterRunning">running</button>
+          <button class="jobs-tab" data-status="succeeded" data-i18n="home.filterSucceeded">succeeded</button>
+          <button class="jobs-tab" data-status="failed" data-i18n="home.filterFailed">failed</button>
+          <button class="jobs-tab" data-status="cancelled" data-i18n="home.filterCancelled">cancelled</button>
         </div>
         <div id="jobs-list" class="jobs-list"></div>
       </div>
@@ -324,6 +321,28 @@
         </div>
       </fieldset>
       <div id="viewer-result" class="result-host"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Report a bug (modal) ═══════════ -->
+  <div id="report-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="row between">
+        <h2 data-i18n="report.title">Report a bug</h2>
+        <button id="report-close" class="link">✕</button>
+      </div>
+      <fieldset class="panel">
+        <legend data-i18n="report.details">Issue details</legend>
+        <p class="hint" data-i18n="report.hint">Describe the problem — what you expected vs what happened, the media you used, etc. The job's blueprint and input files are saved with the report.</p>
+        <label for="report-comment" data-i18n="report.comment">Description</label>
+        <textarea id="report-comment" rows="5" spellcheck="false"></textarea>
+        <label for="report-contact" data-i18n="report.contact">Contact (optional)</label>
+        <input id="report-contact" type="text" />
+        <div class="row" style="margin-top:10px">
+          <button id="report-submit" class="primary" data-i18n="report.submit">Submit</button>
+          <button id="report-cancel" data-i18n="report.cancel">Cancel</button>
+        </div>
+      </fieldset>
     </div>
   </div>
 

@@ -95,6 +95,13 @@ class DecodeRequest(BaseModel):
     blueprint: str
 
 
+class BugReportRequest(BaseModel):
+    """Optional user-supplied context attached to a bug report."""
+
+    comment: str = ""
+    contact: str = ""
+
+
 class UploadOut(BaseModel):
     upload_id: str
     name: str

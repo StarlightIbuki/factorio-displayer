@@ -155,6 +155,68 @@ def test_share_requires_finished_job(tmp_path) -> None:
         assert c.post("/api/v1/jobs/missing/share").status_code == 404
 
 
+def test_bug_report_records_job_and_preserves_uploads(client: TestClient) -> None:
+    """A finished job can be reported: snapshot blueprint + mark uploads kept."""
+    r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])
+    upload_id = r.json()[0]["upload_id"]
+    r = client.post(
+        "/api/v1/jobs",
+        json={"type": "encode", "inputs": [upload_id], "options": {"name": "Tiny", "power": "none", "use_cache": False}},
+    )
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+
+    deadline = time.time() + 180
+    status = "queued"
+    while time.time() < deadline:
+        status = client.get(f"/api/v1/jobs/{job_id}").json()["status"]
+        if status in ("succeeded", "failed", "cancelled"):
+            break
+        time.sleep(0.5)
+    assert status == "succeeded", client.get(f"/api/v1/jobs/{job_id}").json().get("error")
+
+    # In-flight job is refused (only finished jobs are reportable).
+    assert client.post("/api/v1/jobs/does-not-exist/bug-report").status_code == 404
+
+    # No-body POST still works (comment/contact default empty).
+    assert client.post(f"/api/v1/jobs/{job_id}/bug-report").status_code == 200
+
+    r = client.post(
+        f"/api/v1/jobs/{job_id}/bug-report",
+        json={"comment": "Display stays blank", "contact": "me@example.com"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["job_id"] == job_id
+    assert body["status"] == "succeeded"
+    assert body["preserved_uploads"] == 1
+    assert body["report"].endswith(".json")
+
+    # The upload is marked for long-term preservation.
+    store = client.app.state.store
+    up = store.load_upload("anonymous", upload_id)
+    assert up is not None and up.preserved is True
+
+    # The report is persisted with the generated blueprint (+ FBE-compatible).
+    report = Path(body["report"])
+    assert report.exists()
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["job_id"] == job_id
+    assert payload["owner"] == "anonymous"
+    assert payload["blueprint"].startswith("0")
+    assert payload["blueprint_compatible"].startswith("0")
+    assert payload["comment"] == "Display stays blank"
+    assert payload["contact"] == "me@example.com"
+
+    # The input file is copied into the report's files dir (self-contained).
+    files_dir = store.bug_report_files_dir("anonymous", job_id)
+    assert files_dir.exists()
+    assert any(p.is_file() for p in files_dir.iterdir())
+
+    # Re-reporting the same job overwrites the report (idempotent).
+    assert client.post(f"/api/v1/jobs/{job_id}/bug-report").status_code == 200
+
+
 def test_ensure_blueprint_icons_injects_missing() -> None:
     """Serve-time icon injection makes old (icon-less) blueprints FBE-compatible."""
     from factorio_display import service

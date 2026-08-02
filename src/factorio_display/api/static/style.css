@@ -353,6 +353,11 @@ pre.ascii {
 .result-host { margin-top: 16px; }
 .result-tabs { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
 .result-tabs button.active { background: var(--bg-3); border-color: var(--amber); color: var(--amber); }
+
+/* ── job status tabs ─────────────────── */
+.jobs-tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+.jobs-tab { font-size: 12px; padding: 4px 10px; }
+.jobs-tab.active { background: var(--bg-3); border-color: var(--amber); color: var(--amber); }
 .meta-strip { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .meta-strip b { color: var(--text); }
 .artifacts { margin-top: 10px; }

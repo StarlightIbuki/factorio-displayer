@@ -80,6 +80,9 @@ const state = {
   running: new Set(),
   expanded: new Set(),
   pollTimer: null,
+  jobsFilter: "",          // active status tab ("" = All)
+  jobCache: new Map(),     // job_id -> signature of the last rendered record
+  jobEls: new Map(),       // job_id -> current card element (in-place updates)
   previewUrl: null,
   previewRendered: false,
 };
@@ -149,8 +152,8 @@ function resetCreate() {
 function showView(name) {
   $("#view-home").classList.toggle("hidden", name !== "home");
   $("#view-create").classList.toggle("hidden", name !== "create");
-  if (name === "home") renderHome();
-  else showStep(1);
+  if (name === "home") { renderHome(); if (state.token) startPolling(); }
+  else { showStep(1); stopPolling(); }
 }
 
 $("#btn-first").addEventListener("click", () => { resetCreate(); showView("create"); });
@@ -279,6 +282,7 @@ window.addEventListener("storage", (e) => {
       closeLoginModal();
       toast(t("auth.signedIn", { user: currentUser() || "" }));
       renderHome(); // the signed-in user's job list may differ
+      startPolling();
     }
   }
 });
@@ -288,6 +292,7 @@ if ($authUser) {
   $authUser.addEventListener("click", () => {
     if (confirm(t("auth.signOutConfirm"))) {
       setToken("");
+      stopPolling();
       renderAuth();
       renderHome();
     }
@@ -1678,10 +1683,23 @@ async function makeJobPreview(jobId, blob, kind) {
 }
 
 const jobsList = $("#jobs-list");
-const jobsFilter = $("#jobs-filter");
+
+// Signature of everything the card renders: the job record PLUS UI state that
+// changes how the card is drawn.  Polling re-renders a card ONLY when this
+// signature changes — so an expansion toggle (or a running job's progress)
+// triggers a re-render, while an unchanged job is left completely untouched.
+function jobSig(job) {
+  const p = job.progress || {};
+  return JSON.stringify([
+    job.status, job.name, job.created_at, job.started_at, job.finished_at, job.error,
+    p.phase, p.log_tail ? p.log_tail.join("\n") : "",
+    job.result ? job.result.entity_count : null,
+    state.expanded.has(job.job_id) ? 1 : 0,
+  ]);
+}
 
 async function renderHome() {
-  const filter = jobsFilter.value;
+  const filter = state.jobsFilter;
   const qs = filter ? `?status=${encodeURIComponent(filter)}` : "";
   let jobs = [];
   try {
@@ -1695,18 +1713,41 @@ async function renderHome() {
   if (jobs.length === 0) {
     emptyState.classList.remove("hidden");
     listState.classList.add("hidden");
+    // Drop any cards left over from a previous filter.
+    jobsList.innerHTML = "";
+    state.jobCache.clear();
+    state.jobEls.clear();
     return;
   }
   emptyState.classList.add("hidden");
   listState.classList.remove("hidden");
-  jobsList.innerHTML = "";
+
+  // Diff against what's already on screen: only re-render cards whose record
+  // actually changed (e.g. a running job's status/progress), instead of wiping
+  // the whole list on every poll.
+  const seen = new Set();
   for (const job of jobs) {
+    seen.add(job.job_id);
+    const sig = jobSig(job);
+    if (state.jobCache.get(job.job_id) === sig) continue; // unchanged
+    state.jobCache.set(job.job_id, sig);
     if (["queued", "running"].includes(job.status)) state.running.add(job.job_id);
     else state.running.delete(job.job_id);
-    jobsList.append(buildJobCard(job));
+    const card = buildJobCard(job);
+    const old = state.jobEls.get(job.job_id);
+    state.jobEls.set(job.job_id, card);
+    if (old && old.parentNode) old.replaceWith(card);
+    else jobsList.append(card);
   }
-  if (state.running.size) startPolling();
-  else stopPolling();
+  // Remove cards for jobs that vanished from the (filtered) list.
+  for (const [id, el] of state.jobEls) {
+    if (!seen.has(id)) {
+      if (el.parentNode) el.remove();
+      state.jobEls.delete(id);
+      state.jobCache.delete(id);
+      state.running.delete(id);
+    }
+  }
 }
 
 async function copyJobBlueprint(id) {
@@ -1786,6 +1827,9 @@ function buildJobCard(job) {
   if (["queued", "running"].includes(job.status)) {
     actions.append(el("button", { class: "danger", text: t("jobs.cancel"), onclick: (ev) => { ev.stopPropagation(); cancelJob(job.job_id); } }));
   }
+  if (["succeeded", "failed", "cancelled"].includes(job.status)) {
+    actions.append(el("button", { text: t("jobs.reportBug"), title: t("jobs.reportBugTitle"), onclick: (ev) => { ev.stopPropagation(); openReportModal(job.job_id); } }));
+  }
   actions.append(el("button", { class: "danger", text: t("jobs.delete"), onclick: (ev) => { ev.stopPropagation(); deleteJob(job.job_id); } }));
   const meta = el("div", { class: "job-meta" }, [
     el("div", { class: "job-meta-row" }, [
@@ -1833,6 +1877,42 @@ async function cancelJob(id) {
   catch (e) { toast(e.message, "error"); }
 }
 
+// ── bug report modal (comment / contact) ────────────────────────────
+let reportJobId = null;
+function openReportModal(jobId) {
+  reportJobId = jobId;
+  $("#report-comment").value = "";
+  $("#report-contact").value = "";
+  $("#report-modal").classList.remove("hidden");
+  $("#report-comment").focus();
+}
+function closeReportModal() {
+  $("#report-modal").classList.add("hidden");
+  reportJobId = null;
+}
+$("#report-close").addEventListener("click", closeReportModal);
+$("#report-cancel").addEventListener("click", closeReportModal);
+$("#report-modal").addEventListener("click", (e) => {
+  if (e.target === e.currentTarget) closeReportModal();
+});
+$("#report-submit").addEventListener("click", async () => {
+  const jobId = reportJobId;
+  if (!jobId) return;
+  const btn = $("#report-submit");
+  btn.disabled = true;
+  try {
+    const comment = $("#report-comment").value.trim();
+    const contact = $("#report-contact").value.trim();
+    await api(`/api/v1/jobs/${jobId}/bug-report`, { method: "POST", body: { comment, contact } });
+    toast(t("t.bugReported"));
+    closeReportModal();
+  } catch (e) {
+    toast(t("t.bugReportFail", { msg: e.message }), "error");
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 async function deleteJob(id) {
   try {
     await api(`/api/v1/jobs/${id}`, { method: "DELETE" });
@@ -1846,23 +1926,37 @@ async function deleteJob(id) {
   catch (e) { toast(e.message, "error"); }
 }
 
-jobsFilter.addEventListener("change", renderHome);
-$("#jobs-refresh").addEventListener("click", renderHome);
+// Status tabs replace the old dropdown + "Refresh" button.  Clicking a tab
+// re-filters the list (and re-renders only what changed).
+const jobsTabs = $("#jobs-tabs");
+jobsTabs.addEventListener("click", (e) => {
+  const btn = e.target.closest(".jobs-tab");
+  if (!btn) return;
+  state.jobsFilter = btn.dataset.status || "";
+  $$(".jobs-tab", jobsTabs).forEach((b) => b.classList.toggle("active", b === btn));
+  renderHome();
+});
 
 // ═══════════════════════════════════════════════════════════════════════
-// Polling
+// Polling — while the home view is visible, keep the list in sync without a
+// "Refresh" button.  Each tick re-fetches the (cheap) job list and the diff
+// renderer in renderHome() updates only cards whose record actually changed.
+// Poll faster while jobs are running, slower when idle.
 // ═══════════════════════════════════════════════════════════════════════
 function startPolling() {
   if (state.pollTimer) return;
-  state.pollTimer = setInterval(poll, 2000);
+  const tick = () => {
+    state.pollTimer = setTimeout(async () => {
+      state.pollTimer = null;
+      if ($("#view-home").classList.contains("hidden")) return;
+      await renderHome();
+      startPolling(); // reschedule: 2s while running, 4s when idle
+    }, state.running.size ? 2000 : 4000);
+  };
+  tick();
 }
 function stopPolling() {
-  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-}
-async function poll() {
-  const ids = [...state.running];
-  if (!ids.length) { stopPolling(); return; }
-  if (!$("#view-home").classList.contains("hidden")) await renderHome();
+  if (state.pollTimer) { clearTimeout(state.pollTimer); state.pollTimer = null; }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
