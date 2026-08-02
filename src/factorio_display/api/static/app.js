@@ -66,6 +66,10 @@ function mediaKind(name) {
   return "other";
 }
 
+// Audio-ish clips (audio files + MIDI) ride the audio rail and are uploaded
+// as separate inputs so they can be updated independently for a task.
+function isSoundKind(k) { return k === "audio" || k === "midi"; }
+
 // ── API client ─────────────────────────────────────────────────────────
 const state = {
   token: localStorage.getItem("fd_token") || "",
@@ -148,7 +152,7 @@ function showView(name) {
 
 $("#btn-first").addEventListener("click", () => { resetCreate(); showView("create"); });
 $("#btn-new").addEventListener("click", () => { resetCreate(); showView("create"); });
-$("#btn-back").addEventListener("click", () => showView("home"));
+$("#btn-back").addEventListener("click", () => { resetCreate(); showView("home"); });
 $("#btn-tools").addEventListener("click", () => $("#viewer-modal").classList.remove("hidden"));
 $("#viewer-close").addEventListener("click", () => $("#viewer-modal").classList.add("hidden"));
 $("#viewer-modal").addEventListener("click", (e) => {
@@ -257,6 +261,11 @@ if ($authUser) {
 function isDev() { return localStorage.getItem("fd_dev") === "1"; }
 function setDev(on) { if (on) localStorage.setItem("fd_dev", "1"); else localStorage.removeItem("fd_dev"); }
 
+function renderDevUI() {
+  // Manual token entry is a developer affordance — hide it for normal users.
+  if (tokenInput) tokenInput.classList.toggle("hidden", !isDev());
+}
+
 const devToggle = $("#dev-toggle");
 if (devToggle) {
   devToggle.checked = isDev();
@@ -264,8 +273,10 @@ if (devToggle) {
     setDev(devToggle.checked);
     renderFormatSelectOptions();
     renderHome();
+    renderDevUI();
   });
 }
+renderDevUI();
 
 function renderFormatSelectOptions() {
   const sel = $("#opt-result-format");
@@ -303,6 +314,9 @@ let selectedClipId = null;
 
 function probeClip(c) {
   return new Promise((resolve) => {
+    // MIDI can't be decoded by <audio>; give it a nominal duration — the
+    // real length is determined server-side when the raw .mid is encoded.
+    if (c.kind === "midi") { resolve({ dur: 30, w: 0, h: 0 }); return; }
     if (c.kind === "image") {
       const img = new Image();
       const url = URL.createObjectURL(c.file);
@@ -311,7 +325,7 @@ function probeClip(c) {
       img.src = url;
       return;
     }
-    const el = document.createElement(c.kind === "audio" ? "audio" : "video");
+    const el = document.createElement(isSoundKind(c.kind) ? "audio" : "video");
     el.preload = "metadata";
     const url = URL.createObjectURL(c.file);
     el.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve({ dur: el.duration || 0, w: el.videoWidth || 0, h: el.videoHeight || 0 }); };
@@ -332,10 +346,10 @@ function editedDurOf(c) {
 // Displayed on-rail position for a clip (ripple for video, absolute for audio).
 function currentPos(c) {
   const d = editedDurOf(c);
-  if (c.kind === "audio") return { start: snapFrame(Math.max(0, c.edit.start || 0)), dur: d };
+  if (isSoundKind(c.kind)) return { start: snapFrame(Math.max(0, c.edit.start || 0)), dur: d };
   let cursor = 0;
   for (const x of state.clips) {
-    if (x.kind === "audio") continue;
+    if (isSoundKind(x.kind)) continue;
     const es = x.edit.start != null && x.edit.start >= 0 ? x.edit.start : null;
     const s = es != null ? snapFrame(Math.max(es, cursor)) : cursor;
     if (x.id === c.id) return { start: s, dur: d };
@@ -347,7 +361,7 @@ function currentPos(c) {
 function prevVisualEnd(id) {
   let end = 0;
   for (const c of state.clips) {
-    if (c.kind === "audio") continue;
+    if (isSoundKind(c.kind)) continue;
     if (c.id === id) return end;
     end += editedDurOf(c);
   }
@@ -359,7 +373,7 @@ function currentTotalDur() {
   let audioEnd = 0;
   for (const c of state.clips) {
     const p = currentPos(c);
-    if (c.kind === "audio") audioEnd = Math.max(audioEnd, p.start + p.dur);
+    if (isSoundKind(c.kind)) audioEnd = Math.max(audioEnd, p.start + p.dur);
     else end = Math.max(end, p.start + p.dur);
   }
   return Math.max(end, audioEnd, 1);
@@ -380,7 +394,7 @@ async function renderTimeline() {
   const positions = {};
   let cursor = 0;
   for (const c of state.clips) {
-    if (c.kind === "audio") continue;
+    if (isSoundKind(c.kind)) continue;
     const d = editedDurOf(c);
     const es = c.edit.start != null && c.edit.start >= 0 ? c.edit.start : null;
     const s = es != null ? snapFrame(Math.max(es, cursor)) : cursor;
@@ -389,7 +403,7 @@ async function renderTimeline() {
   }
   let audioEnd = 0;
   for (const c of state.clips) {
-    if (c.kind !== "audio") continue;
+    if (!isSoundKind(c.kind)) continue;
     const d = editedDurOf(c);
     const s = snapFrame(Math.max(0, c.edit.start || 0));
     positions[c.id] = { start: s, dur: d };
@@ -401,9 +415,9 @@ async function renderTimeline() {
   for (const c of state.clips) {
     const p = positions[c.id];
     if (!p) continue;
-    const rail = c.kind === "audio" ? railA : railV;
+    const rail = isSoundKind(c.kind) ? railA : railV;
     const block = el("div", {
-      class: "tl-block " + (c.kind === "audio" ? "audio" : "video") + (selectedClipId === c.id ? " selected" : ""),
+      class: "tl-block " + (isSoundKind(c.kind) ? "audio" : "video") + (selectedClipId === c.id ? " selected" : ""),
       dataset: { id: c.id },
       style: `left:${p.start * pxPerSec}px;width:${Math.max(26, p.dur * pxPerSec)}px`,
       title: `${c.name}\nPos ${p.start.toFixed(1)}s · ${p.dur.toFixed(1)}s`,
@@ -449,7 +463,7 @@ function startAlignDrag(e, block, c, pxPerSec) {
   try { block.setPointerCapture(e.pointerId); } catch (_) { /* noop */ }
   const onMove = (ev) => {
     const newStart = snapFrame(Math.max(0, origStart + (ev.clientX - startX) / pxPerSec));
-    if (c.kind !== "audio" && newStart < prevVisualEnd(c.id)) return; // no overlap on the video rail
+    if (!isSoundKind(c.kind) && newStart < prevVisualEnd(c.id)) return; // no overlap on the video rail
     c.edit.start = newStart;
     block.style.left = `${newStart * pxPerSec}px`;
   };
@@ -636,7 +650,10 @@ function isEdited(e) {
 
 // Working-cache max dimension — each clip is downsampled to this on add, and
 // the cache is reused for editing, previewing and the final render.
-const PROXY_MAX = 320;
+const PROXY_MAX = 512;
+
+// Reject files above this size up-front (matches the backend upload limit).
+const MAX_UPLOAD_BYTES = 256 * 1024 * 1024; // 256 MiB
 
 async function buildCache(c) {
   if (c.cacheStatus === "caching" || c.cacheStatus === "cached") return;
@@ -653,7 +670,9 @@ async function buildCache(c) {
       c.file = out.blob;
       c.size = out.blob.size;
     }
-    // audio: kept as-is (files are small) — still marked cached for the pipeline
+    // audio & MIDI: kept as-is (MIDI can't be decoded in-browser; the raw
+    // file is uploaded and the backend handles it) — marked cached for the
+    // pipeline either way.
     c.cacheStatus = "cached";
   } catch (e) {
     c.cacheStatus = "failed";
@@ -670,13 +689,17 @@ async function buildCache(c) {
 
 function addFiles(files) {
   for (const file of files) {
+    if (file.size > MAX_UPLOAD_BYTES) {
+      toast(t("t.tooLarge", { size: fmtBytes(file.size), max: fmtBytes(MAX_UPLOAD_BYTES) }), "error");
+      continue;
+    }
     const kind = mediaKind(file.name);
     const clip = {
       id: `f${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       file, name: file.name, size: file.size, kind,
       edit: defaultEdit(), cacheStatus: "pending",
     };
-    if (kind === "audio") clip.edit.start = 0;
+    if (isSoundKind(kind)) clip.edit.start = 0;
     state.clips.push(clip);
     buildCache(clip);
   }
@@ -695,6 +718,10 @@ dropzone.addEventListener("drop", (e) => {
   addFiles([...e.dataTransfer.files]);
 });
 fileInput.addEventListener("change", () => { addFiles([...fileInput.files]); fileInput.value = ""; });
+// Allow adding more media while editing (timeline step) — buildCache re-renders
+// the timeline because the step is visible.
+const btnAddMedia = $("#btn-add-media");
+if (btnAddMedia) btnAddMedia.addEventListener("click", () => fileInput.click());
 
 function renderPlaylist() {
   playlistEl.innerHTML = "";
@@ -750,7 +777,7 @@ function openEditor(clipId) {
   const c = state.clips.find((x) => x.id === clipId);
   if (!c) return;
   state.editorClipId = clipId;
-  editorKind = c.kind === "image" ? "image" : (c.kind === "audio" ? "audio" : "video");
+  editorKind = c.kind === "image" ? "image" : (isSoundKind(c.kind) ? "audio" : "video");
   const stage = $("#editor-stage");
   stage.innerHTML = "";
   editorUrl = URL.createObjectURL(c.file);
@@ -896,8 +923,8 @@ $("#editor-export").addEventListener("click", () => {
 // ═══════════════════════════════════════════════════════════════════════
 // Display size recommendation
 // ═══════════════════════════════════════════════════════════════════════
-const DISPLAY_MAX_W = 28;
-const DISPLAY_MAX_H = 26;
+const DISPLAY_MAX_W = 54;
+const DISPLAY_MAX_H = 30;
 
 async function probeDimensions(media) {
   if (!media || !isVisualFile(media.name)) return null;
@@ -971,6 +998,27 @@ $("#opt-auto-size").addEventListener("change", () => {
   refreshRecommendation();
 });
 
+// Manual width/height: keep the other side matching the source aspect ratio.
+async function keepAspectFrom(which) {
+  const clip = state.clips.find((c) => isVisualFile(c.name));
+  const dims = clip ? await probeDimensions(clip) : null;
+  if (!dims || !dims[0] || !dims[1]) return;
+  const ratio = dims[0] / dims[1];
+  if (which === "width") {
+    const w = parseInt($("#opt-width").value, 10);
+    if (w) $("#opt-height").value = Math.max(1, Math.round(w / ratio));
+  } else {
+    const h = parseInt($("#opt-height").value, 10);
+    if (h) $("#opt-width").value = Math.max(1, Math.round(h * ratio));
+  }
+}
+$("#opt-width").addEventListener("input", () => {
+  if (!$("#opt-auto-size").checked && $("#opt-keep-aspect").checked) keepAspectFrom("width");
+});
+$("#opt-height").addEventListener("input", () => {
+  if (!$("#opt-auto-size").checked && $("#opt-keep-aspect").checked) keepAspectFrom("height");
+});
+
 // ═══════════════════════════════════════════════════════════════════════
 // Options
 // ═══════════════════════════════════════════════════════════════════════
@@ -1031,53 +1079,100 @@ generateBtn.addEventListener("click", generate);
 
 async function generate() {
   if (!state.clips.length) return;
-  const compressEnabled = $("#compress-enable").checked;
   const quality = $("#compress-quality").value;
-  const maxDim = parseInt($("#compress-dim").value, 10) || 256;
   const outputMode = $("#opt-output-mode").value;
+  // Videos are always compressed to the display resolution (non-optional).
+  const dispOpts = readOptions();
+  const maxDim = Math.max(dispOpts.width || DISPLAY_MAX_W, dispOpts.height || DISPLAY_MAX_H);
 
   generateBtn.disabled = true;
   try {
     generateStatus.textContent = t("t.renderingEdited");
-    let toUpload;
-    let kind;
-    let name;
-    if (state.clips.length === 1 && state.clips[0].kind === "image") {
-      const c = state.clips[0];
-      const out = await exportEditedImage(c.file, c.edit.crop, maxDim);
-      toUpload = out.blob; kind = out.kind; name = out.name;
+    const visuals = state.clips.filter((c) => c.kind === "video" || c.kind === "image");
+    const sounds = state.clips.filter((c) => isSoundKind(c.kind));
+    const hasMidi = sounds.some((s) => s.kind === "midi");
+    // Separate-input mode when MIDI is involved (the browser can't decode MIDI,
+    // so the raw file must go to the backend) or when a task mixes visuals with
+    // a separate audio track — that keeps the audio an independent, updatable
+    // input for the job.
+    const useSeparate = hasMidi || (visuals.length > 0 && sounds.length > 0);
+
+    const uploadIds = [];
+    const previews = []; // {blob, name, kind} — first one drives the job preview
+    const uploadOne = async (blob, fname) => {
+      generateStatus.textContent = t("t.uploading");
+      const fd = new FormData();
+      fd.append("files", blob, fname);
+      const res = await api("/api/v1/uploads", { method: "POST", body: fd });
+      const ups = await res.json();
+      return ups[0].upload_id;
+    };
+
+    if (useSeparate) {
+      // ── visual track → one exported file ─────────────────────────
+      if (visuals.length) {
+        let out;
+        if (visuals.length === 1 && visuals[0].kind === "image") {
+          const c = visuals[0];
+          out = await exportEditedImage(c.file, c.edit.crop, maxDim);
+        } else {
+          const specs = visuals.map((c) => ({ id: c.id, file: c.file, name: c.name, kind: c.kind, edit: c.edit }));
+          // The audio track is provided separately → mute the video's own audio.
+          const mode = sounds.length ? "video-muted" : outputMode;
+          out = await exportConcatenated(specs, { mode, maxDim },
+            (pct) => { generateStatus.textContent = t("t.renderingPct", { pct: Math.round(pct) }); });
+        }
+        let blob = out.blob;
+        if (out.kind === "video" && blob.size > 128 * 1024) {
+          generateStatus.textContent = t("t.compressing");
+          blob = await compressVideo(blob, { quality, maxDim });
+        }
+        uploadIds.push(await uploadOne(blob, out.name));
+        previews.push({ blob, name: out.name, kind: out.kind });
+      }
+      // ── sound track (audio + MIDI) → raw uploads, independent inputs ──
+      for (const s of sounds) {
+        uploadIds.push(await uploadOne(s.file, s.name));
+        previews.push({ blob: s.file, name: s.name, kind: s.kind });
+      }
+      if (!uploadIds.length) throw new Error("no media to generate");
     } else {
-      const specs = state.clips.map((c) => ({ id: c.id, file: c.file, name: c.name, kind: c.kind, edit: c.edit }));
-      const out = await exportConcatenated(specs, { mode: outputMode, maxDim },
-        (pct) => { generateStatus.textContent = t("t.renderingPct", { pct: Math.round(pct) }); });
-      toUpload = out.blob; kind = out.kind; name = out.name;
+      // ── existing single-file path (pure video / pure audio / single image) ──
+      let toUpload;
+      let kind;
+      let name;
+      if (state.clips.length === 1 && state.clips[0].kind === "image") {
+        const c = state.clips[0];
+        const out = await exportEditedImage(c.file, c.edit.crop, maxDim);
+        toUpload = out.blob; kind = out.kind; name = out.name;
+      } else {
+        const specs = state.clips.map((c) => ({ id: c.id, file: c.file, name: c.name, kind: c.kind, edit: c.edit }));
+        const out = await exportConcatenated(specs, { mode: outputMode, maxDim },
+          (pct) => { generateStatus.textContent = t("t.renderingPct", { pct: Math.round(pct) }); });
+        toUpload = out.blob; kind = out.kind; name = out.name;
+      }
+      if (kind === "video" && toUpload.size > 128 * 1024) {
+        generateStatus.textContent = t("t.compressing");
+        toUpload = await compressVideo(toUpload, { quality, maxDim });
+      }
+      uploadIds.push(await uploadOne(toUpload, toUpload.name || name));
+      previews.push({ blob: toUpload, name: toUpload.name || name, kind });
     }
-
-    if (compressEnabled && kind === "video" && toUpload.size > 200 * 1024) {
-      generateStatus.textContent = t("t.compressing");
-      toUpload = await compressVideo(toUpload, { quality, maxDim });
-    }
-
-    generateStatus.textContent = t("t.uploading");
-    const fd = new FormData();
-    fd.append("files", toUpload, toUpload.name || name);
-    const res = await api("/api/v1/uploads", { method: "POST", body: fd });
-    const ups = await res.json();
-    const uploadId = ups[0].upload_id;
 
     generateStatus.textContent = t("t.submitting");
-    const body = { type: "encode", inputs: [uploadId], options: readOptions() };
+    const body = { type: "encode", inputs: uploadIds, options: readOptions() };
     const cb = $("#opt-callback-url").value.trim();
     if (cb) body.callback_url = cb;
     const jres = await api("/api/v1/jobs", { method: "POST", body });
     const data = await jres.json();
 
     // Keep the (compressed) media locally so the job list can preview it.
-    try { await saveMedia(data.job_id, toUpload, toUpload.name || name, kind); } catch (_) { /* non-fatal */ }
+    const primary = previews[0];
+    try { await saveMedia(data.job_id, primary.blob, primary.name, primary.kind); } catch (_) { /* non-fatal */ }
 
     // Build a 1s low-res preview clip so the job list shows what this job is.
     // (makeJobPreview → makePreview; sound-only jobs render a note, no video.)
-    makeJobPreview(data.job_id, toUpload, kind);
+    makeJobPreview(data.job_id, primary.blob, primary.kind);
 
     generateStatus.textContent = "";
     toast(t("t.jobQueued", { id: data.job_id }));
@@ -1434,7 +1529,7 @@ async function toggleMediaPreview(jobId) {
     }
     const url = URL.createObjectURL(cached.blob);
     let player;
-    if (cached.kind === "audio") player = el("audio", { controls: "", src: url, style: "width:100%" });
+    if (isSoundKind(cached.kind)) player = el("audio", { controls: "", src: url, style: "width:100%" });
     else if (cached.kind === "image") player = el("img", { src: url, style: "max-width:100%" });
     else player = el("video", { controls: "", src: url, style: "max-width:100%" });
     box.innerHTML = "";

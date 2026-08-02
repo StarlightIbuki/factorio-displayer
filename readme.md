@@ -2,6 +2,29 @@
 
 A command-line tool designed to encode media (videos, gifs, images, and audio tracks) into Factorio memory blueprints, allowing you to build massive animated screens and programmable speakers directly in-game. Designed with Factorio 2.0 and Draftsman.
 
+## Web App
+
+Try it online: **<https://StarlightIbuki.github.io/factorio-displayer/>**
+
+The web app lets you add media in the browser, edit a timeline (trim / crop /
+audio, incl. MIDI), and generate a blueprint through the hosted API at
+`https://factorio.qvq.moe:60012` (sign in with GitHub, or use an access token).
+The frontend defaults to a local backend when present and falls back to the
+public one automatically.
+
+### Run the web app locally
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e '.[web,audio]'
+.\.venv\Scripts\python.exe -m factorio_display server --host 127.0.0.1 --port 8000
+```
+
+Open <http://127.0.0.1:8000/> — the frontend auto-detects the local backend.
+See `docs/deploy.md` for the full deployment guide (GitHub Pages frontend +
+HTTPS high-port API, GitHub OAuth, access tokens).
+
 ## Demo
 
 [The game save](https://github.com/StarlightIbuki/factorio-displayer/releases/download/alpha/Bad.Apple.demo.zip)

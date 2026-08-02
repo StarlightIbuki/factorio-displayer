@@ -120,6 +120,7 @@
         </fieldset>
 
         <div class="actions">
+          <button id="btn-add-media" class="link" data-i18n="s2.addMedia">+ Add media</button>
           <button id="btn-prev-timeline" class="link" data-i18n="s2.back">← Media</button>
           <button id="btn-next-timeline" class="primary" data-i18n="s1.continue">Continue →</button>
         </div>
@@ -132,6 +133,7 @@
           <p id="size-recommend" class="hint" data-i18n="s3.sizeHint">Upload a video or image to see the recommended size.</p>
           <div class="grid">
             <label class="row checkbox" data-i18n="s3.auto"><input id="opt-auto-size" type="checkbox" checked /> Auto (recommended)</label>
+            <label class="row checkbox" data-i18n="s3.keepAspect"><input id="opt-keep-aspect" type="checkbox" checked /> Keep aspect ratio</label>
             <label data-i18n="s3.width">Width (tiles) <input id="opt-width" type="number" min="1" value="" data-i18n="s3.widthAuto" data-i18n-attr="placeholder" placeholder="auto" disabled /></label>
             <label data-i18n="s3.height">Height (tiles) <input id="opt-height" type="number" min="1" value="" placeholder="auto" disabled /></label>
           </div>
@@ -145,19 +147,15 @@
           <summary data-i18n="s3.options">Options</summary>
 
           <div class="grid">
-            <label class="row checkbox" data-i18n="s3.compressEnable"><input id="compress-enable" type="checkbox" /> Compress videos before upload (lossy)</label>
             <label data-i18n="s3.quality">Quality preset
               <select id="compress-quality">
-                <option value="high" data-i18n="s3.qualityHigh">High (256px / ~1.2 Mbps)</option>
-                <option value="medium" selected data-i18n="s3.qualityMedium">Medium (192px / ~700 kbps)</option>
-                <option value="low" data-i18n="s3.qualityLow">Low (128px / ~400 kbps)</option>
+                <option value="high" data-i18n="s3.qualityHigh">High (~1.2 Mbps)</option>
+                <option value="medium" selected data-i18n="s3.qualityMedium">Medium (~700 kbps)</option>
+                <option value="low" data-i18n="s3.qualityLow">Low (~400 kbps)</option>
               </select>
             </label>
-            <label data-i18n="s3.maxDim">Max dimension (px)
-              <input id="compress-dim" type="number" min="64" max="512" value="256" />
-            </label>
           </div>
-          <p class="hint" data-i18n="s3.compressHint">The backend display is small (≤ ~255px), so extra source resolution is discarded server-side anyway — downscaling here is free.</p>
+          <p class="hint" data-i18n="s3.compressHint">Videos are always compressed to the display resolution before upload — the display is small, so extra source resolution would be discarded server-side anyway.</p>
 
           <hr />
           <div class="grid">

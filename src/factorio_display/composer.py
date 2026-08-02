@@ -242,7 +242,15 @@ def _merge_components(
             if old_net_id is not None:
                 new_prefixed = prefix + new_net_id
                 if old_net_id != new_prefixed:
-                    _connect_networks(merged, old_net_id, new_prefixed)
+                    # Only merge same-colour networks.  Same-named input
+                    # ports can live on different buses — e.g. the video
+                    # memory "clock" on RED vs the audio memory / player
+                    # "clock" on GREEN (clock-bus convention).  Connecting
+                    # across colours corrupts the topology.
+                    old_net = next((n for n in merged.networks if n.network_id == old_net_id), None)
+                    new_net = next((n for n in merged.networks if n.network_id == new_prefixed), None)
+                    if old_net is not None and new_net is not None and old_net.color == new_net.color:
+                        _connect_networks(merged, old_net_id, new_prefixed)
 
         # ── Namespace output ports ───────────────────────────────
         # Rename output ports to add the component prefix so that
@@ -971,12 +979,11 @@ def compose(
                 f"{conn.to_component!r}:{conn.to_port!r} has no input network"
             )
             continue
-        # A connection may legitimately change colour when a clock bridge is
-        # involved.  Compare the surviving network ids using both global and
-        # per-component port maps, and accept either.
-        src_survivor = merged.output_ports.get(src_pfx + conn.from_port, src_net_id)
-        dst_survivor = merged.input_ports.get(conn.to_port, dst_net_id)
-        if src_survivor != dst_survivor:
+        # The per-component entries were both updated to the surviving network
+        # id when the pair was wired, so they must match for a realized
+        # connection.  (A clock bridge legitimately changes colour internally,
+        # but the two port_map entries still converge on the same net.)
+        if src_net_id != dst_net_id:
             missing.append(
                 f"{conn.from_component!r}:{conn.from_port!r} "
                 f"({src_net_id!r}) is not wired to "
@@ -1033,12 +1040,11 @@ def compose(
                 f"{conn.to_component!r}:{conn.to_port!r} has no input network"
             )
             continue
-        # A connection may legitimately change colour when a clock bridge is
-        # involved.  Compare the surviving network ids using both global and
-        # per-component port maps, and accept either.
-        src_survivor = merged.output_ports.get(src_pfx + conn.from_port, src_net_id)
-        dst_survivor = merged.input_ports.get(conn.to_port, dst_net_id)
-        if src_survivor != dst_survivor:
+        # The per-component entries were both updated to the surviving network
+        # id when the pair was wired, so they must match for a realized
+        # connection.  (A clock bridge legitimately changes colour internally,
+        # but the two port_map entries still converge on the same net.)
+        if src_net_id != dst_net_id:
             missing.append(
                 f"{conn.from_component!r}:{conn.from_port!r} "
                 f"({src_net_id!r}) is not wired to "

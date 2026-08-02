@@ -643,10 +643,10 @@ export async function makePreview(blob, kind, maxDim = 96) {
       });
     }
 
-    if (kind === "audio") {
+    if (kind === "audio" || kind === "midi") {
       // Reliable 1s preview: decode the audio and re-encode its first second
       // as a small WAV (no playback/autoplay needed). Falls back to the
-      // original file if decoding isn't possible.
+      // original file if decoding isn't possible (e.g. MIDI).
       try {
         const ab = await blob.arrayBuffer();
         const AC = window.AudioContext || window.webkitAudioContext;

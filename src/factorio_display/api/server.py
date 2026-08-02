@@ -190,6 +190,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         out: list[UploadOut] = []
         for file in files:
             data = await file.read()
+            if len(data) > settings.max_upload_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail=_err(
+                        "too_large",
+                        f"upload too large: {len(data)} bytes "
+                        f"(max {settings.max_upload_bytes} bytes)",
+                    ),
+                )
             rec = store.save_upload(principal, file.filename or "upload.bin", data)
             out.append(UploadOut(**rec.to_dict()))
         return out

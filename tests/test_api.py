@@ -121,6 +121,16 @@ def test_cors_rejects_unknown_origin(client: TestClient) -> None:
     assert r.headers.get("access-control-allow-origin") is None
 
 
+def test_upload_rejects_too_large(tmp_path) -> None:
+    """Uploads above Settings.max_upload_bytes are rejected with 413."""
+    with _make_client(tmp_path, max_upload_bytes=100) as c:
+        big = c.post("/api/v1/uploads", files={"files": ("big.bin", b"x" * 101, "application/octet-stream")})
+        assert big.status_code == 413
+        assert big.json()["detail"]["error"]["code"] == "too_large"
+        small = c.post("/api/v1/uploads", files={"files": ("small.bin", b"x" * 50, "application/octet-stream")})
+        assert small.status_code == 201
+
+
 def test_upload_roundtrip(client: TestClient) -> None:
     r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])
     assert r.status_code == 201

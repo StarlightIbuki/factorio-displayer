@@ -1239,6 +1239,8 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                                help="Max concurrent encode jobs (default: 2).")
     server_parser.add_argument("--max-jobs-per-user", type=int, default=2,
                                help="Max active jobs per caller (default: 2).")
+    server_parser.add_argument("--max-upload-mb", type=int, default=None,
+                               help="Reject uploads larger than this many MiB (default: 256).")
     server_parser.add_argument("--api-token", type=str, default=None,
                                help="Optional shared-secret gate (Authorization: Bearer or X-API-Token).")
     server_parser.add_argument("--token-key", type=str, default=None,
@@ -1433,6 +1435,7 @@ def _handle_server(args) -> None:
         data_dir=Path(args.data_dir) if args.data_dir else Path("server_data"),
         max_workers=args.max_workers,
         max_jobs_per_user=args.max_jobs_per_user,
+        max_upload_bytes=(args.max_upload_mb or 256) * 1024 * 1024,
         api_token=args.api_token,
         token_key=args.token_key,
         compress_artifacts=args.compress_artifacts,

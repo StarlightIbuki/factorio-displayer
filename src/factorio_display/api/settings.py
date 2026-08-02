@@ -13,6 +13,7 @@ class Settings:
     data_dir: Path = Path("server_data")
     max_workers: int = 2
     max_jobs_per_user: int = 2
+    max_upload_bytes: int = 256 * 1024 * 1024  # reject uploads above 256 MiB (--max-upload-mb)
     api_token: str | None = None
     token_key: str | None = None  # HMAC key for signed access tokens (--token-key)
     # GitHub OAuth (login with GitHub).  client_secret stays server-side only.
