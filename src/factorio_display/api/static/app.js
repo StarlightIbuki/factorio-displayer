@@ -1806,34 +1806,55 @@ async function copyJobBlueprint(id) {
   catch (e) { toast(e.message, "error"); }
 }
 
-// Preview the locally cached (compressed) media used for this job.
-async function toggleMediaPreview(jobId) {
-  const card = $(`[data-job="${jobId}"]`);
-  if (!card) return;
-  const existing = card.querySelector(".media-preview");
-  if (existing) { existing.remove(); return; }
-  const box = el("div", { class: "job-detail media-preview" });
-  box.append(el("p", { class: "hint", text: t("jobs.loadingMedia") }));
-  card.append(box);
-  try {
-    const cached = await getMedia(jobId);
-    if (!cached) {
-      box.innerHTML = "";
-      box.append(el("p", { class: "hint", text: t("jobs.noCachedMedia") }));
-      return;
-    }
-    const url = URL.createObjectURL(cached.blob);
-    let player;
-    if (isSoundKind(cached.kind)) player = el("audio", { controls: "", src: url, style: "width:100%" });
-    else if (cached.kind === "image") player = el("img", { src: url, style: "max-width:100%" });
-    else player = el("video", { controls: "", src: url, style: "max-width:100%" });
-    box.innerHTML = "";
-    box.append(player);
-  } catch (e) {
-    box.innerHTML = "";
-    box.append(el("p", { class: "hint", text: t("t.previewFailed", { msg: e.message }) }));
-  }
+// ── media preview modal ────────────────────────────────────────────────
+// Plays the FINAL media that was uploaded for this job (the exact compressed
+// blob the client submitted), in a modal instead of an inline box.
+const mediaModal = $("#media-modal");
+const mediaModalBody = $("#media-modal-body");
+let mediaPreviewUrl = null;
+
+function openMediaPreview(jobId) {
+  if (!mediaModal || !mediaModalBody) return;
+  mediaModalBody.innerHTML = "";
+  mediaModalBody.append(el("p", { class: "hint", text: t("jobs.loadingMedia") }));
+  mediaModal.classList.remove("hidden");
+  loadMediaPreview(jobId);
 }
+
+async function loadMediaPreview(jobId) {
+  if (!mediaModalBody) return;
+  if (mediaPreviewUrl) { URL.revokeObjectURL(mediaPreviewUrl); mediaPreviewUrl = null; }
+  let cached = null;
+  try { cached = await getMedia(jobId); } catch (_) { cached = null; }
+  mediaModalBody.innerHTML = "";
+  if (!cached || !cached.blob) {
+    mediaModalBody.append(el("p", { class: "hint", text: t("jobs.noCachedMedia") }));
+    return;
+  }
+  const url = URL.createObjectURL(cached.blob);
+  mediaPreviewUrl = url;
+  let player;
+  if (isSoundKind(cached.kind)) player = el("audio", { controls: "", src: url });
+  else if (cached.kind === "image") player = el("img", { src: url });
+  else player = el("video", { controls: "", autoplay: "", playsinline: "", src: url });
+  mediaModalBody.append(player);
+}
+
+function closeMediaPreview() {
+  if (mediaPreviewUrl) { URL.revokeObjectURL(mediaPreviewUrl); mediaPreviewUrl = null; }
+  if (mediaModalBody) mediaModalBody.innerHTML = "";
+  if (mediaModal) mediaModal.classList.add("hidden");
+}
+if (mediaModal) {
+  mediaModal.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeMediaPreview();
+  });
+  const closeBtn = $("#media-modal-close");
+  if (closeBtn) closeBtn.addEventListener("click", closeMediaPreview);
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && mediaModal && !mediaModal.classList.contains("hidden")) closeMediaPreview();
+});
 
 async function loadJobPreview(card, host, jobId) {
   if (jobPreviewCache.has(jobId)) {
@@ -1869,7 +1890,7 @@ function buildJobCard(job) {
   const previewHost = el("div", { class: "job-preview hidden" });
   head.append(previewHost);
   const actions = el("span", { class: "row" });
-  actions.append(el("button", { text: t("jobs.previewMedia"), onclick: (ev) => { ev.stopPropagation(); toggleMediaPreview(job.job_id); } }));
+  actions.append(el("button", { text: t("jobs.previewMedia"), title: t("jobs.previewTitle"), onclick: (ev) => { ev.stopPropagation(); openMediaPreview(job.job_id); } }));
   if (job.status === "succeeded") {
     actions.append(el("button", { text: t("jobs.copyBlueprint"), onclick: (ev) => { ev.stopPropagation(); copyJobBlueprint(job.job_id); } }));
     actions.append(el("button", { text: t("result.pastebin"), title: "Create a temporary public link", onclick: (ev) => { ev.stopPropagation(); shareJob(job.job_id); } }));

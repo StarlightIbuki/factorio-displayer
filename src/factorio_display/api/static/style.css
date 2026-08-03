@@ -131,9 +131,16 @@ button.big { font-size: 16px; padding: 12px 26px; border-radius: 6px; }
 .editor-controls { display: flex; flex-direction: column; gap: 2px; }
 .editor-preview { width: 100%; background: #000; border: 1px solid var(--border); border-radius: 4px; margin-top: 8px; }
 
-/* ── job media preview ───────────────── */
-.media-preview { padding: 10px 12px; }
-.media-preview video, .media-preview audio { width: 100%; }
+/* ── job media preview modal ─────────── */
+.media-modal-box { max-width: min(1000px, calc(100vw - 48px)); }
+.media-modal-body {
+  display: flex; align-items: center; justify-content: center;
+  background: #000; border: 1px solid var(--border); border-radius: 6px;
+  padding: 12px; min-height: 160px; margin-top: 8px;
+}
+.media-modal-body video, .media-modal-body audio { width: 100%; }
+.media-modal-body video, .media-modal-body img { max-height: 68vh; }
+.media-modal-body img { max-width: 100%; object-fit: contain; }
 
 /* ── layout ──────────────────────────── */
 main { max-width: 1080px; margin: 0 auto; padding: 20px; }
