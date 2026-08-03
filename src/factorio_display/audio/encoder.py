@@ -38,6 +38,29 @@ from ..cache_paths import (
 from .pitch_mapping import SPEAKER_COUNT, drum_grouping  # pylint: disable=relative-beyond-top-level,import-outside-toplevel
 
 
+def _audio_drums_enabled(kwargs: dict[str, object]) -> bool:
+    """Whether audio drum detection is opted in.
+
+    Accepts ``drums`` / ``audio_drums`` kwargs that are truthy and not the
+    string ``"off"`` (so ``--drums off`` and ``--no-drums`` both disable).
+    """
+    for key in ("drums", "audio_drums"):
+        val = kwargs.get(key)
+        if val is not None:
+            if isinstance(val, str):
+                return val.lower() not in ("", "off", "false", "none", "0")
+            return bool(val)
+    return False
+
+
+def _drum_rail_to_int(drum_rail: list[list[float]]) -> list[list[int]]:
+    """Convert a float drum rail ``[tick][48]`` to clamped 0-100 ints."""
+    return [
+        [max(0, min(100, int(round(v)))) for v in tick]
+        for tick in drum_rail
+    ]
+
+
 def _file_identity(path: str) -> str:
     """Return a stable identity for an input file: resolved path + mtime + size.
 
@@ -527,29 +550,61 @@ def _audio_rails(
         return _midi_rails(path, kwargs)
 
     if ext in _AUDIO_EXTS:
+        instruments: list[str] = []
+        int_data_list: list[list[list[int]]] = []
+
         if bool(kwargs.get("use_basic_pitch", True)):
             from .basic_pitch_transcriber import transcribe_audio  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
             midi_path = transcribe_audio(path)
             if midi_path is not None:
-                return _midi_rails(midi_path, kwargs)
+                instruments, int_data_list = _midi_rails(midi_path, kwargs)
 
-        # Built-in STFT → single piano rail.
-        from .audio_analyzer import (  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
-            audio_file_to_loudness, fold_loudness_array,
-        )
-        full_loudness = audio_file_to_loudness(
-            path, activation_threshold=float(kwargs.get("activation_threshold", 0.0)),
-        )
-        if not full_loudness:
-            return [], []
-        game_loudness = fold_loudness_array(full_loudness)
-        global_max = max((v for tick in game_loudness for v in tick), default=0.0)
-        scale = 100.0 / global_max if global_max > 0 else 1.0
-        int_data = [
-            [max(0, min(100, int(round(v * scale)))) for v in tick]
-            for tick in game_loudness
-        ]
-        return ["piano"], [int_data]
+        if not int_data_list:
+            # Built-in STFT → single piano rail.
+            from .audio_analyzer import (  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+                audio_file_to_loudness, fold_loudness_array,
+            )
+            full_loudness = audio_file_to_loudness(
+                path, activation_threshold=float(kwargs.get("activation_threshold", 0.0)),
+            )
+            if not full_loudness:
+                return [], []
+            game_loudness = fold_loudness_array(full_loudness)
+            global_max = max((v for tick in game_loudness for v in tick), default=0.0)
+            scale = 100.0 / global_max if global_max > 0 else 1.0
+            int_data = [
+                [max(0, min(100, int(round(v * scale)))) for v in tick]
+                for tick in game_loudness
+            ]
+            instruments = ["piano"]
+            int_data_list = [int_data]
+
+        # Audio drum detection: Basic Pitch (and the STFT fallback) only
+        # transcribe *pitched* notes, so real kick/snare/hat hits are missing.
+        # When the user opts in (--drums), recover them from the raw waveform
+        # and append a drum rail — everything downstream (drum grouping,
+        # drum-kit decoder) already knows how to handle a "drum" rail.
+        if instruments and int_data_list and _audio_drums_enabled(kwargs):
+            from .drum_detector import (  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+                detect_drum_rail_from_file,
+            )
+            drum_rail = detect_drum_rail_from_file(path)
+            if drum_rail:
+                instruments.append("drum")
+                int_data_list.append(_drum_rail_to_int(drum_rail))
+                sys.stderr.write(
+                    f"[drums] added drum rail ({len(drum_rail)} ticks)\n"
+                )
+
+        # Align every rail to the same number of ticks so the memory banks
+        # (and the composed clock) line up.
+        max_ticks = max((len(td) for td in int_data_list), default=0)
+        if max_ticks:
+            int_data_list = [
+                td + [[0] * len(td[0]) for _ in range(max_ticks - len(td))]
+                for td in int_data_list
+            ]
+        return instruments, int_data_list
 
     return [], []
 
@@ -575,7 +630,7 @@ def _midi_rails(
         "attack_ticks", "decay_ticks", "sustain_level", "release_ticks",
         "attack_curve", "decay_curve", "release_curve",
         "processed_midi_path",
-        "use_global_shift",
+        "use_global_shift", "rearticulation_ticks",
     ):
         if key in kwargs:
             midi_kwargs[key] = kwargs[key]
@@ -613,7 +668,8 @@ def _midi_rails(
                      if k in ("ticks_per_beat", "boost_melody", "velocity_scale",
                               "attack_ticks", "decay_ticks", "sustain_level",
                               "release_ticks", "attack_curve", "decay_curve",
-                              "release_curve", "use_global_shift")}
+                              "release_curve", "use_global_shift",
+                              "rearticulation_ticks")}
 
     # ── Cache: reuse the translated tick data when inputs are unchanged ──
     # The key covers the source file identity plus every translation option

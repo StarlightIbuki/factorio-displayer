@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import sys
 from pathlib import Path
 
@@ -284,6 +285,11 @@ def _add_audio_midi_options(parser: argparse.ArgumentParser) -> None:
                    help="Melody velocity multiplier (default: 1.0 = off, 1.5 = 50%% boost)")
     g.add_argument("--velocity-scale", type=float, default=1.0,
                    help="Global velocity multiplier (default: 1.0)")
+    g.add_argument("--rearticulation-ticks", type=int, default=2,
+                   help="Game ticks of silence inserted before a same-pitch note "
+                        "that re-triggers within that window of the previous note's "
+                        "end, so repeated notes re-attack instead of merging into one "
+                        "sustained tone (default: 2; 0 = off)")
     g2 = parser.add_argument_group("ADSR envelope")
     g2.add_argument("--attack-ticks", type=int, default=10,
                     help="ADSR attack duration in game ticks (default: 10, 0 = off)")
@@ -646,7 +652,9 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
     4. Rebuild each rail's data (red) bus as a row-snake over that rail's
        memory outputs, splicing in its page port and selector chain.
     """
-    from .logical_blueprint import Endpoint, _chebyshev, _endpoint_position
+    from .logical_blueprint import (  # pylint: disable=import-outside-toplevel,relative-beyond-top-level
+        Endpoint, _chebyshev, _endpoint_position, _entity_wire_point,
+    )
 
     def _is_memory_page(eid: str) -> bool:
         ent = lb.entities.get(eid)
@@ -668,7 +676,11 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
     # prefix sits between "audio_player_" and the rail id, so search for the
     # "_r<digit>_" rail marker anywhere in the id.
     import re as _re
-    _RAIL_RE = _re.compile(r"_r(\d+)_")
+    # The entity id is ``audio_player_<label>_r<ri>_<role>``.  The label (from
+    # the user's ``--name``) may itself contain "_r<digit>_" (e.g. "song r2"),
+    # so match the LAST "_r<digit>_" — that is the real rail marker in the
+    # suffix, not a label artefact.
+    _RAIL_RE = _re.compile(r".*_r(\d+)_")
     multi = any(_RAIL_RE.search(eid) for eid in player_ids)
     if multi:
         rail_indices = sorted({
@@ -825,65 +837,163 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
             deg[b] = deg.get(b, 0) + 1
         return [ep for ep, d in deg.items() if d < 2]
 
-    def _nearest_free(px: int, py: int, occ: set[tuple[int, int]]) -> tuple[int, int]:
-        """Return the nearest unoccupied tile to (px, py)."""
-        if (px, py) not in occ:
-            return px, py
-        for r in range(1, 6):
+    def _wire_point(ep: Endpoint) -> tuple[float, float]:
+        """Physical connection point of *ep* (direction-aware), matching what
+        Factorio uses to measure circuit-wire reach."""
+        return _entity_wire_point(ep, lb)
+
+    def _wdist_points(pa: tuple[float, float], pb: tuple[float, float]) -> float:
+        """Euclidean distance between two connection points."""
+        return math.dist(pa, pb)
+
+    def _wdist(ep_a: Endpoint, ep_b: Endpoint) -> float:
+        return _wdist_points(_wire_point(ep_a), _wire_point(ep_b))
+
+    def _find_relay_tile(
+        tx: int, ty: int, occ: set[tuple[int, int]],
+        prev_w: tuple[float, float], target_w: tuple[float, float],
+        reach: float,
+    ) -> tuple[int, int] | None:
+        """Find a free tile near (tx, ty) whose connection point is within
+        *reach* tiles (Euclidean) of *prev_w* and strictly closer to
+        *target_w* (so bridging provably terminates).  Farthest reachable tiles
+        win, so the fewest relays are needed.  Returns None when no such tile
+        exists near the ideal step (the caller then retries with a shorter
+        step)."""
+        best: tuple[tuple[float, float], tuple[int, int]] | None = None
+        for r in range(0, 6):
             for dx in range(-r, r + 1):
                 for dy in range(-r, r + 1):
-                    if abs(dx) == r or abs(dy) == r:
-                        cand = (px + dx, py + dy)
-                        if cand not in occ:
-                            return cand
-        return (px, py + 8)
+                    if abs(dx) != r and abs(dy) != r:
+                        continue
+                    cand = (tx + dx, ty + dy)
+                    if cand in occ:
+                        continue
+                    cand_w = (cand[0] + 0.5, cand[1] + 0.5)
+                    d_prev = math.dist(prev_w, cand_w)
+                    if d_prev > reach:
+                        continue
+                    if math.dist(cand_w, target_w) >= math.dist(prev_w, target_w):
+                        continue  # must make progress toward the far end
+                    # Farthest reachable tile wins (fewest relays); ties broken
+                    # by proximity to the ideal step (tidier layout).
+                    key = (-d_prev, abs(dx) + abs(dy))
+                    if best is None or key < best[0]:
+                        best = (key, cand)
+        if best is not None:
+            return best[1]
+        # Dense neighbourhood: relax the progress requirement, keep the reach
+        # bound and never return an occupied tile.
+        for r in range(1, 7):
+            for dx in range(-r, r + 1):
+                for dy in range(-r, r + 1):
+                    if abs(dx) != r and abs(dy) != r:
+                        continue
+                    cand = (tx + dx, ty + dy)
+                    cand_w = (cand[0] + 0.5, cand[1] + 0.5)
+                    if cand not in occ and math.dist(prev_w, cand_w) <= reach:
+                        return cand
+        return None
 
-    def _bridge_with_poles(pairs: list[tuple[Endpoint, Endpoint]], net) -> list[tuple[Endpoint, Endpoint]]:
-        """Split any clock-bus pair longer than 9 tiles with power-pole nodes.
+    # Relay pole ids must be unique across EVERY network bridged below (the
+    # green clock bus plus each rail's red data bus), so the counter is shared
+    # at this scope instead of being reset per call.
+    _shared_pole_counter = [0]
 
-        Short clips with many rails can leave a gap between stacked memory
-        banks wider than Factorio's 9-tile wire limit (the decoders force a
-        ~24-tile stride while a tiny memory is only a few rows tall).  Insert
-        ``small-electric-pole`` nodes at ~8-tile intervals along such pairs.
-        Realistic (long) songs keep every hop ≤ 9 and need no poles.
+    # A legendary small electric pole reaches 17.5 tiles (base 7.5 wire reach
+    # + 2×quality-level), so pole↔pole hops can be much longer than with
+    # normal poles.  Hops that touch a normal-quality combinator are still
+    # capped at 9 tiles (the combinator's own circuit_wire_max_distance).
+    _POLE_REACH = 17.5
+    _COMBINATOR_REACH = 9.0
+
+    def _bridge_with_poles(
+        pairs: list[tuple[Endpoint, Endpoint]], net,
+    ) -> list[tuple[Endpoint, Endpoint]]:
+        """Split long pairs with legendary ``small-electric-pole`` relays.
+
+        Factorio silently drops circuit wires longer than the effective
+        connection reach (measured Euclidean between connection points): 9
+        tiles for normal combinators, 17.5 tiles for a legendary small
+        electric pole.  A long clock/data run is relayed through intermediate
+        legendary poles — the first hop (combinator → pole) and the final hop
+        (pole → combinator) stay within 9 tiles, while pole↔pole hops may use
+        the full 17.5-tile reach.  That longer reach means far fewer relays
+        than the previous normal-quality poles.
         """
         from .logical_blueprint import LogicalEntity  # pylint: disable=import-outside-toplevel
 
-        # Combinators are 1×2 tiles, everything else (poles, speakers) 1×1.
+        prefix = "green_bus_pole_" if net.color == "green" else "red_bus_pole_"
+
+        # Occupancy in tile space, honouring each entity's footprint and
+        # direction (combinators are 1×2 north/south or 2×1 east/west).
         occ = set()
         for e in lb.entities.values():
             if e.position is None:
                 continue
-            occ.add((e.position[0], e.position[1]))
-            if e.type in ("arithmetic-combinator", "decider-combinator", "constant-combinator"):
-                occ.add((e.position[0], e.position[1] + 1))
-        pole_n = [0]
+            x, y = e.position
+            if e.type in ("arithmetic-combinator", "decider-combinator"):
+                if e.direction in (2, 6):  # east/west → 2 wide × 1 tall
+                    occ.add((x, y))
+                    occ.add((x + 1, y))
+                else:  # north/south → 1 wide × 2 tall
+                    occ.add((x, y))
+                    occ.add((x, y + 1))
+            else:
+                occ.add((x, y))
+
         out: list[tuple[Endpoint, Endpoint]] = []
         for a, b in pairs:
-            pa = _pos(a)
-            pb = _pos(b)
-            d = max(abs(pa[0] - pb[0]), abs(pa[1] - pb[1]))
-            if d <= 9:
+            if _wdist(a, b) <= _COMBINATOR_REACH:
                 out.append((a, b))
                 continue
-            steps = (d + 8) // 9
             prev = a
-            for s in range(1, steps + 1):
-                t = s / steps
-                px = round(pa[0] + (pb[0] - pa[0]) * t)
-                py = round(pa[1] + (pb[1] - pa[1]) * t)
-                px, py = _nearest_free(px, py, occ)
-                pid = f"clock_bus_pole_{pole_n[0]}"
-                pole_n[0] += 1
+            prev_is_pole = False
+            for _guard in range(512):  # safety cap; normally only a few relays
+                prev_w = _wire_point(prev)
+                b_w = _wire_point(b)
+                if _wdist_points(prev_w, b_w) <= _COMBINATOR_REACH:
+                    out.append((prev, b))
+                    break
+                tile_p = _pos(prev)
+                dx = b_w[0] - prev_w[0]
+                dy = b_w[1] - prev_w[1]
+                reach = _POLE_REACH if prev_is_pole else _COMBINATOR_REACH
+                steps = (
+                    (17, 15, 13, 11, 9, 7, 5, 3, 1) if prev_is_pole
+                    else (8, 6, 4, 3, 2, 1)
+                )
+                placed: tuple[int, int] | None = None
+                # Try progressively shorter axis-aligned steps; the largest
+                # step that yields a valid free relay tile wins.
+                for step in steps:
+                    tx, ty = tile_p
+                    if abs(dx) >= abs(dy):
+                        tx += (1 if dx > 0 else -1) * min(step, int(abs(dx)))
+                    else:
+                        ty += (1 if dy > 0 else -1) * min(step, int(abs(dy)))
+                    placed = _find_relay_tile(tx, ty, occ, prev_w, b_w, reach)
+                    if placed is not None:
+                        break
+                if placed is None:
+                    # Genuinely stuck (fully packed within reach): keep the
+                    # direct wire rather than overlap or loop forever.
+                    out.append((prev, b))
+                    break
+                pid = f"{prefix}{_shared_pole_counter[0]}"
+                _shared_pole_counter[0] += 1
                 lb.add_entity(LogicalEntity(
-                    pid, "small-electric-pole", {}, (px, py),
+                    pid, "small-electric-pole", {"quality": "legendary"}, placed,
                 ))
-                occ.add((px, py))
+                occ.add(placed)
                 p_ep = Endpoint(pid, "input")
                 net.endpoints.add(p_ep)
                 out.append((prev, p_ep))
                 prev = p_ep
-            out.append((prev, b))
+                prev_is_pole = True
+            else:
+                # Safety: never leave the pair unconnected.
+                out.append((prev, b))
         return out
 
     # ── 3a. Rebuild the shared green clock bus ─────────────────────────
@@ -960,6 +1070,9 @@ def _finalize_audio_composition(lb: LogicalBlueprint) -> None:
                 pairs.append((chain[i], chain[i + 1]))
             start = ordered[0]
             pairs.append((start, page_port_out))
+        # Long red data runs (e.g. a distant selector page port) must also be
+        # relayed so every wire respects Factorio's 9-tile limit.
+        pairs = _bridge_with_poles(pairs, net)
         net.prewired_pairs = pairs
 
 
@@ -1121,6 +1234,12 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     g5.add_argument("--no-ai-transcribe", action="store_true",
                     help="Disable the optional AI transcription (Basic Pitch) for non-MIDI "
                          "audio; always use the built-in STFT analysis instead.")
+    g5.add_argument("--drums", nargs="?", const="auto", default=None,
+                    choices=["auto", "off"],
+                    help="Detect kick/snare/hat from the audio waveform and add a drum rail. "
+                         "Basic Pitch (and the STFT fallback) only transcribe pitched notes, "
+                         "so real drums are otherwise missing. 'auto' (default when the flag "
+                         "is given) adds a drum rail whenever enough hits are detected.")
     g5.add_argument("--output-midi", type=str, default=None,
                     help="Export extracted audio as MIDI to PATH before encoding.")
     g5.add_argument("--activation-threshold", type=float, default=0.0,
@@ -1814,6 +1933,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         "ticks_per_beat": getattr(args, "ticks_per_beat", 30),
         "boost_melody": getattr(args, "boost_melody", 1.0),
         "velocity_scale": getattr(args, "velocity_scale", 1.0),
+        "rearticulation_ticks": getattr(args, "rearticulation_ticks", 2),
         "attack_ticks": getattr(args, "attack_ticks", 10),
         "decay_ticks": getattr(args, "decay_ticks", 10),
         "sustain_level": getattr(args, "sustain_level", 1.0),
@@ -1829,6 +1949,7 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
         "condense_midi": not getattr(args, "no_condense", False),
         "max_polyphony": getattr(args, "max_polyphony", 0),
         "use_basic_pitch": not getattr(args, "no_ai_transcribe", False),
+        "drums": getattr(args, "drums", None) or False,
     }
 
     # For now, encode the first audio file; multi-audio concatenation

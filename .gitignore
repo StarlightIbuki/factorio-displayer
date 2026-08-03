@@ -16,3 +16,9 @@ server_data/
 tmp_*
 tmp-*
 .venv*
+
+# Generated eval output (WAVs, blueprints, reports) — reproduced by the
+# eval scripts in eval_midi/ (make_reference_midis.py, eval_real_track.py,
+# eval_fidelity.py, render_drums.py).
+eval_midi/out/
+eval_midi/ref_midis/

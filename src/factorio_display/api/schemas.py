@@ -38,6 +38,7 @@ class EncodeOptions(BaseModel):
     attack_curve: float = 1.0
     decay_curve: float = 1.0
     release_curve: float = 1.0
+    rearticulation_ticks: int = Field(2, ge=0)
     rail_mode: str = "auto:0.05"
     map_drums: bool = True
     drum_gain: float = Field(0.25, ge=0.0, le=1.0)

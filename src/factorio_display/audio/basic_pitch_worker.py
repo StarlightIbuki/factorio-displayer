@@ -40,6 +40,7 @@ def main(argv: list[str]) -> int:
     # Imported lazily/here so this module can be *syntax*-checked by the main
     # interpreter without tensorflow being importable.
     try:
+        from basic_pitch import ICASSP_2022_MODEL_PATH  # type: ignore[import-not-found]
         from basic_pitch.inference import predict_and_save  # type: ignore[import-not-found]
     except Exception as exc:  # pragma: no cover - env error
         print(f"basic_pitch is not importable in this interpreter: {exc}",
@@ -51,8 +52,10 @@ def main(argv: list[str]) -> int:
             [input_audio],
             output_dir,
             save_midi=True,
-            save_notes=False,
+            sonify_midi=False,
             save_model_outputs=False,
+            save_notes=False,
+            model_or_model_path=ICASSP_2022_MODEL_PATH,
             onset_threshold=0.5,
             frame_threshold=0.3,
             minimum_note_length=58,     # ms — drop ultra-short glitches

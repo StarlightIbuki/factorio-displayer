@@ -115,6 +115,7 @@ class MediaConfig:
     attack_curve: float = 1.0
     decay_curve: float = 1.0
     release_curve: float = 1.0
+    rearticulation_ticks: int = 2
     rail_mode: str = "auto:0.05"
     map_drums: bool = True
     drum_gain: float = 0.25
@@ -169,6 +170,7 @@ class MediaConfig:
         a += ["--ticks-per-beat", str(self.ticks_per_beat)]
         a += ["--boost-melody", str(self.boost_melody)]
         a += ["--velocity-scale", str(self.velocity_scale)]
+        a += ["--rearticulation-ticks", str(self.rearticulation_ticks)]
         a += ["--attack-ticks", str(self.attack_ticks)]
         a += ["--decay-ticks", str(self.decay_ticks)]
         a += ["--sustain-level", str(self.sustain_level)]

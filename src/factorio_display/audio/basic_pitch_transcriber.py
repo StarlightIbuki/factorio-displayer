@@ -116,9 +116,15 @@ def transcribe_audio(audio_path: str, *, cache: bool = True) -> str | None:
 
     try:
         tmpdir = tempfile.mkdtemp(prefix="fd_basic_pitch_")
+        # Basic Pitch prints progress/warnings containing non-ASCII (e.g. the
+        # U+1F6A8 emoji in its tqdm output).  On Windows the default console
+        # codepage (GBK/cp936) cannot encode those, raising UnicodeEncodeError
+        # inside the subprocess.  Force UTF-8 I/O so transcription succeeds.
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         run = subprocess.run(
             [py, str(_worker_path), audio_path, tmpdir],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True, text=True, timeout=600, env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         sys.stderr.write(f"Basic Pitch subprocess error: {exc}\n")

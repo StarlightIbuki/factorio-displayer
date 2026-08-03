@@ -475,6 +475,45 @@ def _adsr_shape(
     return peak_loudness * sustain_level
 
 
+def _rearticulation_start_map(
+    notes: list[tuple[int, float, float, float]],
+    gap_ticks: int,
+) -> dict[int, int]:
+    """Return ``{note_index: effective_start_i}`` adding re-articulation gaps.
+
+    Back-to-back (or legato-overlapping) same-pitch notes currently sustain
+    into one continuous tone because the tick_data encoding has no
+    note-off/note-on distinction — a repeated note loses its re-attack.  This
+    computes, for each note whose start is within *gap_ticks* of the previous
+    same-pitch note's end, a start pushed back by *gap_ticks*, inserting a
+    brief silence so the speaker re-attacks instead of merging.
+
+    The push never swallows the note: the effective start is clamped to at
+    most ``end_i - 1`` so the note always plays at least one tick.  Returns an
+    empty dict when *gap_ticks* <= 0 or *notes* is empty.
+    """
+    if gap_ticks <= 0 or not notes:
+        return {}
+
+    by_pitch: dict[int, list[int]] = {}
+    for idx, n in enumerate(notes):
+        by_pitch.setdefault(n[0], []).append(idx)
+
+    result: dict[int, int] = {}
+    for pitch, idxs in by_pitch.items():
+        idxs.sort(key=lambda i: (notes[i][1], notes[i][2]))
+        prev_end = float("-inf")
+        for i in idxs:
+            start_t, end_t = notes[i][1], notes[i][2]
+            if start_t - prev_end <= gap_ticks:
+                end_i = int(math.ceil(end_t))
+                pushed = int(start_t) + gap_ticks
+                # never push past the last playable tick of this note
+                result[i] = min(pushed, max(int(start_t), end_i - 1))
+            prev_end = max(prev_end, end_t)
+    return result
+
+
 def midi_to_tick_data(
     mid: mido.MidiFile,
     ticks_per_beat: int = 30,
@@ -489,6 +528,7 @@ def midi_to_tick_data(
     decay_curve: float = 1.0,
     release_curve: float = 1.0,
     use_global_shift: bool = True,
+    rearticulation_ticks: int = 0,
 ) -> list[list[float]]:
     """Convert a MIDI file to per-tick loudness data for all 48 speakers.
 
@@ -527,6 +567,11 @@ def midi_to_tick_data(
         If True (default), compute an optimal octave shift that minimises
         the number of notes needing per-note folding. If False, use only
         per-note octave folding.
+    rearticulation_ticks : int
+        If > 0, insert a loudness dip of this many game ticks before a
+        same-pitch note that re-triggers within that window of the previous
+        note's end, so repeated notes re-attack instead of merging into one
+        sustained tone (default 0 = off).
     """
     if not mid.tracks:
         return []
@@ -661,8 +706,13 @@ def midi_to_tick_data(
     use_adsr = attack_ticks > 0 or decay_ticks > 0 or sustain_level < 1.0 or release_ticks > 0
     tick_data: list[list[float]] = [[0.0] * SPEAKER_COUNT for _ in range(num_ticks)]
 
-    for pitch_idx, start_t, end_t, loudness in all_notes:
-        start_i = int(start_t)
+    # Re-articulation: back-to-back same-pitch notes would otherwise merge
+    # into one sustained tone; push each re-strike's start back by a few ticks
+    # so the speaker re-attacks instead.
+    reartic_map = _rearticulation_start_map(all_notes, rearticulation_ticks)
+
+    for idx, (pitch_idx, start_t, end_t, loudness) in enumerate(all_notes):
+        start_i = reartic_map.get(idx, int(start_t))
         end_i = int(math.ceil(end_t))
         note_duration = end_i - start_i
         if note_duration <= 0:
@@ -706,6 +756,7 @@ def midi_to_multi_rail_tick_data(
     release_curve: float = 1.0,
     map_drums: bool = False,
     use_global_shift: bool = True,
+    rearticulation_ticks: int = 0,
 ) -> tuple[list[str], list[list[list[float]]]]:
     """Convert a MIDI file to per-rail tick→loudness data.
 
@@ -719,6 +770,12 @@ def midi_to_multi_rail_tick_data(
 
     use_global_shift : bool
         If True (default), compute per-instrument optimal octave shifts.
+    rearticulation_ticks : int
+        If > 0, insert a loudness dip of this many game ticks before a
+        same-pitch note that re-triggers within that window of the previous
+        note's end, so repeated notes re-attack instead of merging into one
+        sustained tone (default 0 = off).  Drum rails are unaffected (they
+        are single transients and never merge).
     """
     if not mid.tracks:
         return [], []
@@ -954,8 +1011,14 @@ def midi_to_multi_rail_tick_data(
         # on the hit tick and stay silent afterwards.
         is_drum_rail = rail_instruments[ri] == 'drum'
         td: list[list[float]] = [[0.0] * SPEAKER_COUNT for _ in range(num_ticks)]
-        for pitch_idx, start_t, end_t, loudness in rail_notes[ri]:
-            start_i = int(start_t)
+        # Re-articulation gaps apply to melodic rails only (drum rails are
+        # already single transients and never merge).
+        reartic_map = (
+            {} if is_drum_rail
+            else _rearticulation_start_map(rail_notes[ri], rearticulation_ticks)
+        )
+        for idx, (pitch_idx, start_t, end_t, loudness) in enumerate(rail_notes[ri]):
+            start_i = reartic_map.get(idx, int(start_t))
             end_i = int(math.ceil(end_t))
             note_duration = end_i - start_i
             if note_duration <= 0:

@@ -1005,3 +1005,103 @@ class TestGlobalShiftIntegration:
         assert 'drum' in instruments
         # No global shift should be logged for drum
         assert "[drum]" not in log_output or "Global octave shift" not in log_output
+
+
+# ── re-articulation ───────────────────────────────────────────────────
+
+def _count_sustained_notes(td: list[list[float]], threshold: float = 1.0) -> int:
+    """Count distinct note attacks in a single-rail tick_data grid."""
+    if not td:
+        return 0
+    count = 0
+    active = [False] * len(td[0])
+    for tick in td:
+        for p, v in enumerate(tick):
+            is_on = v > threshold
+            if is_on and not active[p]:
+                count += 1
+            active[p] = is_on
+    return count
+
+
+def _repeated_pitch_midi(
+    note: int = 76, vel: int = 90, tpb: int = 480, tempo: int = 500_000,
+) -> mido.MidiFile:
+    """Two back-to-back same-pitch quarter notes, off-before-on at the boundary.
+
+    The off-before-on ordering at the same tick is how re-articulated (repeated)
+    notes are normally encoded, and lets the translator close note 1 before it
+    opens note 2.
+    """
+    mid = mido.MidiFile(ticks_per_beat=tpb)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=tempo, time=0))
+    events = [
+        (0, "on", mido.Message("note_on", note=note, velocity=vel, time=0)),
+        (tpb, "off", mido.Message("note_off", note=note, velocity=0, time=0)),
+        (tpb, "on", mido.Message("note_on", note=note, velocity=vel, time=0)),
+        (2 * tpb, "off", mido.Message("note_off", note=note, velocity=0, time=0)),
+    ]
+    # sort: "off" first so the note_off at the boundary precedes the note_on
+    events.sort(key=lambda e: (e[0], 0 if e[1] == "off" else 1))
+    prev = 0
+    for abs_tick, _, msg in events:
+        msg.time = abs_tick - prev
+        track.append(msg)
+        prev = abs_tick
+    return mid
+
+
+class TestRearticulation:
+    """Same-pitch re-triggers re-attack instead of merging (optional)."""
+
+    def test_off_merges_back_to_back_repeats(self):
+        mid = _repeated_pitch_midi()
+        td = midi_to_tick_data(mid, ticks_per_beat=30, rearticulation_ticks=0)
+        assert _count_sustained_notes(td) == 1, "default merges into one tone"
+
+    def test_on_splits_back_to_back_repeats(self):
+        mid = _repeated_pitch_midi()
+        td = midi_to_tick_data(mid, ticks_per_beat=30, rearticulation_ticks=2)
+        assert _count_sustained_notes(td) == 2, "re-articulation re-attacks"
+
+    def test_on_keeps_distinct_notes_with_real_gap(self):
+        # Same pitch but a real 480-tick (whole-note) gap → never merged anyway.
+        mid = mido.MidiFile(ticks_per_beat=480)
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
+        track.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))
+        for start, dur in [(0, 480), (960, 480)]:
+            track.append(mido.Message("note_on", note=76, velocity=90, time=start))
+            track.append(mido.Message("note_off", note=76, velocity=0, time=dur))
+        td = midi_to_tick_data(mid, ticks_per_beat=30, rearticulation_ticks=2)
+        assert _count_sustained_notes(td) == 2
+
+    def test_multi_rail_splits_repeats(self):
+        mid = _repeated_pitch_midi()
+        instruments, rail_data = midi_to_multi_rail_tick_data(
+            mid, ticks_per_beat=30, map_drums=False,
+            rearticulation_ticks=2,
+        )
+        assert instruments == ["piano"]
+        assert _count_sustained_notes(rail_data[0]) == 2
+
+    def test_drum_rail_unaffected(self):
+        # Drums are single transients; re-articulation must not delay them.
+        mid = mido.MidiFile(ticks_per_beat=480)
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
+        track.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))
+        for start, dur in [(0, 240), (240, 240)]:  # two back-to-back kicks, ch9
+            track.append(mido.Message("note_on", note=36, velocity=100, channel=9, time=start))
+            track.append(mido.Message("note_off", note=36, velocity=0, channel=9, time=dur))
+        instruments, rail_data = midi_to_multi_rail_tick_data(
+            mid, ticks_per_beat=30, rearticulation_ticks=2,
+        )
+        assert 'drum' in instruments
+        ri = instruments.index('drum')
+        hits = [t for t, tick in enumerate(rail_data[ri]) if any(v > 0 for v in tick)]
+        # both hits land on their original ticks (0 and 30 game ticks); the
+        # re-articulation window must NOT delay the second kick
+        assert hits == [0, 30], f"drum hits moved: {hits}"
