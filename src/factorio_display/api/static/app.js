@@ -546,15 +546,25 @@ async function renderTimeline() {
     audioEnd = Math.max(audioEnd, s + d);
   }
   const tlDur = Math.max(cursor, audioEnd, 1);
-  const sig = state.clips.map((c) => `${c.id}:${c.kind}:${editedDurOf(c)}`).join("|");
+  // The pixel scale is keyed on the clip SET (id + kind) only — NOT on each
+  // clip's duration/position — so a trim or align drag keeps the current
+  // scale and the dragged block/edge stays exactly where the cursor put it,
+  // instead of the whole timeline re-fitting and the edge jumping on release.
+  const sig = state.clips.map((c) => `${c.id}:${c.kind}`).join("|");
   let pxPerSec;
   if (tlScaleSig === sig && tlScalePx > 0) {
-    pxPerSec = tlScalePx; // only positions changed → keep the scale
+    pxPerSec = tlScalePx;
   } else {
     pxPerSec = Math.max(20, 900 / tlDur);
     tlScaleSig = sig;
     tlScalePx = pxPerSec;
   }
+  // Grow the rails to the content so blocks that extend past the current view
+  // are scrollable instead of clipped by the rails' overflow:hidden.
+  const contentW = tlDur * pxPerSec;
+  railV.style.minWidth = `${contentW}px`;
+  railA.style.minWidth = `${contentW}px`;
+  $("#timeline-scale").style.minWidth = `${contentW}px`;
 
   for (const c of state.clips) {
     const p = positions[c.id];
@@ -629,28 +639,34 @@ function startTrimDrag(e, block, c, side, pxPerSec) {
   if (e.button !== 0) return;
   const startX = e.clientX;
   const srcDur = (clipInfo.get(c.id) || {}).dur || 0;
+  // The block's left edge is anchored during an edge drag, so the dragged
+  // edge is placed EXACTLY where the cursor is: duration = cursor offset from
+  // the left edge / pxPerSec (no drift from where inside the 9px handle the
+  // pointer grabbed).
+  const blockLeftPx = block.getBoundingClientRect().left;
   try { block.setPointerCapture(e.pointerId); } catch (_) { /* noop */ }
   const onMove = (ev) => {
     const dsec = (ev.clientX - startX) / pxPerSec;
+    // On-timeline duration if the dragged edge were right under the cursor.
+    const targetDur = Math.max(FRAME, Math.min(60, (ev.clientX - blockLeftPx) / pxPerSec));
     if (c.kind === "image") {
-      if (side === "right") c.edit.duration = snapFrame(Math.max(FRAME, Math.min(60, (c.edit.duration || 1) + dsec)));
+      if (side === "right") c.edit.duration = snapFrame(targetDur);
     } else if (c.kind === "video" && srcDur > 0) {
       if (side === "left") {
         c.edit.trimStart = snapFrame(Math.max(0, Math.min(srcDur - FRAME, (c.edit.trimStart || 0) + dsec)));
       } else {
         // The right edge sets the TIMELINE duration. It may extend past the
-        // source (repeat / freeze / slow) or shrink it (cut / fast), so the
-        // edge tracks the mouse 1:1 instead of clamping at the source end.
-        const cur = editedDurOf(c);
-        c.edit.duration = snapFrame(Math.max(FRAME, Math.min(60, cur + dsec)));
+        // source (repeat / freeze / slow) or shrink it (cut / fast), and it
+        // sits exactly at the cursor.
+        c.edit.duration = snapFrame(targetDur);
       }
     } else if (srcDur > 0) {
       // audio: source trim only (no stretching)
       if (side === "left") {
         c.edit.trimStart = snapFrame(Math.max(0, Math.min(srcDur - FRAME, (c.edit.trimStart || 0) + dsec)));
       } else {
-        const cur = c.edit.trimEnd > 0 && c.edit.trimEnd <= srcDur ? c.edit.trimEnd : srcDur;
-        c.edit.trimEnd = snapFrame(Math.max((c.edit.trimStart || 0) + FRAME, Math.min(srcDur, cur + dsec)));
+        const ts = c.edit.trimStart || 0;
+        c.edit.trimEnd = snapFrame(Math.min(srcDur, Math.max(ts + FRAME, ts + targetDur)));
       }
     }
     block.style.width = `${Math.max(26, editedDurOf(c) * pxPerSec)}px`;

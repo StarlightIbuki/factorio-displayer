@@ -154,6 +154,9 @@ h2 { color: var(--amber); margin: 4px 0 16px; font-size: 18px; }
   border-radius: 6px;
   padding: 14px;
   margin: 0 0 14px;
+  /* fieldsets default to min-width:min-content and blow out to fit wide
+     children (e.g. an extended timeline) instead of scrolling — allow shrink */
+  min-width: 0;
 }
 .panel legend { color: var(--green); font-weight: 600; padding: 0 6px; }
 .panel[open] summary { color: var(--green); }
@@ -531,6 +534,7 @@ pre.ascii {
   gap: 6px;
   margin-top: 8px;
   min-width: 640px;
+  max-width: 100%;
   overflow-x: auto;
   padding-bottom: 4px;
 }
