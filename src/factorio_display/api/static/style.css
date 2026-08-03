@@ -596,6 +596,7 @@ pre.ascii {
 .clip-inspector-inputs { gap: 14px; align-items: flex-end; flex-wrap: wrap; }
 .clip-inspector-inputs label { font-size: 12px; color: var(--muted); }
 .clip-inspector-inputs input { width: 72px; margin-top: 2px; }
+.clip-inspector-inputs select { width: 108px; margin-top: 2px; }
 
 .tl-block.video {
   background: rgba(126, 200, 80, 0.16);

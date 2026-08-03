@@ -123,6 +123,15 @@
             <label id="insp-in-wrap" data-i18n="s2.in">In (s) <input id="insp-in" type="number" min="0" step="0.1" /></label>
             <label id="insp-out-wrap" data-i18n="s2.out">Out (s) <input id="insp-out" type="number" min="0" step="0.1" /></label>
             <label id="insp-dur-wrap" class="hidden" data-i18n="s2.dur">Dur (s) <input id="insp-dur" type="number" min="0.1" step="0.1" /></label>
+            <label id="insp-mode-wrap" class="hidden" data-i18n="s2.mode">Mode
+              <select id="insp-mode">
+                <option value="cut" data-i18n="s2.modeCut">Cut</option>
+                <option value="fast" data-i18n="s2.modeFast">Fast play</option>
+                <option value="repeat" data-i18n="s2.modeRepeat">Repeat</option>
+                <option value="freeze" data-i18n="s2.modeFreeze">Freeze at end</option>
+                <option value="slow" data-i18n="s2.modeSlow">Slow play</option>
+              </select>
+            </label>
             <button id="insp-edit" class="link" data-i18n="s2.edit">Edit…</button>
           </div>
         </fieldset>

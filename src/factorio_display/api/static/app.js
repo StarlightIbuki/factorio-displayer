@@ -464,12 +464,19 @@ function probeClip(c) {
 }
 
 function editedDurOf(c) {
-  const info = clipInfo.get(c.id);
   if (c.kind === "image") return snapFrame(Math.max(FRAME, c.edit.duration || 1));
+  const info = clipInfo.get(c.id);
   if (!info || !info.dur) return FRAME;
   const start = Math.max(0, c.edit.trimStart || 0);
   const end = c.edit.trimEnd > 0 && c.edit.trimEnd <= info.dur ? c.edit.trimEnd : info.dur;
-  return snapFrame(Math.max(FRAME, end - start));
+  const srcLen = snapFrame(Math.max(FRAME, end - start));
+  // Audio/MIDI ride the audio rail and can't be stretched in-browser — they
+  // keep the source segment length. Videos get an independent timeline
+  // duration (set by dragging the right edge or the Dur field) that may be
+  // longer (repeat / freeze / slow) or shorter (cut / fast) than the source.
+  if (isSoundKind(c.kind)) return srcLen;
+  if (c.edit.duration != null && c.edit.duration > 0) return snapFrame(Math.max(FRAME, c.edit.duration));
+  return srcLen;
 }
 
 // Displayed on-rail position for a clip (ripple for video, absolute for audio).
@@ -627,7 +634,18 @@ function startTrimDrag(e, block, c, side, pxPerSec) {
     const dsec = (ev.clientX - startX) / pxPerSec;
     if (c.kind === "image") {
       if (side === "right") c.edit.duration = snapFrame(Math.max(FRAME, Math.min(60, (c.edit.duration || 1) + dsec)));
+    } else if (c.kind === "video" && srcDur > 0) {
+      if (side === "left") {
+        c.edit.trimStart = snapFrame(Math.max(0, Math.min(srcDur - FRAME, (c.edit.trimStart || 0) + dsec)));
+      } else {
+        // The right edge sets the TIMELINE duration. It may extend past the
+        // source (repeat / freeze / slow) or shrink it (cut / fast), so the
+        // edge tracks the mouse 1:1 instead of clamping at the source end.
+        const cur = editedDurOf(c);
+        c.edit.duration = snapFrame(Math.max(FRAME, Math.min(60, cur + dsec)));
+      }
     } else if (srcDur > 0) {
+      // audio: source trim only (no stretching)
       if (side === "left") {
         c.edit.trimStart = snapFrame(Math.max(0, Math.min(srcDur - FRAME, (c.edit.trimStart || 0) + dsec)));
       } else {
@@ -664,15 +682,23 @@ function renderInspector() {
   const p = currentPos(c);
   const info = clipInfo.get(c.id);
   const isImg = c.kind === "image";
+  const isVid = c.kind === "video";
+  // In/Out (source segment) for video+audio; Dur + timing Mode for video
+  // (and Dur for images). Audio/MIDI can't be stretched in-browser.
   $("#insp-in-wrap").classList.toggle("hidden", isImg);
   $("#insp-out-wrap").classList.toggle("hidden", isImg);
-  $("#insp-dur-wrap").classList.toggle("hidden", !isImg);
+  $("#insp-dur-wrap").classList.toggle("hidden", !(isImg || isVid));
+  $("#insp-mode-wrap").classList.toggle("hidden", !isVid);
   $("#insp-pos").value = p.start.toFixed(2);
   if (isImg) {
     $("#insp-dur").value = (c.edit.duration || 1).toFixed(2);
   } else {
     $("#insp-in").value = (c.edit.trimStart || 0).toFixed(2);
     $("#insp-out").value = (c.edit.trimEnd > 0 ? c.edit.trimEnd : (info ? info.dur : 0)).toFixed(2);
+    if (isVid) {
+      $("#insp-dur").value = editedDurOf(c).toFixed(2);
+      $("#insp-mode").value = c.edit.mode || "cut";
+    }
   }
 }
 
@@ -703,8 +729,15 @@ $("#insp-out").addEventListener("change", () => {
 });
 $("#insp-dur").addEventListener("change", () => {
   const c = getSelectedClip();
-  if (!c || c.kind !== "image") return;
+  if (!c || (c.kind !== "image" && c.kind !== "video")) return;
   c.edit.duration = snapFrame(Math.max(FRAME, parseFloat($("#insp-dur").value) || 1));
+  renderTimeline();
+  schedulePreviewRefresh();
+});
+$("#insp-mode").addEventListener("change", () => {
+  const c = getSelectedClip();
+  if (!c || c.kind !== "video") return;
+  c.edit.mode = $("#insp-mode").value;
   renderTimeline();
   schedulePreviewRefresh();
 });
@@ -734,7 +767,8 @@ async function refreshPreview() {
   status.textContent = t("t.rendering");
   try {
     const specs = previewable.map((c) => ({ id: c.id, file: c.file, name: c.name, kind: c.kind, edit: c.edit }));
-    const out = await exportConcatenated(specs, { mode: $("#opt-output-mode").value, maxDim: parseInt($("#compress-dim").value, 10) || 256 },
+    // The preview is a low-res stand-in for the display-sized final render.
+    const out = await exportConcatenated(specs, { mode: $("#opt-output-mode").value, maxDim: 256 },
       (pct) => { status.textContent = t("t.renderingPct", { pct: Math.round(pct) }); });
     if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
     state.previewUrl = URL.createObjectURL(out.blob);
@@ -785,11 +819,12 @@ const generateBtn = $("#btn-generate");
 const generateStatus = $("#generate-status");
 
 function defaultEdit() {
-  return { trimStart: 0, trimEnd: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, offset: 0, mute: false, start: null };
+  return { trimStart: 0, trimEnd: 0, crop: { x: 0, y: 0, w: 1, h: 1 }, offset: 0, mute: false, start: null, mode: "cut", duration: null };
 }
 function isEdited(e) {
   return e.trimStart !== 0 || e.trimEnd !== 0 || e.crop.x !== 0 || e.crop.y !== 0
-    || e.crop.w !== 1 || e.crop.h !== 1 || e.offset !== 0 || e.mute || e.start != null;
+    || e.crop.w !== 1 || e.crop.h !== 1 || e.offset !== 0 || e.mute || e.start != null
+    || e.mode !== "cut" || e.duration != null;
 }
 
 // Working-cache max dimension — each clip is downsampled to this on add, and
@@ -1122,6 +1157,7 @@ $("#editor-export").addEventListener("click", () => {
   const c = state.clips.find((x) => x.id === state.editorClipId);
   if (!c) return;
   c.edit = {
+    ...c.edit, // preserve timing mode + timeline duration set on the timeline
     trimStart: snapFrame(Math.max(0, parseFloat($("#editor-start").value) || 0)),
     trimEnd: snapFrame(parseFloat($("#editor-end").value) || 0),
     crop: editorCrop ? editorCrop.get() : { x: 0, y: 0, w: 1, h: 1 },

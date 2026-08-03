@@ -345,14 +345,24 @@ export async function exportConcatenated(clips, opts = {}, onProgress) {
     const meta = await loadMeta(c.file);
     const edit = c.edit || {};
     const crop = edit.crop || { x: 0, y: 0, w: 1, h: 1 };
+    const isVisual = c.kind === "video" || c.kind === "image";
+    // srcLen = source segment length; dur = how long the clip occupies the
+    // timeline. dur may exceed srcLen (repeat / freeze / slow) or be shorter
+    // (cut / fast). Audio/MIDI overlays keep dur === srcLen (a separate audio
+    // track can't be stretched in-browser).
+    let srcLen = 0;
     let dur;
-    if (meta.dur === 0) dur = snapFrame(Math.max(FRAME, edit.duration || 1));
-    else {
+    if (meta.dur === 0) {
+      dur = snapFrame(Math.max(FRAME, edit.duration || 1));
+    } else {
       const start = Math.max(0, edit.trimStart || 0);
       const end = edit.trimEnd > 0 && edit.trimEnd <= meta.dur ? edit.trimEnd : meta.dur;
-      dur = snapFrame(Math.max(FRAME, end - start));
+      srcLen = Math.max(FRAME, end - start);
+      dur = (isVisual && edit.duration != null && edit.duration > 0)
+        ? snapFrame(Math.max(FRAME, edit.duration))
+        : srcLen;
     }
-    const p = { c, meta, crop, dur, id: c.id };
+    const p = { c, meta, crop, dur, srcLen, id: c.id };
     prep.set(c.id, p);
     return p;
   }
@@ -490,33 +500,95 @@ export async function exportConcatenated(clips, opts = {}, onProgress) {
       else gain.gain.value = 1;
     }
 
-    const start = Math.min(edit.trimStart || 0, Math.max(0, p.dur - 0.1));
-    const end = p.dur;
+    // Source segment [srcStart, srcEnd] is mapped onto `dur` seconds of
+    // timeline by the clip's timing mode:
+    //   shorter than source → cut (play the first dur seconds) or fast (play
+    //     the whole segment at srcLen/dur speed);
+    //   longer than source → slow (srcLen/dur speed), repeat (loop the
+    //     segment) or freeze (play once, then hold the last frame).
+    const metaDur = p.meta.dur || video.duration || 0;
+    const srcStart = Math.min(edit.trimStart || 0, Math.max(0, metaDur - FRAME));
+    const srcEnd = Math.min(edit.trimEnd > 0 && edit.trimEnd <= metaDur ? edit.trimEnd : metaDur, metaDur);
+    const srcLen = Math.max(FRAME, srcEnd - srcStart);
+    const dur = Math.max(FRAME, p.dur);
+    const mode = edit.mode || "cut";
     const hasVideo = (video.videoWidth || 0) > 0 && ctx;
-    video.currentTime = start;
 
-    await new Promise((resolve) => {
-      const onTime = () => {
-        if (video.currentTime >= end) {
-          video.removeEventListener("timeupdate", onTime);
-          video.pause();
-          elapsed += p.dur;
-          report();
-          resolve();
-        }
-      };
-      if (hasVideo && typeof video.requestVideoFrameCallback === "function") {
-        const tick = () => {
-          if (ctx) fitDraw(ctx, video, edit.crop.x * video.videoWidth, edit.crop.y * video.videoHeight, edit.crop.w * video.videoWidth, edit.crop.h * video.videoHeight, outW, outH);
-          if (video.currentTime < end && !video.ended) video.requestVideoFrameCallback(tick);
-        };
-        video.requestVideoFrameCallback(tick);
-      } else if (ctx) {
+    const longer = dur > srcLen + FRAME;
+    let rate = 1;
+    let loop = false;
+    let freeze = false;
+    if (mode === "fast" && !longer) rate = srcLen / dur;
+    else if (mode === "slow" && longer) rate = srcLen / dur;
+    else if (mode === "repeat" && longer) loop = true;
+    else if (longer) freeze = true; // freeze, or any extension while in cut/fast mode
+    video.playbackRate = rate;
+
+    const t0 = performance.now();
+    const draw = () => {
+      if (!ctx) return;
+      if (hasVideo) {
+        try {
+          fitDraw(ctx, video, edit.crop.x * video.videoWidth, edit.crop.y * video.videoHeight, edit.crop.w * video.videoWidth, edit.crop.h * video.videoHeight, outW, outH);
+        } catch (_) { /* noop */ }
+      } else {
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, outW, outH);
       }
-      video.addEventListener("timeupdate", onTime);
-      video.play().catch(() => { onTime(); });
+    };
+
+    await new Promise((resolve) => {
+      let rafId = 0;
+      let finished = false;
+      let playing = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (rafId) cancelAnimationFrame(rafId);
+        video.pause();
+        elapsed += dur;
+        report();
+        resolve();
+      };
+      const tick = () => {
+        const elapsedSec = (performance.now() - t0) / 1000;
+        if (elapsedSec >= dur) { finish(); return; }
+        if (playing) {
+          if (loop) {
+            if (video.ended || video.currentTime >= srcEnd - FRAME) {
+              try { video.currentTime = srcStart; } catch (_) { /* noop */ }
+              video.play().catch(() => {});
+            }
+          } else if (freeze) {
+            if (video.currentTime >= srcEnd) {
+              video.pause();
+              try { video.currentTime = srcEnd; } catch (_) { /* noop */ }
+            }
+          }
+        } else {
+          // autoplay blocked / no decodable frames: step through via seek
+          let target;
+          if (loop) target = srcStart + (elapsedSec % srcLen);
+          else if (freeze) target = elapsedSec < srcLen ? srcStart + elapsedSec : srcEnd;
+          else target = Math.min(srcStart + elapsedSec * rate, srcEnd);
+          try { video.currentTime = Math.max(srcStart, target); } catch (_) { /* noop */ }
+        }
+        draw();
+        rafId = requestAnimationFrame(tick);
+      };
+      // smooth, frame-accurate drawing while the video plays (canvas modes);
+      // in audio-only mode there is no canvas but the video element must still
+      // play so its audio reaches the recorder.
+      if (hasVideo && typeof video.requestVideoFrameCallback === "function") {
+        const frame = () => { if (finished) return; draw(); video.requestVideoFrameCallback(frame); };
+        video.requestVideoFrameCallback(frame);
+      } else if (hasVideo) {
+        draw();
+      }
+      video.addEventListener("seeked", () => draw());
+      try { video.currentTime = srcStart; } catch (_) { /* noop */ }
+      video.play().then(() => { playing = true; rafId = requestAnimationFrame(tick); })
+        .catch(() => { playing = false; rafId = requestAnimationFrame(tick); });
     });
   }
 
