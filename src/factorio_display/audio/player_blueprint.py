@@ -456,9 +456,10 @@ def _build_rail(
         )
 
         # Red chain: l1→l2→l3→l4 output side, then down the column's four
-        # speakers.  Column-local red network keeps every speaker ≤ 2 red
-        # wires and all wires ≤ 4 tiles (a cross-column grid snake would
-        # over-connect the column-head speakers beyond Factorio's limit).
+        # speakers.  The column-local red network keeps every speaker ≤ 2 red
+        # wires and all wires ≤ 4 tiles; the columns are later merged into a
+        # single per-rail network below (alternating bridges, not a grid
+        # snake, so no speaker is over-connected beyond Factorio's limit).
         for i in range(len(out_order) - 1):
             blueprint.add_circuit_connection(
                 "red", out_order[i], out_order[i + 1],
@@ -501,6 +502,34 @@ def _build_rail(
             if spk_bottom and dbg_bottom:
                 blueprint.add_circuit_connection("red", spk_bottom, dbg_bottom)
         ep.first_dbg_id = dbg_lamp_ids.get((rail_x, DEBUG_Y + 3), "")
+
+    # ── Merge the 12 per-column speaker networks into ONE red network ──
+    # Each column's unpackers+speakers are their own red network; joining
+    # them into a single network per rail (instrument) cuts the network
+    # count and gives one probe point that shows the whole instrument's
+    # activity while debugging.  Bridges use an alternating tree — even gaps
+    # join the bottom (last) speakers, odd gaps join the lane-0 unpacker
+    # outputs — so no port ever exceeds Factorio's 2-wire-per-colour limit
+    # and every bridge spans just one tile.  Different rails (instruments)
+    # are deliberately left on separate networks.
+    # (With debug_lamps the lamp grid below already ties every speaker
+    # column into one network, so no extra bridges are needed — and the
+    # bottom speakers are already at their 2-wire limit for the lamp wires.)
+    if not debug_lamps:
+        for c in range(0, 12, 2):
+            a = ep.col_speakers.get(c)
+            b = ep.col_speakers.get(c + 1)
+            if a and b:
+                blueprint.add_circuit_connection(
+                    "red", a[-1], b[-1],
+                    side_1="input", side_2="input",
+                )
+        for c in range(1, 12, 2):
+            if c + 1 < 12:
+                blueprint.add_circuit_connection(
+                    "red", f"{prefix}ch{c}_l1", f"{prefix}ch{c+1}_l1",
+                    side_1="output", side_2="output",
+                )
 
     # Sub-tick on RED within this rail: ch11_match → … → ch0_match
     # (wired outside this function — only the first/last IDs are needed)
@@ -807,6 +836,12 @@ def _build_rail_logical(
     # ── Per-channel pipeline + speakers (cells_per_tick channels) ──
     speaker_ids: dict[int, str] = {}
     col_speakers: dict[int, list[str]] = {c: [] for c in range(cells_per_tick)}
+    # For merging the per-column speaker networks into one red network per
+    # rail: the bottom-most (last) speaker and a spare upper red port of
+    # each column (lane-0 unpacker output, or the selector output for raw
+    # single-lane cells that have no unpacker).
+    col_last_spk: dict[int, str] = {}
+    col_upper_spare: dict[int, str] = {}
 
     for c, ch_lanes in enumerate(channels):
         base_id = f"{prefix}ch{c}"
@@ -976,6 +1011,8 @@ def _build_rail_logical(
         if raw:
             # Selector → speaker: the volume flows straight through (red).
             lb.connect("red", Endpoint(sel_id, "output"), Endpoint(col_speakers[c][0], "input"))
+            col_last_spk[c] = col_speakers[c][-1]
+            col_upper_spare[c] = sel_id
         else:
             # Bell passthrough green chain (input side): sel → l1 → s2 → s3 → l4
             passthrough_order = [lane_pass[l] for l in range(4) if l in lane_pass]
@@ -1001,6 +1038,27 @@ def _build_rail_logical(
                 lb.connect("red", Endpoint(out_order[-1], "output"), Endpoint(col_spks[0], "input"))
                 for i in range(len(col_spks) - 1):
                     lb.connect("red", Endpoint(col_spks[i], "input"), Endpoint(col_spks[i + 1], "input"))
+            col_last_spk[c] = col_spks[-1]
+            col_upper_spare[c] = ac_id.get("l1") or sel_id
+
+    # ── Merge per-column speaker networks into ONE red network ─────
+    # Each column's unpacker+speakers are a separate red network; joining
+    # them into a single network per rail (instrument) cuts the network
+    # count and gives one probe point for the whole instrument while
+    # debugging.  Bridges use an alternating tree — even gaps join the
+    # bottom-most (last) speakers, odd gaps join an upper spare port (the
+    # lane-0 unpacker output, or the selector output for raw single-lane
+    # cells) — so no port ever exceeds Factorio's 2-wire-per-colour limit
+    # and every bridge spans one tile.  Rails (instruments) are deliberately
+    # left on separate networks.
+    for c in range(0, cells_per_tick - 1, 2):
+        lb.connect("red",
+                   Endpoint(col_last_spk[c], "input"),
+                   Endpoint(col_last_spk[c + 1], "input"))
+    for c in range(1, cells_per_tick - 1, 2):
+        lb.connect("red",
+                   Endpoint(col_upper_spare[c], "output"),
+                   Endpoint(col_upper_spare[c + 1], "output"))
 
     # ── Cross-channel networks ─────────────────────────────────
     # Sub-tick red bus: ch{C-1}_match → … → ch0_match

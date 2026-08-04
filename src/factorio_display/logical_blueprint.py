@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import os
 import tomllib
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -75,6 +76,27 @@ _VALID_ENTITY_TYPES = {
     "medium-electric-pole",
     "substation",
 }
+
+#: Env var that re-enables the expensive (debug-only) validation passes.
+#: Validations are skipped by default so blueprint generation stays fast;
+#: set to ``1`` (or ``true``/``yes``/``on``) when debugging a build.
+_DEBUG_VALIDATE_ENV_VAR = "FACTORIO_DISPLAY_DEBUG_VALIDATE"
+
+
+def _validations_enabled() -> bool:
+    """Return whether expensive blueprint validations should run.
+
+    The build pipeline skips the slow, redundant validation passes by
+    default (draftsman per-attribute validation, wire-reachability
+    analysis, per-mutation topology checks).  They are only re-enabled
+    when debugging via ``FACTORIO_DISPLAY_DEBUG_VALIDATE=1``, and never
+    under ``python -O`` (``__debug__`` is False).  The test suite sets
+    this env var so the validated paths stay covered.
+    """
+    if not __debug__:
+        return False
+    value = os.environ.get(_DEBUG_VALIDATE_ENV_VAR, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -265,11 +287,17 @@ class LogicalBlueprint:
     ) -> None:
         """Add a network.  Raises if *network_id* already exists."""
         if src is None:
-            origin = entity_origin()
-            src = origin.source
             if is_trace_enabled():
+                origin = entity_origin()
+                src = origin.source
                 network._debug_src = src
                 network._debug_traceback = origin.traceback
+            else:
+                # Skip capturing a stack origin when tracing is disabled —
+                # entity_origin() walks the stack and resolves Path objects
+                # (Windows _getfinalpathname syscalls), which is very
+                # expensive per network (adds ~1ms+ each in from_toml).
+                src = "unknown"
         elif src is not None and network._debug_src is None:
             network._debug_src = src
         if any(n.network_id == network.network_id for n in self.networks):
@@ -654,12 +682,15 @@ class LogicalBlueprint:
         return errors
 
     def _debug_assert_invariants(self) -> None:
-        """Assert all topology invariants hold (no-op when ``__debug__`` is False).
+        """Assert all topology invariants hold (debug-gated).
 
         Call this after any mutation to the logical blueprint
-        (``connect``, ``merge``, etc.).
+        (``connect``, ``merge``, etc.).  Runs only when validations are
+        enabled (``FACTORIO_DISPLAY_DEBUG_VALIDATE=1``); skipped by
+        default so the per-mutation connectivity check doesn't slow
+        blueprint construction.
         """
-        if not __debug__:
+        if not _validations_enabled():
             return
         errs = self.check_topology()
         if errs:
@@ -927,6 +958,15 @@ def _entity_to_toml(entity: LogicalEntity) -> str:
         if quality and quality != "normal":
             lines.append(_emit_key_val("quality", quality))
 
+    # Preserve source-origin metadata across TOML round-trips so
+    # from_toml() can restore it without re-capturing (see _from_parsed).
+    src = props.get("_debug_src")
+    if src:
+        lines.append(_emit_key_val("_debug_src", src))
+    tb = props.get("_debug_traceback")
+    if tb:
+        lines.append(_emit_key_val("_debug_traceback", list(tb)))
+
     return "\n".join(lines)
 
 
@@ -1100,17 +1140,25 @@ def _from_parsed(data: dict[str, Any]) -> LogicalBlueprint:
     """Build a LogicalBlueprint from a parsed TOML dict."""
     lb = LogicalBlueprint(label=data.get("label", ""))
 
-    # Entities
+    # Entities.  Loading from serialised data must NOT walk the stack to
+    # capture a "source origin" — that triggers Windows Path.resolve()
+    # syscalls (~1ms per entity).  Entities that already carry a preserved
+    # _debug_src (round-tripped from a builder with tracing on) keep it;
+    # the rest get a synthetic marker and skip the expensive capture.
+    _from_toml_src = "<from_toml>"
     raw_entities: list[dict] = data.get("entity", [])
     for raw in raw_entities:
         entity = _parse_entity(raw)
-        lb.add_entity(entity)
+        if get_entity_origin(entity) is None:
+            lb.add_entity(entity, src=_from_toml_src)
+        else:
+            lb.add_entity(entity)
 
     # Networks
     raw_networks: list[dict] = data.get("network", [])
     for raw in raw_networks:
         net = _parse_network(raw)
-        lb.add_network(net)
+        lb.add_network(net, src=_from_toml_src)
 
     # Input ports
     for raw in data.get("input_port", []):
@@ -1873,7 +1921,81 @@ def _find_closest_pair(
     return best_pair
 
 
-def to_draftsman(lb: LogicalBlueprint, bp: Any | None = None, *, _validate: bool = True) -> Any:
+_FIELD_DEFAULTS: dict[type, list[tuple[str, bool, Any]]] = {}
+# Shared instances for attrs Factory defaults (e.g. CircuitNetworkSelection).
+# Each entity is deep-copied on insert, so sharing the source instance across
+# outputs is safe and avoids millions of attrs-validated constructions.
+_FIELD_FACTORY_CACHE: dict[tuple[type, str], Any] = {}
+_COMPARATOR_CONV: Any = None  # draftsman comparator converter (lazy)
+# Cache for SignalID objects in the fast path.  A large video memory has
+# ~17M DC outputs that all reference the same few hundred pixel signals, so
+# reusing one SignalID per unique signal avoids millions of attrs-validated
+# constructions (each is deep-copied per entity on insert, so sharing the
+# source instance is safe).
+_SIGNAL_ID_CACHE: dict[Any, Any] = {}
+
+
+def _signal_id_key(value: Any) -> Any:
+    """Stable cache key for a signal reference (str or dict)."""
+    if isinstance(value, str):
+        return (value,)
+    return tuple(sorted(value.items()))
+
+
+def _convert_comparator(value: str) -> str:
+    """Translate an ASCII comparator (``>=``) to draftsman's Unicode form (``≥``)."""
+    global _COMPARATOR_CONV
+    if _COMPARATOR_CONV is None:
+        from draftsman.prototypes.decider_combinator import DeciderCombinator
+        _COMPARATOR_CONV = next(
+            a for a in DeciderCombinator.Condition.__attrs_attrs__
+            if a.name == "comparator"
+        ).converter
+    return _COMPARATOR_CONV(value)
+
+
+def _fast_attrs_init(obj: Any) -> Any:
+    """Assign every attrs field its declared default, bypassing validators.
+
+    Draftsman's ``EntityList`` deep-copies every entity on insert and walks
+    ``__attrs_attrs__`` via ``getattr()``, so ``__new__``-constructed objects
+    must have every field set before they are appended to a blueprint.  This
+    mirrors the defaults the normal constructor would assign but skips the
+    per-field validator/converter overhead the fast path exists to avoid.
+    """
+    import attrs as _attrs
+
+    cls = type(obj)
+    fields = _FIELD_DEFAULTS.get(cls)
+    if fields is None:
+        fields = []
+        for a in cls.__attrs_attrs__:
+            d = a.default
+            if d is _attrs.NOTHING:
+                fields.append((a.name, False, None))
+            elif isinstance(d, _attrs.Factory):
+                fields.append((a.name, True, d.factory))
+            else:
+                fields.append((a.name, False, d))
+        _FIELD_DEFAULTS[cls] = fields
+    for name, is_factory, payload in fields:
+        if is_factory:
+            key = (cls, name)
+            if key not in _FIELD_FACTORY_CACHE:
+                _FIELD_FACTORY_CACHE[key] = payload()
+            value = _FIELD_FACTORY_CACHE[key]
+        else:
+            value = payload
+        object.__setattr__(obj, name, value)
+    return obj
+
+
+def to_draftsman(
+    lb: LogicalBlueprint,
+    bp: Any | None = None,
+    *,
+    _validate: bool | None = None,
+) -> Any:
     """Convert a :class:`LogicalBlueprint` into a draftsman
     :class:`~draftsman.blueprintable.Blueprint`.
 
@@ -1884,17 +2006,22 @@ def to_draftsman(lb: LogicalBlueprint, bp: Any | None = None, *, _validate: bool
     bp : Blueprint | None
         If given, entities and connections are appended to this existing
         blueprint.  Otherwise a new one is created.
-    _validate : bool
-        When True (default), Draftsman's attrs validators run on every
-        entity property assignment.  When False, ``object.__setattr__``
-        is used to bypass validators for a significant speedup.  Tests
-        should always use ``_validate=True`` (the default).
+    _validate : bool | None
+        When True, Draftsman's attrs validators run on every entity
+        property assignment (slow).  When False, ``object.__setattr__``
+        bypasses the validators for a significant speedup.  When None
+        (default), the debug-gated default is used: validations run only
+        when debugging is enabled (``FACTORIO_DISPLAY_DEBUG_VALIDATE=1``),
+        see :func:`_validations_enabled`.
 
     Returns
     -------
     Blueprint
         The draftsman blueprint with all entities placed and wired.
     """
+    if _validate is None:
+        _validate = _validations_enabled()
+
     import warnings
 
     from draftsman.warning import (
@@ -1939,19 +2066,28 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
     # validation (every speaker uses signal-no-entry = 0).
     _cached_speaker_condition: Any = None
     if not _validate:
-        from draftsman.signatures import Condition, SignalID
+        from draftsman.signatures import CircuitNetworkSelection, Condition, SignalID
         from draftsman.constants import LampColorMode
 
         # Helper to convert _str_to_signal_ref output → proper SignalID
         def _to_signal_id(value: Any) -> Any:
             if isinstance(value, (str, dict)):
-                return SignalID.converter(value)
+                key = _signal_id_key(value)
+                cached = _SIGNAL_ID_CACHE.get(key)
+                if cached is None:
+                    cached = SignalID.converter(value)
+                    _SIGNAL_ID_CACHE[key] = cached
+                return cached
             return value
 
         _cached_speaker_condition = Condition.__new__(Condition)
+        _fast_attrs_init(_cached_speaker_condition)
         object.__setattr__(_cached_speaker_condition, "first_signal",
                            _to_signal_id("signal-no-entry"))
-        object.__setattr__(_cached_speaker_condition, "comparator", "=")
+        object.__setattr__(
+            _cached_speaker_condition, "comparator",
+            _convert_comparator("="),
+        )
         object.__setattr__(_cached_speaker_condition, "constant", 0)
 
     # ── 1. Create entities ─────────────────────────────────────────
@@ -2018,7 +2154,7 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                     _to_signal_id(_str_to_signal_ref(props.get("first_operand", ""))),
                 )
                 object.__setattr__(
-                    de, "arithmetic_operation", props.get("operation", "*"),
+                    de, "operation", props.get("operation", "*"),
                 )
                 object.__setattr__(
                     de, "second_operand",
@@ -2029,9 +2165,15 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                     _to_signal_id(_str_to_signal_ref(props.get("output_signal", ""))),
                 )
                 if fow:
-                    object.__setattr__(de, "first_operand_wires", set(fow))
+                    object.__setattr__(
+                        de, "first_operand_wires",
+                        CircuitNetworkSelection.converter(set(fow)),
+                    )
                 if sow:
-                    object.__setattr__(de, "second_operand_wires", set(sow))
+                    object.__setattr__(
+                        de, "second_operand_wires",
+                        CircuitNetworkSelection.converter(set(sow)),
+                    )
 
         elif entity.type == "decider-combinator":
             if _validate:
@@ -2070,12 +2212,15 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                 # Fast path: build conditions/outputs with object.__setattr__
                 conds: list[Any] = []
                 for c in props.get("conditions", []):
-                    cond = Condition.__new__(Condition)
+                    # DeciderCombinator.Condition is richer than the base
+                    # signatures.Condition (extra *_networks + compare_type).
+                    cond = de.Condition.__new__(de.Condition)
+                    _fast_attrs_init(cond)
                     object.__setattr__(
                         cond, "first_signal",
                         _to_signal_id(_str_to_signal_ref(c["first"])),
                     )
-                    object.__setattr__(cond, "comparator", c["op"])
+                    object.__setattr__(cond, "comparator", _convert_comparator(c["op"]))
                     if "second_signal" in c:
                         object.__setattr__(
                             cond, "second_signal",
@@ -2098,6 +2243,7 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                         sig_ref = sig_str
                     sig_ref = _to_signal_id(sig_ref)
                     out_obj = de.Output.__new__(de.Output)
+                    _fast_attrs_init(out_obj)
                     object.__setattr__(out_obj, "signal", sig_ref)
                     object.__setattr__(
                         out_obj, "copy_count_from_input",
@@ -2236,12 +2382,14 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                     if cond:
                         # Build a minimal Condition with object.__setattr__
                         lamp_cond = Condition.__new__(Condition)
+                        _fast_attrs_init(lamp_cond)
                         object.__setattr__(
                             lamp_cond, "first_signal",
                             _to_signal_id(_str_to_signal_ref(cond["first"])),
                         )
                         object.__setattr__(
-                            lamp_cond, "comparator", cond["op"],
+                            lamp_cond, "comparator",
+                            _convert_comparator(cond["op"]),
                         )
                         if "second_signal" in cond:
                             object.__setattr__(
@@ -2665,14 +2813,15 @@ def assert_wire_topology(
     label: str = "",
     lb: "LogicalBlueprint | None" = None,
 ) -> None:
-    """Assert that *bp* has valid wire topology (no-op when ``__debug__`` is False).
+    """Assert that *bp* has valid wire topology (debug-gated).
 
     If *lb* is supplied, the connectivity check is performed per logical
     network rather than per colour, avoiding false positives for blueprints
     that intentionally contain multiple independent networks of the same
-    colour.
+    colour.  Runs only when validations are enabled
+    (``FACTORIO_DISPLAY_DEBUG_VALIDATE=1``); skipped by default.
     """
-    if not __debug__:
+    if not _validations_enabled():
         return
     errs = check_wire_topology(bp, label=label, lb=lb)
     if errs:

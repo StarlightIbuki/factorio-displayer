@@ -187,69 +187,73 @@ class TestVideoEncoderPerf:
 # Composer performance (cached path)
 # ═══════════════════════════════════════════════════════════════════════
 
+@pytest.fixture(scope="class")
+def _composer_fixtures():
+    """Build the sub-blueprints needed for compose_all_in_one (class-scoped).
+
+    Defined at module level (not as a method on the test class): pytest 10
+    errors on class-scoped fixtures declared as instance methods, and this
+    fixture only returns a dict (it never touches ``self``).
+    """
+    from factorio_display.composer import compose_all_in_one
+    from factorio_display.logical_blueprint import LogicalBlueprint, from_draftsman
+    from factorio_display.video.encoder import _encode_frames_core
+    from factorio_display.video.player_blueprint import build_display
+    from factorio_display.timer import build_raw_timer, build_mod_timer
+    from factorio_display.progress_bar import build_progress_bar
+    from factorio_display.composer import _assign_tile_positions, _connect_nets_by_color
+    import numpy as np
+
+    # ── Display ───────────────────────────────────────────────
+    bp = build_display("PerfDisplay", width=10, height=10)
+    display_lb = from_draftsman(bp)
+
+    # ── Video memory ──────────────────────────────────────────
+    frames = [
+        np.full((10, 10, 3), (255, 0, 0), dtype=np.uint8),
+    ]
+    tick_ranges = [(0, 0)]
+    mapping_params = {
+        "width": 10, "height": 10,
+        "qualities": ["normal", "uncommon", "rare", "epic", "legendary"],
+        "signal_pool": [f"perf-sig-{i:04d}" for i in range(150)],
+    }
+    video_memory_lb = _encode_frames_core(
+        kept_frames=frames, tick_ranges=tick_ranges,
+        output_name="PerfVideo", deduplicate=False,
+        mapping_params=mapping_params,
+        clock="signal-clock", current_tick=1,
+    )
+
+    # ── Timer ─────────────────────────────────────────────────
+    timer_lb = LogicalBlueprint(label="PerfTimer")
+    raw = build_raw_timer("PerfClock")
+    mod = build_mod_timer(60, name="PerfSubTick")
+    _assign_tile_positions(mod, start_x=0, start_y=4)
+    timer_lb.merge(raw)
+    timer_lb.merge(mod, entity_prefix="mod_", network_prefix="mod_")
+    _connect_nets_by_color(
+        timer_lb, "red",
+        entity_contains="perfclock", port="output",
+        other_entity_contains="perfsubtick", other_port="input",
+    )
+
+    # ── Progress bar ──────────────────────────────────────────
+    progress_lb = build_progress_bar(
+        "PerfPB", length=10, signal_name="signal-clock", max_value=59,
+    )
+
+    return {
+        "display_lb": display_lb,
+        "video_memory_lb": video_memory_lb,
+        "timer_lb": timer_lb,
+        "progress_lb": progress_lb,
+    }
+
+
 @pytest.mark.perf
 class TestComposerPerf:
     """Performance of ``compose_all_in_one`` — cached path only."""
-
-    @pytest.fixture(scope="class")
-    def _composer_fixtures(self):
-        """Build the sub-blueprints needed for compose_all_in_one (class-scoped)."""
-        from factorio_display.composer import compose_all_in_one
-        from factorio_display.logical_blueprint import LogicalBlueprint, from_draftsman
-        from factorio_display.video.encoder import _encode_frames_core
-        from factorio_display.video.player_blueprint import build_display
-        from factorio_display.timer import build_raw_timer, build_mod_timer
-        from factorio_display.progress_bar import build_progress_bar
-        from factorio_display.composer import _assign_tile_positions, _connect_nets_by_color
-        import numpy as np
-
-        # ── Display ───────────────────────────────────────────────
-        bp_str = build_display("PerfDisplay", width=10, height=10)
-        bp = Blueprint.from_string(bp_str)
-        display_lb = from_draftsman(bp)
-
-        # ── Video memory ──────────────────────────────────────────
-        frames = [
-            np.full((10, 10, 3), (255, 0, 0), dtype=np.uint8),
-        ]
-        tick_ranges = [(0, 0)]
-        mapping_params = {
-            "width": 10, "height": 10,
-            "qualities": ["normal", "uncommon", "rare", "epic", "legendary"],
-            "signal_pool": [f"perf-sig-{i:04d}" for i in range(150)],
-        }
-        video_bp_str = _encode_frames_core(
-            kept_frames=frames, tick_ranges=tick_ranges,
-            output_name="PerfVideo", deduplicate=False,
-            mapping_params=mapping_params,
-            clock="signal-clock", current_tick=1,
-        )
-        video_memory_lb = from_draftsman(Blueprint.from_string(video_bp_str))
-
-        # ── Timer ─────────────────────────────────────────────────
-        timer_lb = LogicalBlueprint(label="PerfTimer")
-        raw = build_raw_timer("PerfClock")
-        mod = build_mod_timer(60, name="PerfSubTick")
-        _assign_tile_positions(mod, start_x=0, start_y=4)
-        timer_lb.merge(raw)
-        timer_lb.merge(mod, entity_prefix="mod_", network_prefix="mod_")
-        _connect_nets_by_color(
-            timer_lb, "red",
-            entity_contains="perfclock", port="output",
-            other_entity_contains="perfsubtick", other_port="input",
-        )
-
-        # ── Progress bar ──────────────────────────────────────────
-        progress_lb = build_progress_bar(
-            "PerfPB", length=10, signal_name="signal-clock", max_value=59,
-        )
-
-        return {
-            "display_lb": display_lb,
-            "video_memory_lb": video_memory_lb,
-            "timer_lb": timer_lb,
-            "progress_lb": progress_lb,
-        }
 
     def test_compose_video_cached_speed(self, _composer_fixtures):
         """Cached compose_all_in_one should be near-instant (cache hit)."""

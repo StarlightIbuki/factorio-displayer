@@ -630,6 +630,27 @@ def _build_chunk_worker(payload: bytes) -> tuple[int, str]:
     return chunk_idx, to_toml(lb)
 
 
+def _build_vertical_chunk_worker(payload: bytes) -> tuple[int, bytes]:
+    """Build a single vertical-chunk LogicalBlueprint in a worker process.
+
+    Returns ``(chunk_idx, pickled LogicalBlueprint)``.  LogicalBlueprint
+    pickles cleanly (verified) and is faster to transfer than TOML for the
+    large per-frame DC banks these chunks produce.
+    """
+    data = pickle.loads(payload)
+    lb = _encode_frames_core(
+        kept_frames=data["chunk_frames"],
+        tick_ranges=data["tick_ranges"],
+        output_name=data["output_name"],
+        deduplicate=data["deduplicate"],
+        mapping_params=data["mapping_params"],
+        clock=data["clock"],
+        current_tick=data["current_tick"],
+        label_suffix=data.get("label_suffix", ""),
+    )
+    return data["chunk_idx"], pickle.dumps(lb)
+
+
 # ══════════════════════════════════════════════════════════════════════�?
 # Merge helpers
 # ══════════════════════════════════════════════════════════════════════�?
@@ -994,29 +1015,33 @@ def encode_frames(
             f"with {workers} worker(s)…\n"
         )
 
-        def _build_one(cm: dict) -> tuple[int, LogicalBlueprint]:
-            """Build a single vertical chunk (runs in worker thread)."""
+        # Slice frames per chunk up front and ship each worker its own
+        # pickled payload.  _encode_frames_core is CPU-bound Python, so
+        # processes (not threads) give real parallelism on multi-core.
+        payloads: list[bytes] = []
+        for cm in pending:
             y0, y1 = cm["y0"], cm["y1"]
             chunk_frames = [f[y0:y1, :, :] for f in kept_frames]
-            lb = _encode_frames_core(
-                kept_frames=chunk_frames,
-                tick_ranges=tick_ranges,
-                output_name=f"{output_name} vc{cm['ci']}",
-                deduplicate=deduplicate,
-                mapping_params=cm["mapping_params"],
-                clock=clock,
-                current_tick=current_tick,
-                label_suffix=f" [vchunk {cm['ci'] + 1}/{num_chunks}]",
-            )
-            return cm["ci"], lb
+            payloads.append(pickle.dumps({
+                "chunk_idx": cm["ci"],
+                "chunk_frames": chunk_frames,
+                "tick_ranges": tick_ranges,
+                "output_name": f"{output_name} vc{cm['ci']}",
+                "deduplicate": deduplicate,
+                "mapping_params": cm["mapping_params"],
+                "clock": clock,
+                "current_tick": current_tick,
+                "label_suffix": f" [vchunk {cm['ci'] + 1}/{num_chunks}]",
+            }))
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_build_one, cm) for cm in pending]
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_build_vertical_chunk_worker, p) for p in payloads]
             for future in tqdm(
                 concurrent.futures.as_completed(futures),
                 total=len(futures), desc="Building vertical chunks", unit="chunk",
             ):
-                ci, lb = future.result()
+                ci, lb_bytes = future.result()
+                lb = pickle.loads(lb_bytes)
                 chunk_results[ci] = lb
                 # Async TOML cache
                 if use_cache:

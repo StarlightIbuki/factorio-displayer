@@ -701,6 +701,72 @@ endpoints = ["mod:output", "match:input"]
         vresult = validate_logical_connectivity(lb)
         assert vresult["errors"] == [], f"Connectivity errors: {vresult['errors']}"
 
+    def test_fast_path_matches_validated_output(self):
+        """The ``_validate=False`` fast path must serialize identically.
+
+        ``to_draftsman`` skips Draftsman's per-attribute validators by
+        default for speed, building conditions/outputs/signals via
+        ``object.__setattr__``.  That fast path must produce the exact
+        same blueprint string as the validated path, otherwise exports
+        would silently differ in production vs debug.
+        """
+        from factorio_display.logical_blueprint import (
+            Endpoint,
+            LogicalBlueprint,
+            LogicalEntity,
+            to_draftsman,
+        )
+
+        lb = LogicalBlueprint(label="FastPath")
+
+        def add(eid, etype, props, pos):
+            lb.add_entity(LogicalEntity(eid, etype, properties=props, position=pos))
+
+        # Arithmetic with % op + red operand wire
+        add("ac", "arithmetic-combinator", {
+            "first_operand": "signal-clock",
+            "operation": "%",
+            "second_operand": 60,
+            "output_signal": "signal-M",
+            "first_operand_wires": {"red"},
+        }, (0, 2))
+        # Decider with >= constant + compare_type=and (exercises converter + networks)
+        add("dc", "decider-combinator", {
+            "conditions": [
+                {"first": "signal-clock", "op": ">=", "constant": 0},
+                {"first": "signal-clock", "op": "<=", "constant": 59,
+                 "compare_type": "and"},
+            ],
+            "outputs": [{"signal": "signal-A", "copy_count": False,
+                         "constant": 1}],
+        }, (0, 0))
+        # Constant combinator
+        add("cc", "constant-combinator", {
+            "signals": [
+                {"name": "signal-A", "value": 60, "quality": "normal"},
+                {"name": "signal-A", "value": 1, "quality": "uncommon"},
+            ],
+        }, (4, 0))
+        # Programmable speaker
+        add("spk", "programmable-speaker", {
+            "instrument": "piano", "note": "F#3",
+            "vol_signal": "signal-info", "vol_quality": "normal",
+            "polyphony": True, "circuit_enabled": True,
+        }, (6, 0))
+        # Lamp with colour signal + circuit condition
+        add("lamp", "small-lamp", {
+            "always_on": True, "use_colors": True,
+            "color_signal": "signal-A", "circuit_enabled": True,
+            "condition": {"first": "signal-A", "op": ">", "constant": 0},
+        }, (8, 0))
+
+        # One network so wires are materialised too
+        lb.connect("red", Endpoint("ac", "output"), Endpoint("dc", "input"))
+
+        fast = to_draftsman(lb, _validate=False).to_string()
+        valid = to_draftsman(lb, _validate=True).to_string()
+        assert fast == valid, "fast path output diverged from validated output"
+
 
 def _get_connections_list(bp):
     """Helper: extract circuit connections from a draftsman Blueprint."""

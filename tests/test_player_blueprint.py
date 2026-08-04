@@ -14,6 +14,7 @@ from factorio_display.audio.player_blueprint import (
     build_audio_decoder,
     build_audio_decoder_logical,
     build_multi_rail_decoder,
+    build_multi_rail_decoder_logical,
 )
 from factorio_display.audio.pitch_mapping import (
     DRUM_KIT_NOTES,
@@ -36,6 +37,42 @@ def _parse_bp(bp_str: str) -> Blueprint:
 def _get_entities_by_type(bp: Blueprint, name_fragment: str) -> list:
     """Filter entities whose ``.name`` contains *name_fragment*."""
     return [e for e in bp.entities if name_fragment in e.name]
+
+
+def _speaker_red_networks(bp_str: str) -> list[list[str]]:
+    """Speaker entity ids, grouped by the red networks that contain them.
+
+    After the cross-column merge every instrument's speakers must share
+    exactly ONE red network (they used to be one network per column), while
+    different instruments must stay on separate networks.
+    """
+    from factorio_display.logical_blueprint import from_draftsman  # pylint: disable=import-outside-toplevel
+    lb = from_draftsman(_parse_bp(bp_str))
+    nets = []
+    for net in lb.networks:
+        if net.color != "red":
+            continue
+        spk = [
+            ep.entity_id for ep in net.endpoints
+            if lb.entities.get(ep.entity_id) is not None
+            and lb.entities[ep.entity_id].type == "programmable-speaker"
+        ]
+        if spk:
+            nets.append(spk)
+    return nets
+
+
+def _assert_valid_audio_topology(bp_str: str) -> None:
+    """Round-trip *bp_str* through the logical model and assert the
+    materialised wires are placeable (degree ≤ 2 per port per colour,
+    connected per network, within the 9-tile reach)."""
+    from factorio_display.logical_blueprint import (  # pylint: disable=import-outside-toplevel
+        assert_wire_topology,
+        from_draftsman,
+        to_draftsman,
+    )
+    lb = from_draftsman(_parse_bp(bp_str))
+    assert_wire_topology(to_draftsman(lb), label="audio-topology", lb=lb)
 
 
 # ── tests ──────────────────────────────────────────────────────────────
@@ -188,6 +225,20 @@ class TestBuildAudioDecoder:
         result = validate_blueprint_via_logical(audio_decoder_bp_str)
         assert result["errors"] == [], f"Validation errors: {result['errors']}"
         assert result["network_count"] > 0
+
+    def test_all_speakers_share_one_red_network(self, audio_decoder_bp_str):
+        """All 48 speakers of one instrument sit on a single red network.
+
+        Each column used to carry its own independent red speaker network;
+        they are now bridged into one per-instrument network — fewer
+        networks, and a single probe point shows the whole instrument.
+        """
+        nets = _speaker_red_networks(audio_decoder_bp_str)
+        assert len(nets) == 1, (
+            f"Expected one speaker red network, got {len(nets)}"
+        )
+        assert len(nets[0]) == 48, f"Expected 48 speakers, got {len(nets[0])}"
+        _assert_valid_audio_topology(audio_decoder_bp_str)
 
     def test_lut_cc_values_are_nonzero(self, audio_decoder_bp):
         """All lookup CC entries must have non-zero values.
@@ -400,6 +451,25 @@ class TestMultiRailDecoder:
         for s in rail1:
             assert s.instrument_name == "drum-kit", f"Rail 1 expected drum-kit, got {s.instrument_name}"
 
+    def test_instruments_have_separate_speaker_networks(self):
+        """Speakers of different instruments must NOT share a red network.
+
+        Within a rail all speakers are bridged into one network; across
+        rails (instruments) they must stay separate so one instrument's
+        activity never bleeds into another.
+        """
+        bp_str = build_multi_rail_decoder(
+            name="Separate", instruments=["piano", "bass"],
+        )
+        nets = _speaker_red_networks(bp_str)
+        assert len(nets) == 2, (
+            f"Expected one speaker network per instrument, got {len(nets)}"
+        )
+        assert sorted(len(n) for n in nets) == [36, 48], (
+            f"Unexpected speaker distribution: {[len(n) for n in nets]}"
+        )
+        _assert_valid_audio_topology(bp_str)
+
     def test_multi_rail_has_cross_rail_wiring(self, audio_decoder_bp):
         """Multi-rail blueprint has more wires than single-rail (cross-rail connections)."""
         bp_single = audio_decoder_bp
@@ -511,6 +581,49 @@ class TestLogicalBlueprintDecoder:
                     f"Speaker {pitch} (map_drums={map_drums}): "
                     f"expected {expected!r}, got {note!r}"
                 )
+
+    def test_logical_speakers_share_one_red_network(self):
+        """Logical audio decoder: all 48 speakers sit on one red network."""
+        from factorio_display.logical_blueprint import (  # pylint: disable=import-outside-toplevel
+            assert_wire_topology,
+            to_draftsman,
+        )
+        lb = build_audio_decoder_logical(name="L", instrument="piano")
+        nets = []
+        for net in lb.networks:
+            if net.color != "red":
+                continue
+            spk = [
+                ep.entity_id for ep in net.endpoints
+                if lb.entities.get(ep.entity_id) is not None
+                and lb.entities[ep.entity_id].type == "programmable-speaker"
+            ]
+            if spk:
+                nets.append(spk)
+        assert len(nets) == 1, f"Expected one speaker network, got {len(nets)}"
+        assert len(nets[0]) == 48
+        # Materialises with valid (≤2-wire/port, ≤9-tile) wiring.
+        assert_wire_topology(to_draftsman(lb), label="logical-topology", lb=lb)
+
+    def test_logical_multi_instruments_separate(self):
+        """Multi-rail logical decoder keeps each instrument's speakers on its
+        own red network (piano 48, bass 36)."""
+        lb = build_multi_rail_decoder_logical(
+            name="M", instruments=["piano", "bass"],
+        )
+        nets = []
+        for net in lb.networks:
+            if net.color != "red":
+                continue
+            spk = [
+                ep.entity_id for ep in net.endpoints
+                if lb.entities.get(ep.entity_id) is not None
+                and lb.entities[ep.entity_id].type == "programmable-speaker"
+            ]
+            if spk:
+                nets.append(spk)
+        assert len(nets) == 2, f"Expected 2 speaker networks, got {len(nets)}"
+        assert sorted(len(n) for n in nets) == [36, 48]
 
     def test_compact_drum_rail_only_builds_used_types(self):
         """A drum rail with active_drum_pitches builds only used drum types.

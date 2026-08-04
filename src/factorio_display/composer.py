@@ -36,6 +36,7 @@ from .logical_blueprint import (
     _endpoint_position,
     _chebyshev,
     _find_closest_pair,
+    _validations_enabled,
     to_toml,
     from_toml,
 )
@@ -1013,7 +1014,11 @@ def compose(
         )
 
     # ── Validate wiring distances ────────────────────────────────
-    unreachable = _validate_network_reachability(merged, prefixes)
+    # Debug-gated: the reachability scan is O(n²)-dominated and is skipped
+    # by default so generation stays fast (see _validations_enabled).
+    unreachable = 0
+    if _validations_enabled():
+        unreachable = _validate_network_reachability(merged, prefixes)
     if unreachable > 0:
         raise ValueError(
             f"Composition failed: {unreachable} network(s) have endpoints "
@@ -1198,6 +1203,14 @@ def _validate_network_reachability(
     together without exceeding *max_distance*.
 
     Returns the number of networks with unreachable endpoints.
+
+    Optimisation note (#3): this pass is O(passes · n²) — each bridge-merge
+    rescans every endpoint pair with :func:`_chebyshev` + union-find
+    ``find()``.  For the default 28×26 display that is ~4.7M ``_chebyshev``
+    calls (~2.5s).  Networks carrying ``prewired_pairs`` are connected by
+    construction and can be skipped outright.  A future rewrite should
+    replace the brute-force scan with a position-sorted / sweep-line
+    nearest-neighbour pass so the remaining networks validate in O(n log n).
     """
     from .logical_blueprint import _endpoint_position, _chebyshev
 

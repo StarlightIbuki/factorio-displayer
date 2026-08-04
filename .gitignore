@@ -22,3 +22,7 @@ tmp-*
 # eval_fidelity.py, render_drums.py).
 eval_midi/out/
 eval_midi/ref_midis/
+
+# CLI output redirects / large generated artifacts (can be hundreds of MB
+# of blueprint string — keeps the VS Code git GUI responsive).
+out.txt

@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import os
+
+# The build pipeline skips the expensive validation passes by default
+# (see logical_blueprint._validations_enabled).  The test suite re-enables
+# them so the validated paths (to_draftsman, compose reachability, topology
+# asserts) stay covered.  Set to 0 to exercise the fast/optimised paths.
+os.environ.setdefault("FACTORIO_DISPLAY_DEBUG_VALIDATE", "1")
+
 import pytest
 
 

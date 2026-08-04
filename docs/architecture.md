@@ -139,6 +139,14 @@ Single-rail: 48 spk + 85 AC + 12 DC + 13 CC = **158** entities (206 with debug l
 Match0 DCs handle sub_tick=0 (value-0 signals are dropped by Factorio).
 CC t=0 entry uses value 60 (never 0); other entries use t (1..59).
 
+Speaker wiring: each column's unpacker outputs + speakers form one red
+network, and the 12 columns of a rail are bridged into a **single** red
+network per instrument (alternating tree — even gaps join the bottom
+speakers, odd gaps join the lane-0 unpacker outputs — so no port exceeds
+Factorio's 2-wire-per-colour limit and every bridge spans one tile).
+Different rails (instruments) stay on separate networks, so one
+instrument's activity never bleeds into another.
+
 #### Multi-rail decoder (build_multi_rail_decoder)
 
 Each instrument gets a complete 48-speaker **rail** placed side-by-side
