@@ -228,6 +228,125 @@ class TestEncodeFramesCore:
         for net in with_pairs[:2]:
             assert len(net.prewired_pairs or []) == max(0, len(dcs) - 1)
 
+    def test_connectors_added_to_memory_piece(self, sample_frames_3, small_mapping_params):
+        """Split-mode connectors: left/right CCs on the data bus + isolated label."""
+        frames, ticks = sample_frames_3
+        lb = _encode_frames_core(
+            kept_frames=frames, tick_ranges=ticks, output_name="Conn",
+            deduplicate=False, mapping_params=small_mapping_params,
+            clock="signal-clock", current_tick=4,
+            connectors=True, fragment_index=2,
+        )
+        cc_ids = [eid for eid in lb.entities if "_cc" in eid or "_label" in eid]
+        assert "gate_1_ccL" in lb.entities, "missing left connector CC"
+        assert "gate_1_ccR" in lb.entities, "missing right connector CC"
+        assert "gate_1_label" in lb.entities, "missing series-label CC"
+
+        # Connectors must be on the red *output* (data) network.
+        out_net = None
+        for net in lb.networks:
+            if net.color == "red" and any(ep.entity_id == "gate_1" and ep.port == "output"
+                                          for ep in net.endpoints):
+                out_net = net
+                break
+        assert out_net is not None
+        assert any(ep.entity_id == "gate_1_ccL" for ep in out_net.endpoints)
+        assert any(ep.entity_id == "gate_1_ccR" for ep in out_net.endpoints)
+        # Label must be isolated.
+        assert not any(ep.entity_id == "gate_1_label" for n in lb.networks for ep in n.endpoints)
+
+        # Both connectors carry the identifying signal at value 0 (no pollution).
+        for cc in ("gate_1_ccL", "gate_1_ccR"):
+            sigs = lb.entities[cc].properties.get("signals", [])
+            assert sigs and sigs[0]["value"] == 0
+
+        # Serialises fine.
+        from factorio_display.logical_blueprint import to_draftsman
+        bp = to_draftsman(lb)
+        assert bp is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# encode_frames_split (split-output mode)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestEncodeFramesSplit:
+    """Split output: display + one memory piece per (vertical chunk × fragment)."""
+
+    def test_split_produces_display_and_pieces(self):
+        from factorio_display.video.encoder import encode_frames_split
+        from factorio_display.logical_blueprint import from_blueprint_string
+
+        # 40x40 needs 320 base signals > the 182-signal pool → 2 vertical chunks.
+        w, h = 40, 40
+        frames = [
+            np.full((h, w, 3), ((i % 2) * 255, (i % 3) * 255, (i * 7) % 255), dtype=np.uint8)
+            for i in range(6)
+        ]
+        res = encode_frames_split(
+            iter(frames), "SplitTest", fps=30.0, adaptive=False,
+            total_width=w, total_height=h, expected_frames=6, source_id="s",
+            time_chunks=2, chunk_workers=2,
+        )
+        assert res["num_chunks"] >= 2
+        assert res["time_chunks"] == 2
+        assert len(res["display"]) > 0
+        assert len(res["pieces"]) == res["num_chunks"] * res["time_chunks"]
+
+        # Display must carry per-chunk connectors: constant combinators wired
+        # onto a red data bus at the right edge of each lamp chunk.
+        display_lb = from_blueprint_string(res["display"])
+        wired_conn_count = sum(
+            1
+            for net in display_lb.networks if net.color == "red"
+            for ep in net.endpoints
+            if display_lb.entities.get(ep.entity_id)
+            and display_lb.entities[ep.entity_id].type == "constant-combinator"
+        )
+        assert wired_conn_count >= 2, "expected per-chunk display connectors"
+
+        # Each memory piece is independently parseable and carries connector CCs.
+        for label, s in res["pieces"]:
+            lb = from_blueprint_string(s)
+            assert lb.entities, f"{label}: no entities"
+            wired_cc = [
+                ep.entity_id
+                for net in lb.networks if net.color == "red"
+                for ep in net.endpoints
+                if lb.entities.get(ep.entity_id)
+                and lb.entities[ep.entity_id].type == "constant-combinator"
+            ]
+            assert len(wired_cc) >= 2, f"{label}: missing connector CCs"
+
+    def test_split_pieces_have_distinct_tick_windows(self):
+        from factorio_display.video.encoder import encode_frames_split
+        from factorio_display.logical_blueprint import from_blueprint_string
+
+        w, h = 40, 40
+        frames = [
+            np.full((h, w, 3), (i * 40, i * 20, 0), dtype=np.uint8) for i in range(6)
+        ]
+        res = encode_frames_split(
+            iter(frames), "SplitTest2", fps=30.0, adaptive=False,
+            total_width=w, total_height=h, expected_frames=6, source_id="s2",
+            time_chunks=2, chunk_workers=2,
+        )
+        # Fragment 0 covers ticks 0..2, fragment 1 covers ticks 3..5 (at 30fps,
+        # 2 ticks/frame). The first DC of each fragment must differ.
+        f0 = from_blueprint_string(dict(res["pieces"])["memory_c0_f0"])
+        f1 = from_blueprint_string(dict(res["pieces"])["memory_c0_f1"])
+
+        def _first_decider_ticks(lb):
+            for e in lb.entities.values():
+                if e.type == "decider-combinator":
+                    return [c.get("constant") for c in e.properties.get("conditions", [])
+                            if "constant" in c]
+            return []
+
+        assert _first_decider_ticks(f0) != _first_decider_ticks(f1), (
+            "fragments should gate on different ticks"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # encode_frames_chunked

@@ -55,13 +55,32 @@ Converts a video file, GIF, or image sequence into Decider Combinator "Memory" a
 
 ```bash
 # Video
-factorio-display encode ./bad_apple.mp4 --name "Bad Apple Frame Data" --adaptive --fps 30
+factorio-display encode ./bad_apple.mp4 --name "Bad Apple Frame Data" --fps 30
 
 # Audio (auto-detected from extension)
 factorio-display encode ./song.mid --ticks-per-beat 30
 ```
 
-_Tip: Use `--adaptive` and `--deduplicate` to save massive amounts of combinators by skipping idle frames and recycling identical frames._
+_Tip: Adaptive frame-dropping is on by default with a conservative threshold (`--no-adaptive` to disable, `--threshold 0.005` to tune). Add `--deduplicate` to recycle identical frames. For very large videos use `--split` (see below)._
+
+#### Split output for large videos (`--split`)
+
+A long video at a large width (e.g. 3 min @ width 70) yields a single blueprint with one decider per frame × per-pixel outputs — hundreds of MB and minutes to build. `--split` emits **independently-wireable pieces** instead:
+
+```bash
+factorio-display encode ./big.mp4 --width 70 --split --time-chunks 3 --output-dir out
+```
+
+This writes:
+- `out/display.txt` — the lamp display, with a per-chunk **connector CC** on each red data bus (a constant combinator carrying the chunk's identifying signal at value 0, so it adds nothing to the bus).
+- `out/memory_c{chunk}_f{frag}.txt` — one video-memory piece per **vertical chunk × time fragment**, each with **left/right connector CCs** on its data bus plus a non-wired fragment-series label CC.
+
+Pieces are built and materialised in **parallel worker processes**, so generation scales with the number of cores instead of serialising one giant blueprint. To assemble in game:
+1. Place the display, then each memory piece next to its display chunk.
+2. Wire each memory piece's connector CC to the matching display connector CC (they carry the same signal) with red wire.
+3. Join every piece's clock input to the shared clock.
+
+Connectors for the same display chunk share the identifying signal (and carry it at 0, so no pollution). Pass `--book` to also write a single blueprint book (`out/book.txt`) containing all pieces — note the book string is larger.
 
 ### 4. Encode Audio (MIDI)
 

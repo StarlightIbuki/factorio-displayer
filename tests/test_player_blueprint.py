@@ -750,3 +750,37 @@ class TestBuildDisplayLogical:
         positions = [(e.position[0], e.position[1]) for e in lamps]
         # All positions should be unique
         assert len(positions) == len(set(positions)), "Duplicate lamp positions"
+
+    def test_large_display_connectors_wired(self):
+        """Split-mode connector CCs: a wired data connector + isolated label per chunk."""
+        from factorio_display.logical_blueprint import to_draftsman
+
+        lb = build_display_logical(name="Connectors", width=62, height=35, connectors=True)
+
+        data_ports = sorted(
+            [p for p in lb.input_ports if p.startswith("data")],
+            key=lambda p: int(p.split("_")[1]) if "_" in p else 0,
+        )
+        assert len(data_ports) >= 2, "expected a chunked display"
+
+        for ci, port_name in enumerate(data_ports):
+            cc_id = f"cc_c{ci}_data"
+            label_id = f"cc_c{ci}_label"
+            assert cc_id in lb.entities, f"missing connector CC {cc_id}"
+            assert label_id in lb.entities, f"missing label CC {label_id}"
+            # Connector must be on the chunk's red network (the data bus).
+            net = next(n for n in lb.networks if n.network_id == lb.input_ports[port_name])
+            assert any(ep.entity_id == cc_id for ep in net.endpoints), (
+                f"connector {cc_id} not on the data bus"
+            )
+            # Label must NOT be wired anywhere.
+            label_in_any_net = any(
+                any(ep.entity_id == label_id for ep in n.endpoints)
+                for n in lb.networks
+            )
+            assert not label_in_any_net, f"label {label_id} must be isolated"
+
+        # Serialisation must succeed (fast path).
+        bp = to_draftsman(lb)
+        assert bp is not None
+        assert len(bp.entities) == len(lb.entities)

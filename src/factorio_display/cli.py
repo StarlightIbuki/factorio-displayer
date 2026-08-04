@@ -1185,10 +1185,11 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     vid_g.add_argument("--skip", type=int, default=1, help="Read every Nth frame")
     vid_g.add_argument("--fps", type=float, default=0.0,
                        help="Source frame rate (1-60). 0 = auto-detect.")
-    vid_g.add_argument("--adaptive", action="store_true",
-                       help="Drop near-duplicate frames.")
-    vid_g.add_argument("--threshold", type=float, default=0.01,
-                       help="Similarity cutoff for adaptive mode (default: 0.01).")
+    vid_g.add_argument("--adaptive", action=argparse.BooleanOptionalAction, default=True,
+                       help="Drop near-duplicate frames (default: on). Use --no-adaptive to keep every frame.")
+    vid_g.add_argument("--threshold", type=float, default=0.005,
+                       help="Similarity cutoff for adaptive mode, 0-1 (default: 0.005 = conservative, "
+                            "barely-noticeable frame merging).")
     vid_g.add_argument("--deduplicate", action="store_true",
                        help="Share one combinator across identical frames.")
     vid_g.add_argument("--width", type=int, default=None,
@@ -1205,6 +1206,17 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                          help="Write individual chunk blueprints to DIR for inspection.")
     chunk_g.add_argument("--deduplicate-cross", action="store_true",
                          help="Deduplicate identical frames across time chunks (slower).")
+
+    split_g = encode_parser.add_argument_group("Split output (large videos)")
+    split_g.add_argument("--split", action="store_true",
+                         help="Emit independently-wireable pieces (one display blueprint + one "
+                              "memory piece per vertical chunk x time fragment) instead of one "
+                              "giant merged blueprint. Combine with --time-chunks N for N fragments.")
+    split_g.add_argument("--output-dir", type=str, default="split_output",
+                         help="Directory to write split pieces to (default: split_output).")
+    split_g.add_argument("--book", action="store_true",
+                         help="Also write a single blueprint book containing all split pieces "
+                              "(larger string; optional).")
 
     # ── Audio / MIDI options ─────────────────────────────────────
     _add_audio_midi_options(encode_parser)
@@ -1704,6 +1716,54 @@ def _should_process_audio(
     return bool(videos)
 
 
+def _write_split_output(result: dict, args) -> None:
+    """Write split pieces (display + memory fragments) to ``args.output_dir``.
+
+    *result* is the dict returned by :func:`encode_frames_split`:
+    ``{"display": str, "pieces": [(label, str), ...], ...}``.
+    """
+    from draftsman.blueprintable import Blueprint, BlueprintBook
+
+    out_dir = Path(getattr(args, "output_dir", "split_output"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    display_str = result["display"]
+    pieces: list[tuple[str, str]] = result["pieces"]
+    (out_dir / "display.txt").write_text(display_str + "\n", encoding="utf-8")
+    for label, s in pieces:
+        (out_dir / f"{label}.txt").write_text(s + "\n", encoding="utf-8")
+
+    if getattr(args, "book", False):
+        book = BlueprintBook()
+        book.label = f"{args.name} (split)"
+        for label, s in [("display", display_str)] + pieces:
+            try:
+                bp = Blueprint.from_string(s)
+            except Exception as exc:  # pylint: disable=broad-except
+                sys.stderr.write(f"  Skipping {label} in book: {exc}\n")
+                continue
+            bp.label = label
+            book.blueprints.append(bp)
+        (out_dir / "book.txt").write_text(book.to_string() + "\n", encoding="utf-8")
+
+    sys.stderr.write(
+        f"Split output written to {out_dir}/\n"
+        f"  display blueprint: display.txt ({len(display_str):,} chars)\n"
+        f"  memory pieces:     {len(pieces)} "
+        f"({result['num_chunks']} vertical chunk(s) x {result['time_chunks']} time fragment(s))\n"
+    )
+    for label, s in sorted(pieces):
+        sys.stderr.write(f"    {label}.txt ({len(s):,} chars)\n")
+    if getattr(args, "book", False):
+        sys.stderr.write("  blueprint book:    book.txt\n")
+    sys.stderr.write(
+        "In-game wiring: place the display, then each memory piece next to its "
+        "display chunk and wire the matching connector CCs (the ones carrying the "
+        "same signal) with red wire. Also join every piece's clock input to the "
+        "shared clock.\n"
+    )
+
+
 def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-statements
     """Unified encode: classify inputs and route accordingly."""
     power_type: str | None = getattr(args, "power", None)
@@ -1763,6 +1823,38 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
 
     # ── Encode video frames ──────────────────────────────────────
     from .logical_blueprint import from_draftsman
+
+    split_mode = bool(getattr(args, "split", False))
+    if split_mode:
+        if has_standalone_audio:
+            sys.exit("Error: --split is for video-only output and cannot be combined "
+                     "with standalone audio inputs.")
+        if _classify_input(first_visual) != "video":
+            sys.exit("Error: --split currently supports video inputs only.")
+        if power_type is not None and power_type != "none":
+            sys.stderr.write(
+                "Note: --power is ignored in --split mode (pieces are wired in game).\n"
+            )
+        sys.stderr.write("Split output mode: emitting per-chunk memory pieces...\n")
+        split_result = encode_auto(
+            first_visual,
+            output_name=args.name,
+            fps_skip=args.skip,
+            fps=args.fps,
+            adaptive=args.adaptive,
+            threshold=args.threshold,
+            deduplicate=args.deduplicate,
+            total_width=resolved_w,
+            total_height=resolved_h,
+            time_chunks=args.time_chunks,
+            chunk_workers=args.chunk_workers,
+            output_chunks_dir=args.output_chunks,
+            deduplicate_cross=args.deduplicate_cross,
+            use_cache=use_cache,
+            split=True,
+        )
+        _write_split_output(split_result, args)
+        return
 
     video_bp = encode_auto(
         first_visual if len(input_paths) == 1 and not audios else input_paths[0],

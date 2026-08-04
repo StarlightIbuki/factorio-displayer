@@ -212,15 +212,30 @@ def _fix_blueprint_conditions(bp: Blueprint) -> Blueprint:
 # ══════════════════════════════════════════════════════════════════════
 
 
-def _layout_and_prewire_memory_bank(lb: "LogicalBlueprint", dc_ids: list[str]) -> None:
+def _layout_and_prewire_memory_bank(
+    lb: "LogicalBlueprint",
+    dc_ids: list[str],
+    *,
+    connectors: bool = False,
+    connector_label: str | None = None,
+    fragment_index: int | None = None,
+) -> None:
     """Assign compact square positions and deterministic internal prewiring.
 
     Memory banks are regular: all DC inputs share one red network and all DC
     outputs share another. We assign a square-ish layout and attach prewired
     snake connections on both buses so the bank can be treated as one compact
     block during composition.
+
+    When *connectors* is True (split-output mode), the bank also gets:
+      * constant-combinator connectors on the LEFT and RIGHT, wired into the
+        red *output* (data) bus and carrying *connector_label* at value 0 —
+        a visual hint that adds nothing to the bus, used for in-game wiring
+        to the matching display chunk;
+      * a non-wired series-label CC carrying *fragment_index* (which time
+        fragment this piece is).
     """
-    from ..logical_blueprint import Endpoint
+    from ..logical_blueprint import Endpoint, LogicalEntity
 
     n = len(dc_ids)
     if n == 0:
@@ -264,7 +279,32 @@ def _layout_and_prewire_memory_bank(lb: "LogicalBlueprint", dc_ids: list[str]) -
         if input_anchor in net.endpoints:
             net.prewired_pairs = _pairs_for_port("input")
         elif output_anchor in net.endpoints:
-            net.prewired_pairs = _pairs_for_port("output")
+            output_pairs = _pairs_for_port("output")
+            if connectors and connector_label:
+                left_cc = f"{dc_ids[0]}_ccL"
+                right_cc = f"{dc_ids[0]}_ccR"
+                lb.add_entity(LogicalEntity(
+                    left_cc, "constant-combinator",
+                    properties={"signals": [{"name": connector_label, "value": 0}]},
+                    position=(-1, 0),
+                ))
+                lb.add_entity(LogicalEntity(
+                    right_cc, "constant-combinator",
+                    properties={"signals": [{"name": connector_label, "value": 0}]},
+                    position=(cols, 0),
+                ))
+                if fragment_index is not None:
+                    lb.add_entity(LogicalEntity(
+                        f"{dc_ids[0]}_label", "constant-combinator",
+                        properties={"signals": [{"name": "signal-info", "value": fragment_index}]},
+                        position=(cols, 1),
+                    ))
+                # Join the data bus (network membership) + include in prewired.
+                lb.connect("red", Endpoint(left_cc, "input"), output_anchor)
+                lb.connect("red", Endpoint(right_cc, "input"), output_anchor)
+                output_pairs.append((Endpoint(left_cc, "input"), output_anchor))
+                output_pairs.append((Endpoint(right_cc, "input"), output_anchor))
+            net.prewired_pairs = output_pairs
 
 def _encode_frames_core(
     kept_frames: list[np.ndarray],
@@ -275,6 +315,9 @@ def _encode_frames_core(
     clock: str,
     current_tick: int,
     label_suffix: str = "",
+    *,
+    connectors: bool = False,
+    fragment_index: int | None = None,
 ) -> "LogicalBlueprint":
     """Build a LogicalBlueprint from pre-processed frame data.
 
@@ -392,7 +435,19 @@ def _encode_frames_core(
             lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
 
     # ── Declare ports ───────────────────────────────────────────────
-    _layout_and_prewire_memory_bank(lb, dc_ids)
+    connector_label = None
+    if connectors:
+        _sig0 = mapping.get_signal(0, 0)
+        if _sig0:
+            connector_label = _sig0["name"]
+            if _sig0.get("quality") and _sig0["quality"] != "normal":
+                connector_label = f"{_sig0['name']}@{_sig0['quality']}"
+    _layout_and_prewire_memory_bank(
+        lb, dc_ids,
+        connectors=connectors,
+        connector_label=connector_label,
+        fragment_index=fragment_index,
+    )
 
     if dc_ids:
         first_input_ep = Endpoint(dc_ids[0], "input")
@@ -1416,6 +1471,195 @@ def encode_frames_chunked(
     return {"full": full_bp, "chunks": [to_draftsman(lb) for lb in chunk_lbs]}
 
 
+def _build_split_piece_worker(payload: bytes) -> tuple[str, str]:
+    """Build one (vertical chunk × time fragment) memory piece in a worker.
+
+    Returns ``(piece_label, blueprint_string)``.  ``to_draftsman`` + string
+    serialisation run inside the worker so the heavy materialisation is
+    parallel across pieces (the point of the split-output design).
+    """
+    from ..logical_blueprint import to_draftsman
+
+    data = pickle.loads(payload)
+    lb = _encode_frames_core(
+        kept_frames=data["kept_frames"],
+        tick_ranges=data["tick_ranges"],
+        output_name=data["output_name"],
+        deduplicate=data["deduplicate"],
+        mapping_params=data["mapping_params"],
+        clock=data["clock"],
+        current_tick=data["current_tick"],
+        label_suffix=data.get("label_suffix", ""),
+        connectors=True,
+        fragment_index=data.get("fragment_index"),
+    )
+    return data["label"], to_draftsman(lb).to_string()
+
+
+def encode_frames_split(
+    rgb_frames: Iterator[np.ndarray],
+    output_name: str,
+    fps: float = 0.0,
+    adaptive: bool = False,
+    threshold: float = 0.03,
+    deduplicate: bool = False,
+    total_width: int | None = None,
+    total_height: int | None = None,
+    expected_frames: int | None = None,
+    source_id: str = "",
+    *,
+    time_chunks: int = 2,
+    chunk_workers: int | None = None,
+) -> dict:
+    """Encode a video into independently-wireable pieces (split output).
+
+    Instead of one giant merged blueprint, the video memory is emitted as a
+    grid of pieces — one per (vertical display chunk × time fragment) — and
+    the display as a single blueprint with per-chunk connector CCs.
+
+    Each memory piece carries constant-combinator connectors on the LEFT and
+    RIGHT of its data bus (carrying the chunk's identifying signal at value 0,
+    so they add nothing to the bus) plus a non-wired fragment-series label CC.
+    The display chunk connectors carry the same identifying signal.  The user
+    places the display and each piece, then wires matching connectors in game.
+
+    Each piece is built and materialised (``to_draftsman`` + ``to_string``)
+    in a worker process, so the dominant cost parallelises across pieces.
+
+    Returns ``{"display": str, "pieces": [(label, str), ...],
+               "num_chunks": int, "time_chunks": int}``.
+    """
+    from ..logical_blueprint import to_draftsman
+    from .player_blueprint import build_display_logical
+
+    if fps <= 0:
+        fps = 60.0
+    fps = max(1.0, min(fps, 60.0))
+    ticks_float = 60.0 / fps
+
+    total_w = total_width if total_width is not None else DISPLAY_WIDTH
+    total_h = total_height if total_height is not None else DISPLAY_HEIGHT
+
+    # ── Phase 1: decode + resize + adaptive drop (same as encode_frames) ──
+    kept_frames: list[np.ndarray] = []
+    tick_ranges: list[tuple[int, int]] = []
+    current_tick = 0
+    sys.stderr.write("Decoding, resizing, and processing frames...\n")
+
+    def _resize_task(rgb):
+        resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
+        if resized.dtype != np.uint8:
+            resized = resized.astype(np.uint8)
+        return resized
+
+    accum = 0.0
+    carry_ticks = 0
+    prev_resized: np.ndarray | None = None
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = executor.map(_resize_task, rgb_frames)
+        for resized in tqdm(
+            futures, total=expected_frames, desc="Resizing & Dropping", unit="frame",
+        ):
+            accum += ticks_float
+            needed = max(1, int(accum + 1e-9))
+            accum -= needed
+            if adaptive and prev_resized is not None:
+                if _frame_diff(prev_resized, resized) < threshold:
+                    carry_ticks += needed
+                    continue
+            if adaptive:
+                prev_resized = resized.copy()
+            frame_ticks = needed + carry_ticks
+            carry_ticks = 0
+            tick_ranges.append((current_tick, current_tick + frame_ticks - 1))
+            kept_frames.append(resized)
+            current_tick += frame_ticks
+    if carry_ticks > 0 and tick_ranges:
+        start, end = tick_ranges[-1]
+        tick_ranges[-1] = (start, end + carry_ticks)
+        current_tick += carry_ticks
+
+    if not kept_frames:
+        raise ValueError("No frames to encode.")
+
+    total_input = len(kept_frames)
+    qualities = QUALITIES
+    signal_pool = SIGNAL_POOL
+
+    # ── Display blueprint (one per display, with per-chunk connectors) ──
+    display_lb = build_display_logical(
+        f"{output_name} Display", total_w, total_h, connectors=True,
+    )
+    display_str = to_draftsman(display_lb).to_string()
+
+    # ── Vertical chunks × time fragments ────────────────────────────
+    from ..integer2signal.mapping import compute_chunking
+    chunk_height, num_chunks = compute_chunking(total_w, total_h, signal_pool, qualities)
+
+    time_chunks = max(1, time_chunks)
+    fragment_size = math.ceil(total_input / time_chunks)
+
+    payloads: list[bytes] = []
+    for ci in range(num_chunks):
+        y0 = ci * chunk_height
+        y1 = min(y0 + chunk_height, total_h)
+        ch_h = y1 - y0
+        ch_mapping = SignalMapping(total_w, ch_h, qualities, signal_pool)
+        mp = {
+            "width": ch_mapping.width, "height": ch_mapping.height,
+            "qualities": ch_mapping.qualities,
+            "signal_pool": ch_mapping.base_signals,
+        }
+        for f in range(time_chunks):
+            start = f * fragment_size
+            end = min(start + fragment_size, total_input)
+            if start >= end:
+                continue
+            chunk_frames = [fr[y0:y1, :, :] for fr in kept_frames[start:end]]
+            frag_ticks = tick_ranges[start:end]
+            last_tick = frag_ticks[-1][1] if frag_ticks else 0
+            payloads.append(pickle.dumps({
+                "label": f"memory_c{ci}_f{f}",
+                "kept_frames": chunk_frames,
+                "tick_ranges": frag_ticks,
+                "output_name": f"{output_name} c{ci} f{f}",
+                "deduplicate": deduplicate,
+                "mapping_params": mp,
+                "clock": CLOCK_SIGNAL,
+                "current_tick": last_tick + 1,
+                "label_suffix": f" [chunk {ci + 1}/{num_chunks}, frag {f + 1}/{time_chunks}]",
+                "fragment_index": f,
+            }))
+
+    workers = chunk_workers or os.cpu_count() or 1
+    workers = min(workers, len(payloads)) if payloads else 1
+    sys.stderr.write(
+        f"Splitting into {num_chunks} vertical chunk(s) × {time_chunks} time "
+        f"fragment(s) = {len(payloads)} memory piece(s), built with "
+        f"{workers} worker(s)...\n"
+    )
+
+    pieces: list[tuple[str, str]] = []
+    if payloads:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_build_split_piece_worker, p) for p in payloads]
+            for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures), desc="Building memory pieces", unit="piece",
+            ):
+                pieces.append(future.result())
+
+    # Keep deterministic order (label-sorted).
+    pieces.sort(key=lambda kv: kv[0])
+
+    return {
+        "display": display_str,
+        "pieces": pieces,
+        "num_chunks": num_chunks,
+        "time_chunks": time_chunks,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Input-specific encoders
 # ---------------------------------------------------------------------------
@@ -1436,10 +1680,12 @@ def encode_video(
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
     use_cache: bool = False,
+    split: bool = False,
 ) -> Blueprint:
     """Encode a video file (``.mp4``, ``.avi``, ``.mov``, etc.).
 
-    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    Returns a :class:`~draftsman.blueprintable.Blueprint`, or (when
+    *split* is True) a ``dict`` from :func:`encode_frames_split`.
     """
     cap = _videocap_utf8(str(video_path))
     if not cap.isOpened():
@@ -1484,6 +1730,13 @@ def encode_video(
 
     try:
         source_id = f"{video_path}_{fps_skip}"
+        if split:
+            return encode_frames_split(
+                _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
+                total_width=resolved_w, total_height=resolved_h,
+                expected_frames=expected_frames, source_id=source_id,
+                time_chunks=time_chunks, chunk_workers=chunk_workers,
+            )
         if time_chunks > 1 or deduplicate_cross:
             result = encode_frames_chunked(
                 _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
@@ -1708,10 +1961,13 @@ def encode_auto(
     output_chunks_dir: str | None = None,
     deduplicate_cross: bool = False,
     use_cache: bool = False,
+    split: bool = False,
 ) -> Blueprint:
     """Auto-detect input type and call the appropriate encoder.
 
-    Returns a :class:`~draftsman.blueprintable.Blueprint`.
+    Returns a :class:`~draftsman.blueprintable.Blueprint`, or (when *split*
+    is True and the input is a video) the ``dict`` from
+    :func:`encode_frames_split`.
     """
     path = Path(input_path)
     video_exts = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -1747,6 +2003,7 @@ def encode_auto(
     if ext in video_exts:
         return encode_video(input_path, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                              total_width=total_width, total_height=total_height,
+                             split=split,
                              **chunk_kwargs)
 
     if ext == ".gif":

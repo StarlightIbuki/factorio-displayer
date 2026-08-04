@@ -39,12 +39,18 @@ def build_display_logical(  # pylint: disable=too-many-locals
     name: str = "Video Display",
     width: int | None = None,
     height: int | None = None,
+    *,
+    connectors: bool = False,
 ) -> LogicalBlueprint:
     """Build a lamp-grid display LogicalBlueprint.
 
     If the display has more pixels than the signal pool can address, the
     display is split into disconnected vertical chunks, each with its own
     signal mapping and independent red-wire bus.
+
+    When *connectors* is True (split-output mode), each chunk also gets a
+    constant-combinator connector on the red data bus plus a non-wired
+    series-label CC (see :func:`_build_display_chunked`).
 
     Returns a :class:`LogicalBlueprint` with ``input_ports={"data_0": ...,
     "data_1": ...}`` (one port per chunk) for the colour signal bus.
@@ -63,6 +69,7 @@ def build_display_logical(  # pylint: disable=too-many-locals
         name=name, width=w, height=h,
         chunk_height=chunk_height, num_chunks=num_chunks,
         pool=pool, qualities=qualities,
+        connectors=connectors,
     )
 
 
@@ -74,12 +81,21 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
     num_chunks: int,
     pool: list[str],
     qualities: list[str],
+    *,
+    connectors: bool = False,
 ) -> LogicalBlueprint:
     """Build a chunked lamp-grid display LogicalBlueprint.
 
     Each chunk is a self-contained lamp grid with its own SignalMapping
     and independent red-wire bus.  Chunks are placed at increasing Y
     offsets so they stack vertically.
+
+    When *connectors* is True (split-output mode), every chunk also gets:
+      * a constant-combinator "connector" to the right of the lamp grid,
+        wired into the red data bus and carrying the chunk's identifying
+        signal at value 0 (a visual hint that adds nothing to the bus) —
+        the user wires the matching memory fragment's connector to it;
+      * a non-wired series-label CC noting the chunk index.
     """
     lb = LogicalBlueprint(label=name)
 
@@ -131,6 +147,35 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
                 lb.connect("red", Endpoint(lamp_grid[py][ch_w - 1], "input"),
                           Endpoint(lamp_grid[py + 1][ch_w - 1], "input"))
 
+        # ── Connector CC (split mode): right of the lamp chunk, on the red bus ──
+        # Carries the chunk's identifying signal at value 0 (visual hint, no
+        # numeric pollution).  Wired into the lamp network so it is a usable
+        # in-game connection point to the matching memory fragment.
+        conn_cc_id: str | None = None
+        if connectors:
+            sig0 = mapping.get_signal(0, 0)
+            label_sig: str | None = None
+            if sig0:
+                label_sig = sig0["name"]
+                if sig0.get("quality") and sig0["quality"] != "normal":
+                    label_sig = f"{sig0['name']}@{sig0['quality']}"
+            conn_cc_id = f"cc_c{ci}_data"
+            lb.add_entity(LogicalEntity(
+                conn_cc_id, "constant-combinator",
+                properties={"signals": [{"name": label_sig, "value": 0}]} if label_sig else {},
+                position=(ch_w, cum_y),
+            ))
+            # Non-wired series-label CC (chunk index).
+            lb.add_entity(LogicalEntity(
+                f"cc_c{ci}_label", "constant-combinator",
+                properties={"signals": [{"name": "signal-info", "value": ci}]},
+                position=(ch_w, cum_y + 1),
+            ))
+            # Join the red data bus (network membership).
+            if lamp_grid[0][0]:
+                lb.connect("red", Endpoint(conn_cc_id, "input"),
+                           Endpoint(lamp_grid[0][0], "input"))
+
         # Declare data input port for this chunk
         port_name = "data" if num_chunks == 1 else f"data_{ci}"
         if lamp_grid[0][0]:
@@ -152,6 +197,11 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
                                 Endpoint(lamp_grid[py][ch_w - 1], "input"),
                                 Endpoint(lamp_grid[py + 1][ch_w - 1], "input"),
                             ))
+                    if conn_cc_id is not None:
+                        pairs.append((
+                            Endpoint(conn_cc_id, "input"),
+                            Endpoint(lamp_grid[0][0], "input"),
+                        ))
                     net.prewired_pairs = pairs
                     break
 
