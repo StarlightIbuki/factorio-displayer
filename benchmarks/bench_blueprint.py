@@ -26,7 +26,7 @@ def main() -> None:
         LogicalBlueprint, to_draftsman, from_draftsman,
     )
     from factorio_display.video.player_blueprint import build_display_logical
-    from factorio_display.timer import build_raw_timer, build_mod_timer, build_clock_bridge
+    from factorio_display.timer import build_raw_timer, build_mod_timer
     from factorio_display.composer import (
         compose, PortConnection, _assign_tile_positions, _connect_nets_by_color,
     )

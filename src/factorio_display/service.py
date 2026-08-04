@@ -47,7 +47,12 @@ class BuildResult:
 
 @dataclass
 class MediaResult:
-    """Structured result of an encode operation (video / audio / MIDI / image)."""
+    """Structured result of an encode operation (video / audio / MIDI / image).
+
+    For piecewise (chunked, default) output the result carries *pieces* (a
+    list of ``{"label", "blueprint"}``) and optionally a *book* string; the
+    *blueprint* field is the book (when small enough) or the first piece.
+    """
 
     blueprint: str = ""
     name: str = "Media Data"
@@ -59,6 +64,9 @@ class MediaResult:
     warnings: list[str] = field(default_factory=list)
     artifacts: list[str] = field(default_factory=list)
     logs: str = ""
+    split: bool = False
+    pieces: list[dict[str, str]] = field(default_factory=list)
+    book: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +80,9 @@ class MediaResult:
             "warnings": self.warnings,
             "artifacts": self.artifacts,
             "logs": self.logs,
+            "split": self.split,
+            "pieces": self.pieces,
+            "book": self.book,
         }
 
 
@@ -140,6 +151,13 @@ class MediaConfig:
     processed_midi_path: str | None = None
     debug_json_path: str | None = None
     output_path: str | None = None  # CLI-only: write blueprint to a file
+
+    # piecewise (chunked) output — the default.  ``all_in_one`` opts into the
+    # legacy single merged blueprint (not recommended).
+    all_in_one: bool = False
+    book: bool = False
+    no_book: bool = False
+    output_dir: str | None = None
 
     def to_argv(self, *, include_json: bool = True) -> list[str]:
         """Build the ``factorio-display encode`` argv (after ``python -m factorio_display``)."""
@@ -215,6 +233,14 @@ class MediaConfig:
             a += ["--debug-json", self.debug_json_path]
         if self.output_path:
             a += ["-o", self.output_path]
+        if self.all_in_one:
+            a.append("--all-in-one")
+        if self.book:
+            a.append("--book")
+        if self.no_book:
+            a.append("--no-book")
+        if self.output_dir:
+            a += ["--output-dir", self.output_dir]
         a += list(self.inputs)
         return a
 
@@ -313,6 +339,7 @@ def parse_media_json(text: str) -> MediaResult:
     blueprint = str(result.get("blueprint", "") or "")
     logs = str(result.get("logs", "") or "")
     dims = result.get("dimensions")
+    pieces = result.get("pieces") or []
     return MediaResult(
         blueprint=blueprint,
         name=str(result.get("name", "") or ""),
@@ -324,6 +351,9 @@ def parse_media_json(text: str) -> MediaResult:
         warnings=list(result.get("warnings", []) or _extract_warnings(logs)),
         artifacts=list(result.get("artifacts", []) or []),
         logs=logs,
+        split=bool(result.get("split", False)),
+        pieces=list(pieces) if isinstance(pieces, list) else [],
+        book=str(result.get("book", "") or ""),
     )
 
 

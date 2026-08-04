@@ -229,9 +229,25 @@ def compute_page_layout(
     return page_count, cells_per_page, TICKS_PER_PAGE
 
 
-def _layout_and_prewire_audio_bank(lb: "LogicalBlueprint", dc_ids: list[str]) -> None:  # noqa: F821
-    """Assign compact positions and deterministic internal bus prewiring."""
-    from ..logical_blueprint import Endpoint  # pylint: disable=import-outside-toplevel
+def _layout_and_prewire_audio_bank(
+    lb: "LogicalBlueprint",  # noqa: F821
+    dc_ids: list[str],
+    *,
+    connectors: bool = False,
+    connector_label: str | None = None,
+    fragment_index: int | None = None,
+) -> None:
+    """Assign compact positions and deterministic internal bus prewiring.
+
+    When *connectors* is True (split-output mode), the bank also gets:
+      * constant-combinator connectors on the LEFT and RIGHT, each wired
+        into BOTH the green clock (time) bus and the red output (data) bus
+        and carrying *connector_label* at value 0 — a visual hint that adds
+        nothing to either bus, used for in-game wiring to the player (or the
+        neighbouring memory chunk);
+      * a non-wired series-label CC carrying *fragment_index*.
+    """
+    from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
 
     n = len(dc_ids)
     if n == 0:
@@ -250,7 +266,15 @@ def _layout_and_prewire_audio_bank(lb: "LogicalBlueprint", dc_ids: list[str]) ->
             continue
         ent.position = (col, row * 2)
 
+    input_anchor = Endpoint(dc_ids[0], "input")
+    output_anchor = Endpoint(dc_ids[0], "output")
+
     if n <= 1:
+        # A single page has no snake bus, but the connector CCs still need
+        # to join the (explicitly declared) clock/data networks.
+        if connectors and connector_label:
+            _attach_audio_connectors(lb, dc_ids[0], cols, input_anchor, output_anchor,
+                                     connector_label, fragment_index)
         return
 
     rows = math.ceil(n / cols)
@@ -262,9 +286,6 @@ def _layout_and_prewire_audio_bank(lb: "LogicalBlueprint", dc_ids: list[str]) ->
         if row % 2 == 1:
             row_ids = list(reversed(row_ids))
         snake_ids.extend(row_ids)
-
-    input_anchor = Endpoint(dc_ids[0], "input")
-    output_anchor = Endpoint(dc_ids[0], "output")
 
     in_pairs = [
         (Endpoint(snake_ids[i], "input"), Endpoint(snake_ids[i + 1], "input"))
@@ -280,6 +301,67 @@ def _layout_and_prewire_audio_bank(lb: "LogicalBlueprint", dc_ids: list[str]) ->
             net.prewired_pairs = in_pairs
         elif net.color == "red" and output_anchor in net.endpoints:
             net.prewired_pairs = out_pairs
+
+    if connectors and connector_label:
+        _attach_audio_connectors(lb, dc_ids[0], cols, input_anchor, output_anchor,
+                                 connector_label, fragment_index)
+
+
+def _attach_audio_connectors(
+    lb: "LogicalBlueprint",  # noqa: F821
+    first_dc: str,
+    cols: int,
+    input_anchor: "Endpoint",  # noqa: F821
+    output_anchor: "Endpoint",  # noqa: F821
+    connector_label: str,
+    fragment_index: int | None,
+) -> None:
+    """Add left/right connector CCs joining the green clock + red data buses.
+
+    Each connector is wired into both the clock (green) and data (red)
+    networks via the first DC's input/output endpoints, and added to those
+    networks' prewired pairs so the wires materialise deterministically.
+    """
+    from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
+
+    left_cc = f"{first_dc}_ccL"
+    right_cc = f"{first_dc}_ccR"
+    lb.add_entity(LogicalEntity(
+        left_cc, "constant-combinator",
+        properties={"signals": [{"name": connector_label, "value": 0}]},
+        position=(-1, 0),
+    ))
+    lb.add_entity(LogicalEntity(
+        right_cc, "constant-combinator",
+        properties={"signals": [{"name": connector_label, "value": 0}]},
+        position=(cols, 0),
+    ))
+    if fragment_index is not None:
+        lb.add_entity(LogicalEntity(
+            f"{first_dc}_label", "constant-combinator",
+            properties={"signals": [{"name": "signal-info", "value": fragment_index}]},
+            position=(cols, 1),
+        ))
+
+    # Join the green clock (time) bus — via the first DC's input.
+    lb.connect("green", Endpoint(left_cc, "input"), input_anchor)
+    lb.connect("green", Endpoint(right_cc, "input"), input_anchor)
+    # Join the red data bus — via the first DC's output.
+    lb.connect("red", Endpoint(left_cc, "input"), output_anchor)
+    lb.connect("red", Endpoint(right_cc, "input"), output_anchor)
+
+    # Include the connector wires in the prewired pairs of both buses.
+    for net in lb.networks:
+        if net.color == "green" and input_anchor in net.endpoints:
+            pairs = list(net.prewired_pairs or [])
+            pairs.append((Endpoint(left_cc, "input"), input_anchor))
+            pairs.append((Endpoint(right_cc, "input"), input_anchor))
+            net.prewired_pairs = pairs
+        elif net.color == "red" and output_anchor in net.endpoints:
+            pairs = list(net.prewired_pairs or [])
+            pairs.append((Endpoint(left_cc, "input"), output_anchor))
+            pairs.append((Endpoint(right_cc, "input"), output_anchor))
+            net.prewired_pairs = pairs
 
 
 # ── main encoder entry point ───────────────────────────────────────────
@@ -1186,6 +1268,10 @@ def encode_audio_to_logical(
     id_prefix: str = "",
     grouping: Sequence[Sequence[int | None]] | None = None,
     ticks_per_page: int = TICKS_PER_PAGE,
+    *,
+    connectors: bool = False,
+    connector_label: str | None = None,
+    fragment_index: int | None = None,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Encode tick→loudness data into a :class:`LogicalBlueprint`.
 
@@ -1337,7 +1423,12 @@ def encode_audio_to_logical(
             endpoints={Endpoint(dc_ids[0], "input")},
         ))
 
-    _layout_and_prewire_audio_bank(lb, dc_ids)
+    _layout_and_prewire_audio_bank(
+        lb, dc_ids,
+        connectors=connectors,
+        connector_label=connector_label,
+        fragment_index=fragment_index,
+    )
 
     # Declare ports when the shared buses exist.
     if dc_ids:
@@ -1359,3 +1450,73 @@ def encode_audio_to_logical(
     )
 
     return lb
+
+
+def encode_audio_split(
+    int_data_list: Sequence[Sequence[Sequence[int]]],
+    instruments: Sequence[str],
+    output_name: str,
+    signal_pool: list[str],
+    qualities: list[str],
+    clock_signal: str = "signal-clock",
+    map_drums: bool = False,
+    active_drum_pitches: Sequence[set[int] | None] | None = None,
+    rail_ticks_per_page: Sequence[int] | None = None,
+    rail_groupings: Sequence[Sequence[Sequence[int | None]] | None] | None = None,
+) -> dict:
+    """Encode audio rails into independently-wireable pieces (split output).
+
+    Returns one **player** blueprint (with a bottom-edge connector CC per
+    rail) plus one **memory** piece per rail (with connector CCs on both
+    ends).  Every connector joins the green clock (time) bus and the red
+    data bus; the user wires matching connectors in game to feed the clock
+    and page data from memory to the player.
+
+    Returns ``{"player": str, "pieces": [(label, str), ...], "num_rails": int}``.
+    """
+    from ..logical_blueprint import to_draftsman  # pylint: disable=import-outside-toplevel
+    from .player_blueprint import (  # pylint: disable=import-outside-toplevel
+        _rail_marker_signal,
+        build_multi_rail_decoder_logical,
+    )
+
+    num_rails = len(instruments)
+    if num_rails == 0:
+        raise ValueError("instruments must not be empty")
+
+    player_lb = build_multi_rail_decoder_logical(
+        name=f"{output_name} Player",
+        instruments=list(instruments),
+        clock_signal=clock_signal,
+        map_drums=map_drums,
+        active_drum_pitches=list(active_drum_pitches) if active_drum_pitches else None,
+        ticks_per_page=list(rail_ticks_per_page) if rail_ticks_per_page else None,
+        connectors=True,
+    )
+    player_str = to_draftsman(player_lb).to_string()
+
+    pieces: list[tuple[str, str]] = []
+    for ri, int_data in enumerate(int_data_list):
+        grouping = rail_groupings[ri] if rail_groupings else None
+        mem = encode_audio_to_logical(
+            int_data, f"{output_name} r{ri}",
+            signal_pool=signal_pool,
+            qualities=qualities,
+            clock_signal=clock_signal,
+            id_prefix=f"r{ri}_",
+            grouping=grouping,
+            ticks_per_page=(
+                rail_ticks_per_page[ri] if rail_ticks_per_page else TICKS_PER_PAGE
+            ),
+            connectors=True,
+            connector_label=_rail_marker_signal(ri),
+            fragment_index=ri,
+        )
+        mem_str = to_draftsman(mem).to_string()
+        pieces.append((f"memory_r{ri}", mem_str))
+
+    return {
+        "player": player_str,
+        "pieces": pieces,
+        "num_rails": num_rails,
+    }

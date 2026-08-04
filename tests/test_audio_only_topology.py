@@ -237,8 +237,8 @@ def test_large_audio_composition_all_wires_short() -> None:
                     stack.append(nb[0])
         return seen
 
-    timer_out = next(eid for eid in result.entities if eid.startswith("timer_")
-                     and "bridge_clock" in eid)
+    timer_out = next(eid for eid in result.entities
+                     if "modg_" in eid and eid.endswith("_mod"))
     mod_id = next(eid for eid in result.entities
                   if eid.startswith("audio_player_") and eid.endswith("mod"))
     assert mod_id in _reachable(timer_out, "green"), (

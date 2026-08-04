@@ -294,6 +294,62 @@ class TestEncodeAudioToLogical:
         assert clock_net.color == "green"
         assert data_net.color == "red"
 
+    def test_connectors_wired_into_clock_and_data_buses(self):
+        """Split-mode memory connectors: left/right CCs join BOTH the green
+        clock (time) bus and the red data bus; label CC is isolated."""
+        from factorio_display.audio.player_blueprint import _rail_marker_signal
+        from factorio_display.logical_blueprint import Endpoint, to_draftsman
+
+        data = [[(i % 100) + 1 for i in range(SPEAKER_COUNT)] for _ in range(130)]
+        lb = encode_audio_to_logical(
+            data, "TestConnectors", self.pool, self.qual,
+            connectors=True, connector_label=_rail_marker_signal(0), fragment_index=2,
+        )
+
+        assert "ap0_ccL" in lb.entities, "missing left connector CC"
+        assert "ap0_ccR" in lb.entities, "missing right connector CC"
+        assert "ap0_label" in lb.entities, "missing label CC"
+
+        for cc in ("ap0_ccL", "ap0_ccR"):
+            green_ok = red_ok = False
+            for net in lb.networks:
+                has = Endpoint(cc, "input") in net.endpoints
+                if net.color == "green" and has:
+                    green_ok = True
+                if net.color == "red" and has:
+                    red_ok = True
+            assert green_ok, f"{cc} must join the green clock (time) bus"
+            assert red_ok, f"{cc} must join the red data bus"
+
+        # Label CC is not wired anywhere.
+        for net in lb.networks:
+            assert Endpoint("ap0_label", "input") not in net.endpoints
+
+        bp = to_draftsman(lb)
+        assert bp.to_string().startswith("0eN")
+
+    def test_split_encoder_returns_player_and_memory_pieces(self):
+        """encode_audio_split → player + one memory piece per rail, all with
+        connectors; each piece is a valid blueprint string."""
+        from factorio_display.audio.encoder import encode_audio_split
+        from factorio_display.logical_blueprint import from_blueprint_string
+
+        data = [[(i % 100) + 1 for i in range(SPEAKER_COUNT)] for _ in range(130)]
+        res = encode_audio_split(
+            [data], ["piano"], "SplitTest",
+            signal_pool=self.pool, qualities=self.qual,
+        )
+        assert res["player"].startswith("0eN")
+        assert res["num_rails"] == 1
+        assert [lbl for lbl, _ in res["pieces"]] == ["memory_r0"]
+        assert res["pieces"][0][1].startswith("0eN")
+
+        # The player piece must carry its bottom connector.
+        from factorio_display.audio.player_blueprint import build_audio_decoder_logical
+        player_lb = from_blueprint_string(res["player"])
+        cc_count = sum(1 for e in player_lb.entities.values() if e.type == "constant-combinator")
+        assert cc_count >= 2  # page port + connector (+ label)
+
     def test_drum_grouping_uses_raw_volume_cells(self):
         """drum_grouping stores each used drum as a RAW tick→volume cell.
 

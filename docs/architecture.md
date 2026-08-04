@@ -316,11 +316,28 @@ Call this in every test that produces a blueprint string.
 | Wire  | Carries                              |
 |-------|--------------------------------------|
 | RED   | Unified signal bus — clock, sub-tick, DC page data, display lamp signals, progress bar |
-| GREEN | Audio decoder: CC lookup outputs, bell bus, intermediate signals |
+| GREEN | Audio decoder: CC lookup outputs, bell bus, intermediate signals; **audio time/clock bus in piecewise output** |
 
 In the video all-in-one blueprint, the RED wire carries everything —
 the raw clock (self-loop), the modulo clock (sub-tick for DC gating),
 DC outputs (colour data), display lamp inputs, and progress bar.
+
+### Piecewise (chunked) output — connectors & the time bus
+
+`encode` emits independent pieces by default (book for small outputs,
+`--all-in-one` for the legacy merged blueprint — not recommended):
+
+- **Video memory pieces**: left/right connector CCs on the red data bus.
+- **Audio memory pieces**: connector CCs on both ends, each joining the
+  green **time/clock bus** *and* the red **data** bus.
+- **Audio player**: one bottom-edge connector CC per rail, joining the same
+  two buses.  The mod timer outputs the looping clock **directly on GREEN**
+  (`build_mod_timer(..., output_color="green")`) — the old red→green
+  `build_clock_bridge` relay combinator has been removed.
+
+All connector CCs carry their identifying signal at **value 0** (dropped by
+Factorio, so no bus pollution); an isolated `signal-info` CC notes the
+chunk/rail series number.
 
 ## Logical Blueprint DSL (preferred authoring format)
 

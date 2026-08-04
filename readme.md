@@ -61,26 +61,30 @@ factorio-display encode ./bad_apple.mp4 --name "Bad Apple Frame Data" --fps 30
 factorio-display encode ./song.mid --ticks-per-beat 30
 ```
 
-_Tip: Adaptive frame-dropping is on by default with a conservative threshold (`--no-adaptive` to disable, `--threshold 0.005` to tune). Add `--deduplicate` to recycle identical frames. For very large videos use `--split` (see below)._
+_Tip: Adaptive frame-dropping is on by default with a conservative threshold (`--no-adaptive` to disable, `--threshold 0.005` to tune). Add `--deduplicate` to recycle identical frames._
 
-#### Split output for large videos (`--split`)
+#### Piecewise (chunked) output — the default
 
-A long video at a large width (e.g. 3 min @ width 70) yields a single blueprint with one decider per frame × per-pixel outputs — hundreds of MB and minutes to build. `--split` emits **independently-wireable pieces** instead:
+By default `encode` emits **independently-wireable pieces** instead of one giant merged blueprint (which for a long video at large width is hundreds of MB and minutes to build):
 
 ```bash
-factorio-display encode ./big.mp4 --width 70 --split --time-chunks 3 --output-dir out
+factorio-display encode ./big.mp4 --width 70 --time-chunks 3 --output-dir out
 ```
 
-This writes:
-- `out/display.txt` — the lamp display, with a per-chunk **connector CC** on each red data bus (a constant combinator carrying the chunk's identifying signal at value 0, so it adds nothing to the bus).
-- `out/memory_c{chunk}_f{frag}.txt` — one video-memory piece per **vertical chunk × time fragment**, each with **left/right connector CCs** on its data bus plus a non-wired fragment-series label CC.
+- **Video** → `out/display.txt` (the lamp display, with a per-chunk **connector CC** on each red data bus) + `out/memory_c{chunk}_f{frag}.txt` (one memory piece per vertical chunk × time fragment, with **left/right connector CCs** on its data bus plus a non-wired fragment-series label CC).
+- **Audio** → `out/player.txt` (the decoder, with a **bottom-edge connector CC** per rail) + `out/memory_r{rail}.txt` (one memory piece per rail, connector CCs on **both ends**).
+- Connector CCs join the **red data bus** and the **green time/clock bus** (they carry the identifying signal at value 0, so nothing is added to either bus). The player/memory connectors for the same rail share the identifying signal; an isolated `signal-info` CC notes the chunk/rail series number.
 
-Pieces are built and materialised in **parallel worker processes**, so generation scales with the number of cores instead of serialising one giant blueprint. To assemble in game:
-1. Place the display, then each memory piece next to its display chunk.
-2. Wire each memory piece's connector CC to the matching display connector CC (they carry the same signal) with red wire.
+Pieces are built and materialised in **parallel worker processes**, so generation scales with the number of cores.
+
+**Small outputs → a blueprint book automatically.** When the total output is roughly under 1 MB, the pieces are also assembled into a single blueprint book (`out/book.txt`) that you can import at once; `--book` forces a book even for large outputs, `--no-book` never emits one.
+
+To assemble in game:
+1. Import the book (if generated), or each piece individually.
+2. Place each piece next to its neighbours and wire the **matching connector CCs** (the ones carrying the same signal) — **red wire** joins the data bus, **green wire** joins the time/clock bus.
 3. Join every piece's clock input to the shared clock.
 
-Connectors for the same display chunk share the identifying signal (and carry it at 0, so no pollution). Pass `--book` to also write a single blueprint book (`out/book.txt`) containing all pieces — note the book string is larger.
+The legacy single-blueprint composition (timer + power poles + everything merged) is still available via `--all-in-one`, but is **not recommended** for large media.
 
 ### 4. Encode Audio (MIDI)
 
@@ -306,7 +310,7 @@ The audio decoder drives a 48-speaker matrix (12 semitones × 4 octaves, F3–E7
 6.  **Speakers:** 48 programmable speakers (4 rows × 12 columns), each listening on its assigned `(signal, quality)` pair with `allow_polyphony=True`.
 
 **Total entities:** 48 spk + 85 AC + 12 DC + 13 CC = 158.  
-**Wire colors:** RED = page data bus + sub_tick distribution, GREEN = CC lookup outputs + bell bus.
+**Wire colors:** RED = page data bus + sub_tick distribution, GREEN = CC lookup outputs + bell bus. In piecewise output the **time/clock bus is carried on GREEN** (the mod AC outputs it directly — no red→green relay combinator) and the **data bus on RED**, and each connector CC joins both so pieces wire up with red data + green time.
 
 ### Audio Normalization
 

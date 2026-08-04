@@ -1306,7 +1306,7 @@ function readOptions() {
     fps: num("#opt-fps", 0),
     skip: int("#opt-skip", 1),
     adaptive: val("#opt-adaptive", "false") === "true",
-    threshold: num("#opt-threshold", 0.01),
+    threshold: num("#opt-threshold", 0.005),
     deduplicate: val("#opt-deduplicate", "false") === "true",
     time_chunks: int("#opt-time-chunks", 1),
     chunk_workers: $("#opt-chunk-workers").value ? int("#opt-chunk-workers") : null,
@@ -1518,29 +1518,65 @@ function downloadText(text, name) {
 
 // Render a result for a completed job: blueprint / "Inspect item" (structured
 // YAML) tabs, JSON only in dev mode, plus copy/download/Pastebin/FBE actions.
+// Piecewise (chunked) jobs render a book row (when small enough) plus one
+// action row per piece.
 async function renderJobResult(host, job) {
   const id = job.job_id;
   host.innerHTML = "";
   const meta = job.result || {};
+  const isSplit = !!meta.split && Array.isArray(meta.pieces) && meta.pieces.length > 0;
   const metaStrip = el("div", { class: "meta-strip" }, [
     metaItem(t("result.entityCount"), meta.entity_count != null ? Number(meta.entity_count).toLocaleString() : null),
     metaItem(t("result.totalTicks"), meta.total_ticks),
     metaItem(t("result.dimensions"), meta.dimensions ? meta.dimensions.join(" × ") : null),
     metaItem(t("result.instruments"), meta.instruments ? meta.instruments.join(", ") : null),
     metaItem(t("result.kind"), meta.kind),
+    isSplit ? metaItem(t("result.pieces"), meta.pieces.length) : null,
   ]);
-  // Quick actions — the single "Inspect" button opens the shared inspector
-  // modal (string / parts list / interactive preview).  Opening it fetches
-  // the blueprint text when it isn't cached yet (getResultText), then the
-  // modal decodes and renders everything client-side.
-  host.append(metaStrip,
-    el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
-      el("button", { class: "primary", text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
-      el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
-      el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, job.name) }),
-      el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: () => shareJob(id) }),
-      el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: () => openFBE(id) }),
-    ]));
+  host.append(metaStrip);
+
+  if (isSplit) {
+    // ── Book (auto-generated when the total output is small) ──
+    if (meta.book) {
+      host.append(
+        el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap;align-items:center" }, [
+          el("b", { text: `${t("result.book")} (${fmtBytes(meta.book_size || 0)})` }),
+          el("button", { class: "primary", text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ jobId: id, getResultText, title: `${job.name || t("viewer.title")} — ${t("result.book")}` }) }),
+          el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
+          el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, `${job.name || "result"}_book`) }),
+          el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint book", onclick: () => shareJob(id) }),
+          el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: () => openFBE(id) }),
+        ])
+      );
+    }
+    // ── Individual pieces ──────────────────────────────────────
+    const pieceBox = el("div", { class: "pieces", style: "margin-top:8px" }, [
+      el("div", { class: "hint", style: "opacity:.7;margin-bottom:4px", text: t("result.pieceHint") }),
+    ]);
+    for (const p of meta.pieces) {
+      const label = p.label;
+      pieceBox.append(
+        el("div", { class: "row", style: "gap:8px;margin-top:4px;flex-wrap:wrap;align-items:center" }, [
+          el("b", { text: `${label} (${fmtBytes(p.size_bytes || 0)})` }),
+          el("button", { text: t("result.inspect"), onclick: () => inspectPiece(id, label) }),
+          el("button", { text: t("result.copy"), onclick: () => copyPiece(id, label) }),
+          el("button", { text: t("result.download"), onclick: () => downloadPiece(id, label) }),
+        ])
+      );
+    }
+    host.append(pieceBox);
+  } else {
+    // ── Single blueprint — the classic action row ──────────────
+    host.append(
+      el("div", { class: "row", style: "margin-top:8px;gap:8px;flex-wrap:wrap" }, [
+        el("button", { class: "primary", text: t("result.inspect"), title: t("result.inspectTitle"), onclick: () => openBlueprintInspector({ jobId: id, getResultText, title: job.name || t("viewer.title") }) }),
+        el("button", { text: t("result.copy"), onclick: () => copyJobResult(id) }),
+        el("button", { text: t("result.download"), onclick: () => downloadJobResult(id, job.name) }),
+        el("button", { text: t("result.pastebin"), title: "Create a temporary public link for this blueprint", onclick: () => shareJob(id) }),
+        el("button", { text: t("result.fbe"), title: "Render it in the Factorio Blueprint Editor (via the share link)", onclick: () => openFBE(id) }),
+      ])
+    );
+  }
 
   try {
     const res = await api(`/api/v1/jobs/${id}/artifacts`);
@@ -1559,6 +1595,30 @@ async function renderJobResult(host, job) {
       host.append(list);
     }
   } catch (_) { /* non-fatal */ }
+}
+
+// ── piecewise helpers ──────────────────────────────────────────────────
+function pieceArtifactUrl(jobId, label) {
+  const safe = String(label || "piece").replace(/[^A-Za-z0-9_-]/g, "");
+  return `/api/v1/jobs/${jobId}/artifacts/piece_${safe}.txt`;
+}
+async function getPieceText(jobId, label) {
+  const res = await api(pieceArtifactUrl(jobId, label));
+  return await res.text();
+}
+async function inspectPiece(jobId, label) {
+  try {
+    const text = await getPieceText(jobId, label);
+    openBlueprintInspector({ bpString: text, title: label });
+  } catch (e) { toast(e.message, "error"); }
+}
+async function copyPiece(jobId, label) {
+  try { await copyText(await getPieceText(jobId, label)); }
+  catch (e) { toast(e.message, "error"); }
+}
+async function downloadPiece(jobId, label) {
+  try { downloadText(await getPieceText(jobId, label), `${label}.txt`); }
+  catch (e) { toast(e.message, "error"); }
 }
 
 // ── temporary share link (Pastebin / FBE source) ──────────────────────

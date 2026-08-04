@@ -97,12 +97,13 @@ def build_mod_timer(
     name: str = "Mod Timer",
     input_signal: str = "signal-clock",
     output_signal: str = "signal-clock",
+    output_color: str = "red",
 ) -> LogicalBlueprint:
     """Build a modulo timer: ``output_signal = input_signal % interval``.
 
     The modulo AC reads *input_signal* from the **red** wire and writes
-    *output_signal* to the **red** wire.  Input and output are separate
-    red networks that get merged when connected to the raw timer —
+    *output_signal* on the *output_color* wire.  Input and output are
+    separate networks that get merged when connected to the raw timer —
     different signal names prevent collisions on the shared bus.
 
     Ports
@@ -110,8 +111,8 @@ def build_mod_timer(
     input: "in"
         **Red** network carrying *input_signal* (the raw tick value).
     output: "out"
-        **Red** network carrying *output_signal* (sub-tick value in
-        0..interval-1).
+        *output_color* network carrying *output_signal* (sub-tick value
+        in 0..interval-1).
 
     Parameters
     ----------
@@ -123,11 +124,18 @@ def build_mod_timer(
         Modulo divisor (default 60 for sub-tick indexing).
     output_signal : str
         Signal to write the modulo result to.
+    output_color : str
+        Wire colour for the output bus — ``"red"`` (default, video) or
+        ``"green"`` (audio time bus, replacing the old red→green relay).
     """
+    if output_color not in ("red", "green"):
+        raise ValueError(f"output_color must be 'red' or 'green', got {output_color!r}")
+
     lb = LogicalBlueprint(label=name)
 
     # ── Modulo AC ──────────────────────────────────────────────
-    # Reads clock from red, writes sub-tick to red.
+    # Reads clock from red; writes the modded (looping) clock on the
+    # requested output wire.
     ac = LogicalEntity(
         f"{name.lower().replace(' ', '_')}_mod",
         "arithmetic-combinator",
@@ -141,74 +149,20 @@ def build_mod_timer(
     )
     lb.add_entity(ac)
 
-    # ── Input / output ports (both red) ────────────────────────
+    # ── Input (red) / output (output_color) ports ──────────────
     in_net = Network(
         network_id="red_0", color="red",
         endpoints={Endpoint(ac.entity_id, "input")},
     )
     out_net = Network(
-        network_id="red_1", color="red",
+        network_id=f"{output_color}_1", color=output_color,
         endpoints={Endpoint(ac.entity_id, "output")},
     )
     lb.add_network(in_net)
     lb.add_network(out_net)
 
     lb.set_input_port("in", "red_0")
-    lb.set_output_port("out", "red_1")
-
-    return lb
-
-
-def build_clock_bridge(
-    name: str = "Clock Bridge",
-    clock_signal: str = "signal-clock",
-) -> LogicalBlueprint:
-    """Build a RED→GREEN clock bridge combinator.
-
-    The raw timer outputs *clock_signal* on the **red** wire (self-loop).
-    Many downstream components (modulo AC, video memory DCs) expect the
-    clock on the **green** wire (clock bus convention).  This bridge
-    copies *clock_signal* from red to green via an arithmetic combinator:
-
-        signal-clock + 0 → signal-clock   (reads red, writes green)
-
-    Ports
-    -----
-    input: "in"
-        **Red** network carrying *clock_signal* (connect to raw timer output).
-    output: "out"
-        **Green** network carrying *clock_signal* (connect to mod timer
-        input and video memory DC green bus).
-    """
-    lb = LogicalBlueprint(label=name)
-    base_id = name.lower().replace(" ", "_")
-
-    ac = LogicalEntity(
-        f"{base_id}_ac",
-        "arithmetic-combinator",
-        properties={
-            "first_operand": clock_signal,
-            "operation": "+",
-            "second_operand": 0,
-            "output_signal": clock_signal,
-            "first_operand_wires": ["red"],
-        },
-    )
-    lb.add_entity(ac)
-
-    in_net = Network(
-        network_id="red_0", color="red",
-        endpoints={Endpoint(ac.entity_id, "input")},
-    )
-    out_net = Network(
-        network_id="green_0", color="green",
-        endpoints={Endpoint(ac.entity_id, "output")},
-    )
-    lb.add_network(in_net)
-    lb.add_network(out_net)
-
-    lb.set_input_port("in", "red_0")
-    lb.set_output_port("out", "green_0")
+    lb.set_output_port("out", f"{output_color}_1")
 
     return lb
 

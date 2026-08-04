@@ -643,6 +643,8 @@ def _ensure_blueprint_icons(text: str) -> str:
     Factorio always writes icons and FBE's schema requires the field — without
     it FBE rejects the blueprint.  Applied at serve time so blueprints produced
     before the generator emitted icons (old jobs) are still FBE-compatible.
+    Handles both single ``blueprint`` docs and ``blueprint_book`` docs (each
+    contained blueprint that lacks icons gets one).
     """
     if not text or not text.startswith("0"):
         return text
@@ -651,10 +653,21 @@ def _ensure_blueprint_icons(text: str) -> str:
         data = json.loads(zlib.decompress(raw).decode("utf-8"))
     except Exception:  # pylint: disable=broad-exception-caught
         return text
-    bp = data.get("blueprint")
-    if not isinstance(bp, dict) or bp.get("icons"):
+
+    def _inject(bp: dict | None) -> bool:
+        if not isinstance(bp, dict) or bp.get("icons"):
+            return False
+        bp["icons"] = [{"index": 1, "signal": {"type": "virtual", "name": "signal-0"}}]
+        return True
+
+    changed = _inject(data.get("blueprint"))
+    book = data.get("blueprint_book")
+    if isinstance(book, dict):
+        for sub in book.get("blueprints", []):
+            if _inject(sub.get("blueprint")):
+                changed = True
+    if not changed:
         return text
-    bp["icons"] = [{"index": 1, "signal": {"type": "virtual", "name": "signal-0"}}]
     try:
         raw = zlib.compress(json.dumps(data, separators=(",", ":")).encode("utf-8"))
         return "0" + base64.b64encode(raw).decode("ascii")

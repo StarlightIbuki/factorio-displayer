@@ -354,19 +354,18 @@ def _build_timer_for_memory(
     The clock output colour is chosen to match the *memory_lb* clock
     input port colour (detected by :func:`_declare_memory_ports`):
 
-    - **RED** (video memory): no bridge needed — the mod timer output
-      (wrapping ``clock % N``) is exposed as both ``"clock"`` and
-      ``"sub_tick"`` on RED.  The raw clock stays internal.
-    - **GREEN** (audio memory): a clock bridge AC
-      (``signal-clock + 0 → signal-clock``, RED→GREEN) copies the
-      raw clock to GREEN for the memory DCs.  The mod timer output
-      (sub_tick) stays on RED for the progress bar.
+    - **RED** (video memory): the mod timer output (wrapping ``clock % N``)
+      is exposed as both ``"clock"`` and ``"sub_tick"`` on RED.  The raw
+      clock stays internal.
+    - **GREEN** (audio memory): the mod timer outputs the wrapping clock
+      directly on the GREEN time bus (no red→green relay AC).  A second
+      mod timer keeps ``"sub_tick"`` on RED for the progress bar.
 
     Exposes two output ports:
     - ``"clock"`` — clock signal for memory DC gating
     - ``"sub_tick"`` (red) — sub-tick for progress bar
     """
-    from .timer import build_raw_timer, build_mod_timer, build_clock_bridge
+    from .timer import build_raw_timer, build_mod_timer
     from .composer import _connect_nets_by_color
 
     # _extract_total_ticks returns the largest tick index referenced by
@@ -393,7 +392,8 @@ def _build_timer_for_memory(
     # with mod timer's "out" during the merge below.
     timer.output_ports["raw"] = timer.output_ports.pop("out")
 
-    # Mod timer: reads RED clock, outputs sub_tick on RED.
+    # Mod timer (RED): reads RED clock, outputs the looping clock on RED
+    # as "sub_tick" (used by the progress bar).
     mod = build_mod_timer(max_tick_index + 1, name="SubTick")
     timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
     timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
@@ -412,29 +412,32 @@ def _build_timer_for_memory(
         # Drop the now-unused "raw" port
         del timer.output_ports["raw"]
     else:
-        # Audio memory — need RED→GREEN clock bridge.
-        bridge = build_clock_bridge("Clock Bridge")
-        timer.merge(bridge, entity_prefix="bridge_", network_prefix="bridge_")
+        # Audio memory — the GREEN time bus carries the *modded* (looping)
+        # clock so the song repeats.  Output it directly on GREEN from the
+        # mod AC — no red→green relay combinator is needed anymore.
+        mod_green = build_mod_timer(
+            max_tick_index + 1, name="SubTickGreen", output_color="green",
+        )
+        timer.merge(mod_green, entity_prefix="modg_", network_prefix="modg_")
 
-        # Wire raw timer (RED) → mod timer (RED input): the mod AC wraps the
+        # Wire raw timer (RED) → mod_green (RED input): the mod AC wraps the
         # raw clock at the *song length* (max_tick_index + 1) so the audio
         # loops back to the start when it reaches the end.
         _connect_nets_by_color(
             timer, "red",
             entity_contains="_inc", port="output",
-            other_entity_contains="mod_sub", other_port="input",
+            other_entity_contains="modg_sub", other_port="input",
         )
-        # Wire mod timer (RED) → bridge (RED input): the GREEN clock that the
-        # memory pages and the player's sub-tick mod AC receive must be the
-        # *modded* (looping) clock, NOT the raw accumulator clock — otherwise
-        # the song never repeats and just goes silent after the last page.
+        # Wire raw timer (RED) → mod (RED input) for the red "sub_tick".
         _connect_nets_by_color(
             timer, "red",
-            entity_contains="mod_sub", port="output",
-            other_entity_contains="bridge_clock", other_port="input",
+            entity_contains="_inc", port="output",
+            other_entity_contains="mod_sub", other_port="input",
         )
-        # Bridge's "out" port is on GREEN — rename to "clock"
+        # The mod_green "out" port is on GREEN — rename to "clock".
         timer.output_ports["clock"] = timer.output_ports.pop("out")
+        # Drop the now-unused "raw" port
+        del timer.output_ports["raw"]
 
     timer.label = "Timer"
     return timer
@@ -1110,6 +1113,17 @@ def _json_envelope(args, out_text: str, err_text: str, exit_code: int) -> dict:
         "logs": err_text,
     }
 
+    # Piecewise (split) output emits a JSON envelope on stdout — merge its
+    # pieces/book into the result while still filling the shared metadata.
+    split_envelope: dict | None = None
+    if cmd == "encode" and primary.startswith("{"):
+        try:
+            _parsed = json.loads(primary)
+            if isinstance(_parsed, dict) and "split_envelope" in _parsed:
+                split_envelope = _parsed["split_envelope"]
+        except Exception:  # pylint: disable=broad-except
+            split_envelope = None
+
     if cmd == "encode":
         inputs = list(getattr(args, "input_paths", []) or [])
         known = [k for k in (_classify_input(p) for p in inputs) if k != "unknown"]
@@ -1124,8 +1138,23 @@ def _json_envelope(args, out_text: str, err_text: str, exit_code: int) -> dict:
             result["instruments"] = [s.strip() for s in str(rail).split(",") if s.strip()]
         result["total_ticks"] = _extract_ticks_from_logs(err_text)
         result["warnings"] = _extract_warnings(err_text)
-        result["entity_count"] = count_entities(primary)
         result["artifacts"] = []
+        if split_envelope is not None:
+            result["blueprint"] = split_envelope.get("blueprint", "")
+            result["pieces"] = split_envelope.get("pieces", [])
+            result["book"] = split_envelope.get("book", "")
+            result["split"] = True
+            # A book string can't be counted by count_entities (it expects a
+            # single blueprint doc); report the per-piece entity counts.
+            ec = []
+            for piece in result["pieces"]:
+                n = count_entities(piece.get("blueprint", ""))
+                if n is not None:
+                    ec.append(n)
+            result["entity_count"] = sum(ec) if ec else None
+            result["piece_count"] = len(result["pieces"])
+        else:
+            result["entity_count"] = count_entities(primary)
     elif cmd in ("export-display", "export-audio"):
         result["name"] = getattr(args, "name", None)
         result["format"] = "blueprint"
@@ -1207,16 +1236,19 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     chunk_g.add_argument("--deduplicate-cross", action="store_true",
                          help="Deduplicate identical frames across time chunks (slower).")
 
-    split_g = encode_parser.add_argument_group("Split output (large videos)")
-    split_g.add_argument("--split", action="store_true",
-                         help="Emit independently-wireable pieces (one display blueprint + one "
-                              "memory piece per vertical chunk x time fragment) instead of one "
-                              "giant merged blueprint. Combine with --time-chunks N for N fragments.")
+    split_g = encode_parser.add_argument_group("Piecewise (chunked) output — DEFAULT")
+    split_g.add_argument("--all-in-one", action="store_true",
+                         help="Legacy single merged blueprint (timer + power + everything in one "
+                              "string). NOT recommended: for large videos this produces an "
+                              "enormous blueprint that is slow to generate. The default is "
+                              "piecewise chunked output (independent pieces, wired in game).")
     split_g.add_argument("--output-dir", type=str, default="split_output",
-                         help="Directory to write split pieces to (default: split_output).")
+                         help="Directory to write piecewise blueprint files to (default: split_output).")
     split_g.add_argument("--book", action="store_true",
-                         help="Also write a single blueprint book containing all split pieces "
-                              "(larger string; optional).")
+                         help="Always emit a single blueprint book containing all pieces "
+                              "(default: only when the total output is small, roughly <1 MB).")
+    split_g.add_argument("--no-book", action="store_true",
+                         help="Never emit a blueprint book (write individual piece files only).")
 
     # ── Audio / MIDI options ─────────────────────────────────────
     _add_audio_midi_options(encode_parser)
@@ -1654,7 +1686,7 @@ def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
       so the audio loops at the song length)
     - ``"sub_tick"`` — sub-tick on RED (for progress bar, from raw clock)
     """
-    from .timer import build_raw_timer, build_mod_timer, build_clock_bridge
+    from .timer import build_raw_timer, build_mod_timer
     from .composer import _connect_nets_by_color
 
     timer = build_raw_timer("Timer", with_kick=False)
@@ -1665,34 +1697,33 @@ def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
     timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
     timer.output_ports["clock_red"] = timer.output_ports.pop("out")
 
+    # Audio time bus: same modded (looping) clock, output on GREEN directly
+    # from a mod AC — no red→green relay combinator needed.
+    mod_green = build_mod_timer(total_ticks + 1, name="SubTickGreen", output_color="green")
+    timer.merge(mod_green, entity_prefix="modg_", network_prefix="modg_")
+    timer.output_ports["clock_green"] = timer.output_ports.pop("out")
+
     # Sub-tick: raw clock % 60 → RED (for progress bar)
     sub = build_mod_timer(60, name="Mod60")
     timer.merge(sub, entity_prefix="sub60_", network_prefix="sub60_")
     timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
 
-    # Bridge: raw clock RED → GREEN (for audio)
-    bridge = build_clock_bridge("Clock Bridge")
-    timer.merge(bridge, entity_prefix="bridge_", network_prefix="bridge_")
-    timer.output_ports["clock_green"] = timer.output_ports.pop("out")
-
-    # Wire raw timer (RED) → mod timer (RED input)
+    # Wire raw timer (RED) → each mod timer (RED input)
     _connect_nets_by_color(
         timer, "red",
         entity_contains="_inc", port="output",
         other_entity_contains="mod_sub", other_port="input",
+    )
+    _connect_nets_by_color(
+        timer, "red",
+        entity_contains="_inc", port="output",
+        other_entity_contains="modg_sub", other_port="input",
     )
     # Wire raw timer (RED) → sub60 timer (RED input)
     _connect_nets_by_color(
         timer, "red",
         entity_contains="_inc", port="output",
         other_entity_contains="sub60_sub", other_port="input",
-    )
-    # Wire mod timer (RED) → bridge (RED input): the GREEN clock for audio
-    # wraps at the song length so the audio loops.
-    _connect_nets_by_color(
-        timer, "red",
-        entity_contains="mod_sub", port="output",
-        other_entity_contains="bridge_clock", other_port="input",
     )
 
     timer.label = "Timer"
@@ -1716,52 +1747,183 @@ def _should_process_audio(
     return bool(videos)
 
 
-def _write_split_output(result: dict, args) -> None:
-    """Write split pieces (display + memory fragments) to ``args.output_dir``.
+# Rough threshold for auto-book: if the total piecewise output is below this
+# many characters (~1 MB), a single blueprint book is emitted by default
+# (small enough to paste/copy at once).  Precision is intentionally loose.
+_BOOK_CHAR_THRESHOLD = 1_000_000
 
-    *result* is the dict returned by :func:`encode_frames_split`:
-    ``{"display": str, "pieces": [(label, str), ...], ...}``.
-    """
+
+def _assemble_book(pieces: list[tuple[str, str]], book_label: str) -> str | None:
+    """Build a :class:`BlueprintBook` string from *pieces*, or ``None``."""
     from draftsman.blueprintable import Blueprint, BlueprintBook
 
+    book = BlueprintBook()
+    book.label = book_label
+    for label, s in pieces:
+        try:
+            bp = Blueprint.from_string(s)
+        except Exception as exc:  # pylint: disable=broad-except
+            sys.stderr.write(f"  Skipping {label} in book: {exc}\n")
+            continue
+        bp.label = label
+        book.blueprints.append(bp)
+    if not book.blueprints:
+        return None
+    return book.to_string()
+
+
+def _write_split_output(pieces: list[tuple[str, str]], args, *, book_label: str) -> dict:
+    """Emit piecewise output; returns a dict for the ``--json`` envelope.
+
+    *pieces* is a list of ``(label, blueprint_string)``.
+
+    Output strategy (default = piecewise):
+      * If the total output is small (or ``--book``), a single blueprint
+        book is written to ``book.txt`` and returned as the primary string.
+      * Otherwise individual piece files are written to ``args.output_dir``
+        and the first piece is the primary string (nothing else is usable as
+        one paste).
+
+    The returned dict has the keys the JSON envelope needs:
+    ``{"blueprint", "pieces", "book"}``.
+    """
     out_dir = Path(getattr(args, "output_dir", "split_output"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    display_str = result["display"]
-    pieces: list[tuple[str, str]] = result["pieces"]
-    (out_dir / "display.txt").write_text(display_str + "\n", encoding="utf-8")
+    total_chars = sum(len(s) for _, s in pieces)
+    force_book = bool(getattr(args, "book", False))
+    no_book = bool(getattr(args, "no_book", False))
+    make_book = force_book or (not no_book and total_chars <= _BOOK_CHAR_THRESHOLD)
+
+    book_str: str | None = None
+    if make_book:
+        book_str = _assemble_book(pieces, book_label)
+
+    primary = book_str if book_str is not None else (pieces[0][1] if pieces else "")
+
+    # Always write individual piece files (book.txt additionally when made).
     for label, s in pieces:
         (out_dir / f"{label}.txt").write_text(s + "\n", encoding="utf-8")
-
-    if getattr(args, "book", False):
-        book = BlueprintBook()
-        book.label = f"{args.name} (split)"
-        for label, s in [("display", display_str)] + pieces:
-            try:
-                bp = Blueprint.from_string(s)
-            except Exception as exc:  # pylint: disable=broad-except
-                sys.stderr.write(f"  Skipping {label} in book: {exc}\n")
-                continue
-            bp.label = label
-            book.blueprints.append(bp)
-        (out_dir / "book.txt").write_text(book.to_string() + "\n", encoding="utf-8")
+    if book_str is not None:
+        (out_dir / "book.txt").write_text(book_str + "\n", encoding="utf-8")
 
     sys.stderr.write(
-        f"Split output written to {out_dir}/\n"
-        f"  display blueprint: display.txt ({len(display_str):,} chars)\n"
-        f"  memory pieces:     {len(pieces)} "
-        f"({result['num_chunks']} vertical chunk(s) x {result['time_chunks']} time fragment(s))\n"
+        f"Piecewise output written to {out_dir}/ — {len(pieces)} piece(s), "
+        f"{total_chars:,} chars total\n"
     )
     for label, s in sorted(pieces):
         sys.stderr.write(f"    {label}.txt ({len(s):,} chars)\n")
-    if getattr(args, "book", False):
-        sys.stderr.write("  blueprint book:    book.txt\n")
+    if book_str is not None:
+        sys.stderr.write(f"  blueprint book: book.txt ({len(book_str):,} chars)\n")
+    else:
+        sys.stderr.write(
+            "  (output too large for a single book; individual pieces only)\n"
+        )
     sys.stderr.write(
-        "In-game wiring: place the display, then each memory piece next to its "
-        "display chunk and wire the matching connector CCs (the ones carrying the "
-        "same signal) with red wire. Also join every piece's clock input to the "
-        "shared clock.\n"
+        "In-game wiring: place each piece next to its neighbours and wire the "
+        "matching connector CCs (the ones carrying the same signal) — red wire "
+        "joins the data bus, green wire joins the time/clock bus. Also join "
+        "every piece's clock input to the shared clock.\n"
     )
+
+    return {
+        "blueprint": primary,
+        "pieces": [{"label": label, "blueprint": s} for label, s in pieces],
+        "book": book_str or "",
+    }
+
+
+def _encode_audio_split_pieces(args) -> list[tuple[str, str]]:
+    """Encode standalone audio into piecewise (player + per-rail memory) pieces."""
+    from .audio.encoder import (  # pylint: disable=import-outside-toplevel
+        DRUM_TICKS_PER_PAGE, TICKS_PER_PAGE,
+        _audio_rails, encode_audio_split,
+    )
+    from .audio.pitch_mapping import drum_grouping  # pylint: disable=import-outside-toplevel
+    from . import SIGNAL_POOL, QUALITIES  # pylint: disable=import-outside-toplevel
+
+    audio_paths = list(getattr(args, "input_paths", []))
+    audio_paths = [p for p in audio_paths if _classify_input(p) in ("audio", "midi")]
+    if not audio_paths:
+        return []
+
+    rail_mode: str = getattr(args, "rail_mode", "auto:0.05")
+    if getattr(args, "instruments", None):
+        rail_mode = args.instruments
+
+    midi_kwargs: dict[str, object] = {
+        "attach_player": True,
+        "map_drums": getattr(args, "map_drums", True),
+        "drum_gain": getattr(args, "drum_gain", 0.25),
+        "rail_mode": rail_mode,
+        "use_global_shift": not getattr(args, "no_global_shift", False),
+        "ticks_per_beat": getattr(args, "ticks_per_beat", 30),
+        "boost_melody": getattr(args, "boost_melody", 1.0),
+        "velocity_scale": getattr(args, "velocity_scale", 1.0),
+        "rearticulation_ticks": getattr(args, "rearticulation_ticks", 2),
+        "attack_ticks": getattr(args, "attack_ticks", 10),
+        "decay_ticks": getattr(args, "decay_ticks", 10),
+        "sustain_level": getattr(args, "sustain_level", 1.0),
+        "release_ticks": getattr(args, "release_ticks", 10),
+        "attack_curve": getattr(args, "attack_curve", 1.0),
+        "decay_curve": getattr(args, "decay_curve", 1.0),
+        "release_curve": getattr(args, "release_curve", 1.0),
+        "processed_midi_path": getattr(args, "processed_midi", None),
+        "debug_json_path": getattr(args, "debug_json", None),
+        "output_midi": getattr(args, "output_midi", None),
+        "activation_threshold": getattr(args, "activation_threshold", 0.0),
+        "midi_activation_threshold": getattr(args, "midi_threshold", 0.05),
+        "condense_midi": not getattr(args, "no_condense", False),
+        "max_polyphony": getattr(args, "max_polyphony", 0),
+        "use_basic_pitch": not getattr(args, "no_ai_transcribe", False),
+        "drums": getattr(args, "drums", None) or False,
+    }
+
+    instruments, int_data_list = _audio_rails(audio_paths[0], midi_kwargs)
+    if not instruments or not int_data_list:
+        return []
+
+    active_drum_pitches: list[set[int] | None] = []
+    for ri, inst in enumerate(instruments):
+        if "drum" in inst.lower():
+            active_drum_pitches.append({
+                p for p in range(48)
+                if any(td[p] > 0 for td in int_data_list[ri])
+            })
+        else:
+            active_drum_pitches.append(None)
+
+    rail_ticks_per_page: list[int] = []
+    rail_groupings: list[object | None] = []
+    for ri, inst in enumerate(instruments):
+        if "drum" in inst.lower():
+            grp = drum_grouping(active_drum_pitches[ri]) if active_drum_pitches[ri] else None
+            rail_groupings.append(grp)
+            cpt = len(grp) if grp else 1
+            max_page = (len(SIGNAL_POOL) * len(QUALITIES)) // max(1, cpt)
+            rail_ticks_per_page.append(
+                max(TICKS_PER_PAGE, min(DRUM_TICKS_PER_PAGE, max_page))
+            )
+        else:
+            rail_groupings.append(None)
+            rail_ticks_per_page.append(TICKS_PER_PAGE)
+
+    result = encode_audio_split(
+        int_data_list,
+        instruments,
+        output_name=args.name,
+        signal_pool=list(SIGNAL_POOL),
+        qualities=list(QUALITIES),
+        clock_signal="signal-clock",
+        map_drums=getattr(args, "map_drums", True),
+        active_drum_pitches=active_drum_pitches,
+        rail_ticks_per_page=rail_ticks_per_page,
+        rail_groupings=rail_groupings,
+    )
+
+    pieces: list[tuple[str, str]] = [("player", result["player"])]
+    pieces.extend(result["pieces"])
+    return pieces
 
 
 def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-statements
@@ -1824,18 +1986,19 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
     # ── Encode video frames ──────────────────────────────────────
     from .logical_blueprint import from_draftsman
 
-    split_mode = bool(getattr(args, "split", False))
-    if split_mode:
-        if has_standalone_audio:
-            sys.exit("Error: --split is for video-only output and cannot be combined "
-                     "with standalone audio inputs.")
-        if _classify_input(first_visual) != "video":
-            sys.exit("Error: --split currently supports video inputs only.")
+    all_in_one = bool(getattr(args, "all_in_one", False))
+    if not all_in_one and _classify_input(first_visual) == "video":
+        # ── Piecewise (chunked) output — DEFAULT ────────────────
         if power_type is not None and power_type != "none":
             sys.stderr.write(
-                "Note: --power is ignored in --split mode (pieces are wired in game).\n"
+                "Note: --power is ignored in piecewise mode (pieces are wired in game).\n"
             )
-        sys.stderr.write("Split output mode: emitting per-chunk memory pieces...\n")
+        if has_any_audio and not no_audio:
+            sys.stderr.write(
+                "Note: embedded video audio is not extracted in piecewise mode; "
+                "use --audio-only or --all-in-one for it.\n"
+            )
+        sys.stderr.write("Piecewise mode: emitting display + memory pieces...\n")
         split_result = encode_auto(
             first_visual,
             output_name=args.name,
@@ -1853,7 +2016,21 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
             use_cache=use_cache,
             split=True,
         )
-        _write_split_output(split_result, args)
+        pieces: list[tuple[str, str]] = [("display", split_result["display"])]
+        pieces.extend(split_result["pieces"])
+        # Standalone audio (if any) → player + memory pieces.
+        if audios and not no_audio:
+            pieces.extend(_encode_audio_split_pieces(args))
+
+        envelope = _write_split_output(pieces, args, book_label=args.name)
+        if getattr(args, "json", False):
+            import json as _json  # pylint: disable=import-outside-toplevel
+            sys.stdout.write(_json.dumps({"split_envelope": envelope}, ensure_ascii=False))
+            return
+        if envelope["book"]:
+            sys.stdout.write(envelope["book"] + "\n")
+        elif envelope["blueprint"]:
+            sys.stdout.write(envelope["blueprint"] + "\n")
         return
 
     video_bp = encode_auto(
@@ -2051,6 +2228,34 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             f"Note: {len(audio_paths)} audio inputs provided; "
             f"encoding first only. Multi-audio concatenation coming soon.\n"
         )
+
+    all_in_one = bool(getattr(args, "all_in_one", False))
+    attach_player = not getattr(args, "no_attach_player", False)
+
+    if not all_in_one and attach_player:
+        # ── Piecewise (chunked) output — DEFAULT ────────────────
+        if power_type is not None and power_type != "none":
+            sys.stderr.write(
+                "Note: --power is ignored in piecewise mode (pieces are wired in game).\n"
+            )
+        pieces = _encode_audio_split_pieces(args)
+        if not pieces:
+            return
+        envelope = _write_split_output(pieces, args, book_label=args.name)
+        if getattr(args, "json", False):
+            import json as _json  # pylint: disable=import-outside-toplevel
+            sys.stdout.write(_json.dumps({"split_envelope": envelope}, ensure_ascii=False))
+            return
+        if envelope["book"]:
+            sys.stdout.write(envelope["book"] + "\n")
+        elif envelope["blueprint"]:
+            sys.stdout.write(envelope["blueprint"] + "\n")
+        if output_path:
+            sys.stderr.write(
+                f"Note: -o is ignored in piecewise mode; pieces are written to "
+                f"{getattr(args, 'output_dir', 'split_output')}/.\n"
+            )
+        return
 
     if power_type is not None:
         midi_kwargs["attach_player"] = False

@@ -235,6 +235,66 @@ DEBUG_Y = -2        # debug lamp row offset below speakers (4 rows: -2..1)
 SUB_TICK_SIG = "signal-M"
 BELL_SIG = "signal-B"
 
+# Bottom-edge connector row — one row below the rail's mod AC (rightmost
+# column), so a single connector CC per rail sits on the player's bottom
+# edge and stays within wire reach of the port (y=18) and mod (y=24).
+CONN_Y = MOD_Y + 2
+
+
+def _rail_marker_signal(ri: int) -> str:
+    """Return a per-rail identifying signal for the audio connector CCs.
+
+    Carried at **value 0** on the connector, so Factorio drops it from the
+    bus — it is only a visual label the player uses to match a memory
+    chunk's connector in-game.  ``signal-M`` is skipped (used by the mod
+    AC for sub_tick inside the player).
+    """
+    _MARKERS = [
+        "signal-A", "signal-B", "signal-C", "signal-D", "signal-E",
+        "signal-F", "signal-G", "signal-H", "signal-I", "signal-J",
+        "signal-K", "signal-L", "signal-N", "signal-O", "signal-P",
+        "signal-Q", "signal-R", "signal-S", "signal-T", "signal-U",
+        "signal-V", "signal-W", "signal-X", "signal-Y", "signal-Z",
+    ]
+    return _MARKERS[ri % len(_MARKERS)]
+
+
+def _add_player_connector(  # noqa: F821
+    lb: "LogicalBlueprint",  # noqa: F821
+    prefix: str,
+    rail_x: int,
+    port_id: str,
+    marker_signal: str,
+    series_index: int,
+) -> None:
+    """Add a bottom-edge connector CC joining the green clock + red data
+    buses of a single player rail, plus an isolated series-label CC.
+
+    The connector is wired into BOTH the green (time) bus — via the page
+    port's input — and the red (data) bus — via the page port's output —
+    so wiring this connector to a memory chunk's connector joins both
+    buses between the pieces.
+    """
+    from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
+
+    conn_id = f"{prefix}conn"
+    conn_x = rail_x + PORT_X
+    conn_y = CONN_Y
+    lb.add_entity(LogicalEntity(
+        conn_id, "constant-combinator",
+        properties={"signals": [{"name": marker_signal, "value": 0}]},
+        position=(conn_x, conn_y),
+    ))
+    # Non-wired series-label CC noting the rail index.
+    lb.add_entity(LogicalEntity(
+        f"{prefix}conn_label", "constant-combinator",
+        properties={"signals": [{"name": "signal-info", "value": series_index}]},
+        position=(conn_x, conn_y + 1),
+    ))
+    # Join the green clock (time) bus + red data bus.
+    lb.connect("green", Endpoint(conn_id, "input"), Endpoint(port_id, "input"))
+    lb.connect("red", Endpoint(conn_id, "input"), Endpoint(port_id, "output"))
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Rail builder — builds one 48-speaker decoder column block
@@ -1090,6 +1150,8 @@ def build_audio_decoder_logical(
     map_drums: bool = False,
     active_drum_pitches: set[int] | None = None,
     ticks_per_page: int = TICKS_PER_PAGE,
+    *,
+    connectors: bool = False,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a single-rail 48-speaker audio decoder as a
     :class:`LogicalBlueprint` (no positions, networks instead of wires).
@@ -1140,6 +1202,11 @@ def build_audio_decoder_logical(
         elif net.color == "green" and Endpoint("page_port", "input") in net.endpoints:
             lb.set_input_port("clock", net.network_id)
 
+    if connectors:
+        _add_player_connector(
+            lb, "", 0, "page_port", _rail_marker_signal(0), 0,
+        )
+
     return lb
 
 
@@ -1152,6 +1219,8 @@ def build_multi_rail_decoder_logical(
     map_drums: bool = False,
     active_drum_pitches: list[set[int] | None] | None = None,
     ticks_per_page: list[int] | None = None,
+    *,
+    connectors: bool = False,
 ) -> "LogicalBlueprint":  # noqa: F821
     """Build a **multi-rail** 48-speaker-per-rail audio decoder as a
     :class:`LogicalBlueprint`.
@@ -1208,5 +1277,13 @@ def build_multi_rail_decoder_logical(
         for ri, info in enumerate(rail_info):
             if net.color == "red" and Endpoint(info.port_id, "output") in net.endpoints:
                 lb.set_input_port(f"data_{ri}", net.network_id)
+
+    # ── Bottom-edge connectors (split mode): one per rail ────────
+    if connectors:
+        for ri, info in enumerate(rail_info):
+            _add_player_connector(
+                lb, f"r{ri}_", ri * RAIL_WIDTH, info.port_id,
+                _rail_marker_signal(ri), ri,
+            )
 
     return lb

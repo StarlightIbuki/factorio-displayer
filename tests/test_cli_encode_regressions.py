@@ -153,3 +153,44 @@ def test_layout_places_sources_near_sink_for_compact_bridges() -> None:
     assert max(abs(src_pos[0] - sink_pos[0]), abs(src_pos[1] - sink_pos[1])) <= 8, (
         f"Expected source near sink, got src={src_pos}, sink={sink_pos}"
     )
+
+
+def test_assemble_book_builds_valid_blueprint_book() -> None:
+    """The auto-book (small outputs) assembles pieces into a parseable book."""
+    from factorio_display.cli import _assemble_book
+    from factorio_display.service import DisplayConfig, export_display
+    from draftsman.blueprintable import BlueprintBook
+
+    s1 = export_display(DisplayConfig(name="A", width=2, height=2)).blueprint
+    s2 = export_display(DisplayConfig(name="B", width=2, height=2)).blueprint
+    book = _assemble_book([("a", s1), ("b", s2)], "TestBook")
+    assert book, "book assembly produced no output"
+    parsed = BlueprintBook.from_string(book)
+    assert len(parsed.blueprints) == 2
+
+
+def test_json_envelope_carries_split_pieces_and_book() -> None:
+    """The piecewise JSON envelope exposes pieces + book to the web API."""
+    import json
+    from types import SimpleNamespace
+
+    from factorio_display.cli import _json_envelope
+
+    env_out = json.dumps({"split_envelope": {
+        "blueprint": "0eB",
+        "pieces": [
+            {"label": "display", "blueprint": "0eD"},
+            {"label": "memory_c0_f0", "blueprint": "0eM"},
+        ],
+        "book": "0eB",
+    }})
+    args = SimpleNamespace(
+        command="encode", input_paths=["x.mp4"], name="N",
+        width=10, height=10, rail_mode="auto:0.05", instruments=None,
+    )
+    envelope = _json_envelope(args, env_out, "", 0)
+    result = envelope["result"]
+    assert result["split"] is True
+    assert result["piece_count"] == 2
+    assert [p["label"] for p in result["pieces"]] == ["display", "memory_c0_f0"]
+    assert result["book"] == "0eB"

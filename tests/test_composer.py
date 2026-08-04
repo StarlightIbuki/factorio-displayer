@@ -18,7 +18,7 @@ from factorio_display.logical_blueprint import (
 )
 from factorio_display.progress_bar import build_progress_bar
 from factorio_display.composer import compose_all_in_one, Composer, _layout_components, _validate_network_reachability
-from factorio_display.timer import build_raw_timer, build_mod_timer, build_clock_bridge
+from factorio_display.timer import build_raw_timer, build_mod_timer
 from factorio_display.cli import _declare_memory_ports, _build_timer_for_memory, _extract_total_ticks
 
 from conftest import validate_logical_connectivity
@@ -650,29 +650,38 @@ class TestBuildTimerForMemory:
             "Clock network should include mod AC output endpoint"
         )
 
-    def test_bridge_for_green_clock(self):
-        """When memory clock is GREEN, timer MUST include a +0 bridge (RED→GREEN)."""
+    def test_no_bridge_for_green_clock(self):
+        """When memory clock is GREEN, the timer must NOT include the old
+        red→green relay (+0 bridge); the mod AC outputs the looping clock
+        directly on GREEN."""
         mem_lb = _make_memory_lb("green")
         _declare_memory_ports(mem_lb)
         timer = _build_timer_for_memory(mem_lb)
 
-        # The timer MUST have the bridge entity
+        # No +0 relay AC should exist.
         bridge_entities = [
             eid for eid, ent in timer.entities.items()
             if (ent.type == "arithmetic-combinator"
                 and ent.properties.get("operation") == "+"
                 and ent.properties.get("second_operand") == 0)
         ]
-        assert len(bridge_entities) == 1, (
-            f"GREEN clock needs exactly one +0 bridge, found: {bridge_entities}"
+        assert len(bridge_entities) == 0, (
+            f"GREEN clock should not need a +0 relay, found: {bridge_entities}"
         )
 
-        # Clock output port should be GREEN
+        # Clock output port should be GREEN, driven by the green mod AC output.
         assert "clock" in timer.output_ports
         clock_net_id = timer.output_ports["clock"]
         clock_net = next(n for n in timer.networks if n.network_id == clock_net_id)
         assert clock_net.color == "green", (
             f"Clock port should be GREEN for audio, got {clock_net.color}"
+        )
+        mod_green_out = [
+            ep for ep in clock_net.endpoints
+            if "modg_" in ep.entity_id and ep.port == "output"
+        ]
+        assert len(mod_green_out) >= 1, (
+            "GREEN clock network should include the green mod AC output"
         )
 
     def test_sub_tick_port_always_red(self):

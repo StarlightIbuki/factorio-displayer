@@ -139,6 +139,10 @@ class JobRunner:
             current = self.store.load_job(owner, job_id) or rec
             if current.get("status") == "cancelled":
                 return
+            # _execute mutated *rec* in memory (result, artifacts); carry the
+            # computed result onto the persisted record.
+            if rec.get("result") is not None:
+                current["result"] = rec["result"]
             current["status"] = "succeeded"
             current["finished_at"] = time.time()
             current["progress"] = {"phase": "done"}
@@ -207,7 +211,7 @@ class JobRunner:
             raise RuntimeError(last[-1] if last else f"encode exited with code {proc.returncode}")
 
         result = parse_media_json(out)
-        rec["result"] = result.to_dict()
+        result_dict = result.to_dict()
 
         if result.blueprint:
             self.store.write_artifact_text(owner, job_id, "result.txt", result.blueprint)
@@ -218,10 +222,39 @@ class JobRunner:
                 )
             except Exception:  # pylint: disable=broad-exception-caught
                 pass  # yaml conversion is best-effort
+
+        # Piecewise output: persist each piece as its own artifact so the
+        # frontend can offer copy/download per piece (plus the book).
+        if result.split and result.pieces:
+            for piece in result.pieces:
+                label = str(piece.get("label", "piece"))
+                bp = str(piece.get("blueprint", "") or "")
+                if not bp:
+                    continue
+                safe_label = "".join(c for c in label if c.isalnum() or c in "-_")
+                self.store.write_artifact_text(owner, job_id, f"piece_{safe_label}.txt", bp)
+        if result.book:
+            self.store.write_artifact_text(owner, job_id, "book.txt", result.book)
+
+        # Keep the per-piece blueprint strings OUT of the job record (they live
+        # in the per-piece artifacts); expose piece labels/sizes + book flag for
+        # the UI.  ``blueprint`` (the book or the primary piece) is kept, as it
+        # was for single-blueprint jobs.
+        pieces_meta: list[dict] = []
+        for p in result_dict.get("pieces", []):
+            pieces_meta.append({
+                "label": p.get("label", "piece"),
+                "size_bytes": len(str(p.get("blueprint", "") or "")),
+            })
+        result_dict["pieces"] = pieces_meta
+        result_dict["book"] = bool(result.book)
+        result_dict["book_size"] = len(result.book) if result.book else 0
+        rec["result"] = result_dict
+
         rec["result"]["entity_count"] = result.entity_count
         self.store.write_artifact_text(
             owner, job_id, "result.json",
-            json.dumps(result.to_dict(), ensure_ascii=False, indent=2),
+            json.dumps(result_dict, ensure_ascii=False, indent=2),
         )
 
     # ── fast builders (in-process) ───────────────────────────────────

@@ -57,6 +57,12 @@ class EncodeOptions(BaseModel):
     progress_bar: bool = False
     use_cache: bool = True
     result_format: Literal["blueprint", "toml", "yaml", "json"] = "blueprint"
+    # piecewise (chunked) output — the default.  ``all_in_one`` opts into the
+    # legacy single merged blueprint (not recommended).
+    all_in_one: bool = False
+    book: bool = False
+    no_book: bool = False
+    output_dir: str | None = None
 
     def to_config_dict(self) -> dict:
         d = self.model_dump()

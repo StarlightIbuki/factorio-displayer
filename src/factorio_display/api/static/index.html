@@ -187,11 +187,12 @@
             </label>
             <label data-i18n="s3.output">Output media
               <select id="opt-output-mode">
-                <option value="video-sound" selected data-i18n="s3.outVideoSound">Video with sound</option>
-                <option value="video-muted" data-i18n="s3.outVideoMuted">Video (muted)</option>
+                <option value="video-sound" data-i18n="s3.outVideoSound">Video with sound</option>
+                <option value="video-muted" selected data-i18n="s3.outVideoMuted">Video (muted)</option>
                 <option value="audio" data-i18n="s3.outAudio">Audio only</option>
               </select>
             </label>
+            <div class="hint" style="grid-column:1/-1;opacity:.8" data-i18n="s3.allInOneNote">Results are generated as independent pieces by default (assembled into a blueprint book when small). "Video with sound" is the legacy all-in-one single-blueprint path — not recommended for large videos.</div>
             <label data-i18n="s3.power">Power
               <select id="opt-power">
                 <option value="substation" selected data-i18n="s3.powerSubstation">substation</option>
@@ -210,9 +211,9 @@
               <label data-i18n="s3.fps">FPS (0 = auto) <input id="opt-fps" type="number" min="0" max="60" step="1" value="0" /></label>
               <label data-i18n="s3.skip">Frame skip <input id="opt-skip" type="number" min="1" value="1" /></label>
               <label data-i18n="s3.adaptive">Adaptive
-                <select id="opt-adaptive"><option value="false" data-i18n="s3.off">off</option><option value="true" data-i18n="s3.on">on</option></select>
+                <select id="opt-adaptive"><option value="false" data-i18n="s3.off">off</option><option value="true" selected data-i18n="s3.on">on</option></select>
               </label>
-              <label data-i18n="s3.threshold">Threshold <input id="opt-threshold" type="number" min="0" step="0.01" value="0.01" /></label>
+              <label data-i18n="s3.threshold">Threshold <input id="opt-threshold" type="number" min="0" step="0.005" value="0.005" /></label>
               <label data-i18n="s3.deduplicate">Deduplicate
                 <select id="opt-deduplicate"><option value="false" data-i18n="s3.off">off</option><option value="true" data-i18n="s3.on">on</option></select>
               </label>
