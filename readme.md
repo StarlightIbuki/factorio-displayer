@@ -57,6 +57,9 @@ Converts a video file, GIF, or image sequence into Decider Combinator "Memory" a
 # Video
 factorio-display encode ./bad_apple.mp4 --name "Bad Apple Frame Data" --fps 30
 
+# Video with sound (audio track is extracted and emitted as separate pieces)
+factorio-display encode ./clip.mp4 --name "Clip + Sound"
+
 # Audio (auto-detected from extension)
 factorio-display encode ./song.mid --ticks-per-beat 30
 ```
@@ -65,14 +68,14 @@ _Tip: Adaptive frame-dropping is on by default with a conservative threshold (`-
 
 #### Piecewise (chunked) output — the default
 
-By default `encode` emits **independently-wireable pieces** instead of one giant merged blueprint (which for a long video at large width is hundreds of MB and minutes to build):
+By default `encode` emits **independently-wireable pieces** instead of one giant merged blueprint (which for a long video at large width is hundreds of MB and minutes to build). Video, audio, and **video + sound** are all supported this way:
 
 ```bash
 factorio-display encode ./big.mp4 --width 70 --time-chunks 3 --output-dir out
 ```
 
 - **Video** → `out/display.txt` (the lamp display, with a per-chunk **connector CC** on each red data bus) + `out/memory_c{chunk}_f{frag}.txt` (one memory piece per vertical chunk × time fragment, with **left/right connector CCs** on its data bus plus a non-wired fragment-series label CC).
-- **Audio** → `out/player.txt` (the decoder, with a **bottom-edge connector CC** per rail) + `out/memory_r{rail}.txt` (one memory piece per rail, connector CCs on **both ends**).
+- **Audio / video soundtrack** → `out/player.txt` (the decoder, with a **bottom-edge connector CC** per rail) + `out/memory_r{rail}.txt` (one memory piece per rail, connector CCs on **both ends**).
 - Connector CCs join the **red data bus** and the **green time/clock bus** (they carry the identifying signal at value 0, so nothing is added to either bus). The player/memory connectors for the same rail share the identifying signal; an isolated `signal-info` CC notes the chunk/rail series number.
 
 Pieces are built and materialised in **parallel worker processes**, so generation scales with the number of cores.
@@ -84,7 +87,7 @@ To assemble in game:
 2. Place each piece next to its neighbours and wire the **matching connector CCs** (the ones carrying the same signal) — **red wire** joins the data bus, **green wire** joins the time/clock bus.
 3. Join every piece's clock input to the shared clock.
 
-The legacy single-blueprint composition (timer + power poles + everything merged) is still available via `--all-in-one`, but is **not recommended** for large media.
+The legacy single-blueprint composition (timer + power poles + everything merged into one big blueprint) is still available via `--all-in-one`, but is **not recommended** — the composer-based layout/wiring does not scale reliably, so it should only be used for small outputs.
 
 ### 4. Encode Audio (MIDI)
 

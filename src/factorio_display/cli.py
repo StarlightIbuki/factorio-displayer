@@ -1993,11 +1993,6 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
             sys.stderr.write(
                 "Note: --power is ignored in piecewise mode (pieces are wired in game).\n"
             )
-        if has_any_audio and not no_audio:
-            sys.stderr.write(
-                "Note: embedded video audio is not extracted in piecewise mode; "
-                "use --audio-only or --all-in-one for it.\n"
-            )
         sys.stderr.write("Piecewise mode: emitting display + memory pieces...\n")
         split_result = encode_auto(
             first_visual,
@@ -2018,9 +2013,15 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
         )
         pieces: list[tuple[str, str]] = [("display", split_result["display"])]
         pieces.extend(split_result["pieces"])
-        # Standalone audio (if any) → player + memory pieces.
-        if audios and not no_audio:
-            pieces.extend(_encode_audio_split_pieces(args))
+        # Video + sound: extract embedded/standalone audio → player + memory
+        # pieces, so video-with-audio works without the all-in-one composer.
+        if has_any_audio and not no_audio:
+            audio_td = _extract_combined_audio_tick_data(videos, audios, args)
+            if audio_td:
+                rail_mode = getattr(args, "rail_mode", "auto:0.05")
+                if getattr(args, "instruments", None):
+                    rail_mode = args.instruments
+                pieces.extend(_build_audio_pieces_from_tick_data(audio_td, args, rail_mode))
 
         envelope = _write_split_output(pieces, args, book_label=args.name)
         if getattr(args, "json", False):
@@ -2401,35 +2402,23 @@ def _handle_audio_encode(audio_paths: list[str], args) -> None:
             sys.stdout.write(output)
 
 
-def _encode_audio_for_composition(
+def _extract_combined_audio_tick_data(
     videos: list[str],
     standalone_audios: list[str],
     args,
-    video_total_ticks: int,
-) -> tuple[LogicalBlueprint | None, LogicalBlueprint | None, int]:
-    """Process audio for the all-in-one composition.
+) -> list[list[int]] | None:
+    """Extract audio from *videos* (timeline-aligned) + *standalone_audios*.
 
-    Extracts audio from videos (timeline-aligned), combines with
-    standalone audio files, encodes to LogicalBlueprints.
-    Returns (audio_memory_lb, player_lb, total_audio_ticks).
+    Returns a single combined 48-channel tick-data list, or ``None`` when
+    there is no audible audio to encode.  Shared by the all-in-one composer
+    and the piecewise (default) path so video+sound is supported either way.
     """
     import tempfile
-    import os as _os
     import shutil
 
-    from . import SIGNAL_POOL, QUALITIES
-    from .audio.encoder import encode_audio_to_logical
-    from .audio.player_blueprint import build_audio_decoder_logical
-
-    rail_mode: str = getattr(args, "rail_mode", "auto:0.05")
-    if getattr(args, "instruments", None):
-        rail_mode = args.instruments
-
-    # Collect all audio tick_data, aligned to the video timeline
     all_tick_data: list[list[int]] = []
     cumulative_tick = 0
 
-    # Extract audio from each video
     temp_dir = Path(tempfile.mkdtemp(prefix="fd_audio_"))
     try:
         for vp in videos:
@@ -2468,12 +2457,70 @@ def _encode_audio_for_composition(
             if audio_td:
                 all_tick_data.extend(audio_td)
                 sys.stderr.write(f"  Audio from {Path(ap).name}: {len(audio_td)} ticks\n")
-
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     if not all_tick_data or not any(any(v for v in tick) for tick in all_tick_data):
         sys.stderr.write("  No audio data to encode.\n")
+        return None
+    return all_tick_data
+
+
+def _build_audio_pieces_from_tick_data(
+    all_tick_data: list[list[int]],
+    args,
+    rail_mode: str,
+) -> list[tuple[str, str]]:
+    """Build piecewise audio pieces (player + memory) from combined tick data.
+
+    Mirrors the all-in-one audio composition: extracted audio is treated as
+    a single rail (default ``piano``).
+    """
+    from . import SIGNAL_POOL, QUALITIES  # pylint: disable=import-outside-toplevel
+    from .audio.encoder import encode_audio_split  # pylint: disable=import-outside-toplevel
+
+    instrument = rail_mode.split(",")[0].strip() if "," in rail_mode else rail_mode
+    if ":" in instrument:
+        instrument = instrument.split(":")[0]
+    if instrument in ("auto", "all"):
+        instrument = "piano"
+
+    result = encode_audio_split(
+        [all_tick_data],
+        [instrument],
+        output_name=args.name,
+        signal_pool=list(SIGNAL_POOL),
+        qualities=list(QUALITIES),
+        clock_signal="signal-clock",
+        map_drums=getattr(args, "map_drums", True),
+    )
+    pieces: list[tuple[str, str]] = [("player", result["player"])]
+    pieces.extend(result["pieces"])
+    return pieces
+
+
+def _encode_audio_for_composition(
+    videos: list[str],
+    standalone_audios: list[str],
+    args,
+    video_total_ticks: int,
+) -> tuple[LogicalBlueprint | None, LogicalBlueprint | None, int]:
+    """Process audio for the all-in-one composition.
+
+    Extracts audio from videos (timeline-aligned), combines with
+    standalone audio files, encodes to LogicalBlueprints.
+    Returns (audio_memory_lb, player_lb, total_audio_ticks).
+    """
+    from . import SIGNAL_POOL, QUALITIES
+    from .audio.encoder import encode_audio_to_logical
+    from .audio.player_blueprint import build_audio_decoder_logical
+
+    rail_mode: str = getattr(args, "rail_mode", "auto:0.05")
+    if getattr(args, "instruments", None):
+        rail_mode = args.instruments
+
+    all_tick_data = _extract_combined_audio_tick_data(videos, standalone_audios, args)
+    if all_tick_data is None:
         return None, None, 0
 
     total_audio_ticks = max(len(all_tick_data), video_total_ticks)

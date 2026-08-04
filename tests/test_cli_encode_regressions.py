@@ -194,3 +194,18 @@ def test_json_envelope_carries_split_pieces_and_book() -> None:
     assert result["piece_count"] == 2
     assert [p["label"] for p in result["pieces"]] == ["display", "memory_c0_f0"]
     assert result["book"] == "0eB"
+
+
+def test_audio_pieces_from_combined_tick_data() -> None:
+    """Video+sound piecewise: combined tick data → player + memory pieces."""
+    from types import SimpleNamespace
+
+    from factorio_display.cli import _build_audio_pieces_from_tick_data
+
+    tick_data = [[(i + t) % 60 for i in range(48)] for t in range(120)]
+    args = SimpleNamespace(name="VS", map_drums=True, rail_mode="auto:0.05", instruments=None)
+    pieces = _build_audio_pieces_from_tick_data(tick_data, args, "auto:0.05")
+    labels = [lbl for lbl, _ in pieces]
+    assert labels == ["player", "memory_r0"], labels
+    for _, s in pieces:
+        assert s.startswith("0eN")
