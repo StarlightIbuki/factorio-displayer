@@ -63,6 +63,7 @@ class EncodeOptions(BaseModel):
     book: bool = False
     no_book: bool = False
     output_dir: str | None = None
+    max_piece_mb: float = Field(2.0, gt=0.0)
 
     def to_config_dict(self) -> dict:
         d = self.model_dump()

@@ -814,3 +814,47 @@ class TestBuildDisplayLogical:
         bp = to_draftsman(lb)
         assert bp is not None
         assert len(bp.entities) == len(lb.entities)
+
+    def test_display_connector_wired_within_reach(self):
+        """The per-chunk display connector must be wired to a *nearby* lamp
+        (within Factorio's 9-tile circuit-wire reach).
+
+        Regression: the connector sits at x=ch_w (right of the top row) but
+        used to be wired to the top-LEFT lamp (x=0) — a wire spanning the
+        whole chunk width that Factorio silently drops, leaving the connector
+        disconnected in-game.
+        """
+        from factorio_display.logical_blueprint import to_draftsman
+
+        lb = build_display_logical(name="Reach", width=62, height=35, connectors=True)
+        bp = to_draftsman(lb)
+
+        pos = {
+            e.id: (int(e.tile_position.x), int(e.tile_position.y))
+            for e in bp.entities
+            if getattr(e, "id", None) and hasattr(e, "tile_position")
+        }
+        conn_ids = {
+            eid for eid, e in lb.entities.items()
+            if e.type == "constant-combinator"
+            and eid.startswith("cc_c") and eid.endswith("_data")
+        }
+        assert len(conn_ids) >= 2, "expected per-chunk display connectors"
+
+        too_far: list[str] = []
+        for w in bp.wires:
+            e1 = w[0]()
+            e2 = w[2]()
+            id1, id2 = getattr(e1, "id", None), getattr(e2, "id", None)
+            if not (id1 in conn_ids or id2 in conn_ids):
+                continue
+            p1, p2 = pos.get(id1), pos.get(id2)
+            if p1 is None or p2 is None:
+                continue
+            d = max(abs(p1[0] - p2[0]), abs(p1[1] - p2[1]))
+            if d > 9:
+                too_far.append(f"{id1} ↔ {id2} ({d} tiles)")
+        assert not too_far, (
+            "display connector wires exceed Factorio's 9-tile reach:\n"
+            + "\n".join(too_far)
+        )

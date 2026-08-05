@@ -244,9 +244,9 @@ CONN_Y = MOD_Y + 2
 def _rail_marker_signal(ri: int) -> str:
     """Return a per-rail identifying signal for the audio connector CCs.
 
-    Carried at **value 0** on the connector, so Factorio drops it from the
-    bus — it is only a visual label the player uses to match a memory
-    chunk's connector in-game.  ``signal-M`` is skipped (used by the mod
+    Carried at **value 1** on the connector with the CC "Output" toggle OFF
+    (``enabled=False``), so it is visible on the map as a label but never
+    emitted onto either bus.  ``signal-M`` is skipped (used by the mod
     AC for sub_tick inside the player).
     """
     _MARKERS = [
@@ -280,15 +280,24 @@ def _add_player_connector(  # noqa: F821
     conn_id = f"{prefix}conn"
     conn_x = rail_x + PORT_X
     conn_y = CONN_Y
+    # Connector carries the marker at value 1 with the CC "Output" toggle OFF
+    # (enabled=False) — visible on the map, but never emitted onto the bus.
     lb.add_entity(LogicalEntity(
         conn_id, "constant-combinator",
-        properties={"signals": [{"name": marker_signal, "value": 0}]},
+        properties={
+            "signals": [{"name": marker_signal, "value": 1}],
+            "enabled": False,
+        },
         position=(conn_x, conn_y),
     ))
-    # Non-wired series-label CC noting the rail index.
+    # Non-wired series-label CC noting the rail index (1-based so it shows
+    # on the map), output also disabled.
     lb.add_entity(LogicalEntity(
         f"{prefix}conn_label", "constant-combinator",
-        properties={"signals": [{"name": "signal-info", "value": series_index}]},
+        properties={
+            "signals": [{"name": "signal-info", "value": series_index + 1}],
+            "enabled": False,
+        },
         position=(conn_x, conn_y + 1),
     ))
     # Join the green clock (time) bus + red data bus.

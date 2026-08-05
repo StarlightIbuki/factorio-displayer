@@ -53,6 +53,7 @@ class MediaConfig:            # == encode subcommand options
     chunk_workers: int | None = None
     output_chunks_dir: str | None = None
     deduplicate_cross: bool = False
+    max_piece_mb: float = 1.0  # target max memory-piece size (MB; auto-split)
     # audio / midi
     ticks_per_beat: int = 30
     boost_melody: float = 1.0
@@ -275,7 +276,7 @@ Errors: unsupported type → `422` with detected type.
   // video options
   "skip": 1, "fps": 30, "adaptive": true, "threshold": 0.01,
   "deduplicate": false, "width": null, "height": null,
-  "time_chunks": 1, "chunk_workers": null,
+  "time_chunks": 1, "chunk_workers": null, "max_piece_mb": 1.0,
   // audio / midi options
   "ticks_per_beat": 30, "boost_melody": 1.5, "velocity_scale": 1.0,
   "attack_ticks": 10, "decay_ticks": 10, "sustain_level": 0.8, "release_ticks": 10,

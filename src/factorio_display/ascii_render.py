@@ -19,13 +19,12 @@ a character pool).  Within one colour every circuit network is assigned a
 character from ``0-9 A-Z a-z`` (62 per map); when a blueprint has more than
 62 networks of that colour the same characters are reused on that colour's
 next connection map.  Each entity shows the character(s) of the network(s)
-it is wired into on that colour — e.g. a combinator whose input and output
-ride two separate red networks shows both chars (``01``).  ``.`` means the
-entity is not on any network of that colour.  Input vs output side is not
-shown: a circuit connection doesn't care which connector it lands on, and
-the combinator's facing in the entity map already tells you which side is
-the input vs the output.  This makes it easy to eyeball e.g. whether a
-memory bank's data bus actually reaches the display lamps, and which
+  it is wired into on that colour, drawn at the wire's actual physical port
+  tile — the OUTPUT (red) side sits at the tile the combinator faces and the
+  INPUT (green) side at the opposite tile.  For a north-facing decider that
+  means the red (data/output) wire appears on the TOP half and the green
+  (time/input) wire on the BOTTOM half.  ``.`` means the entity is not on any
+  network of that colour.  This makes it easy to eyeball e.g. whether a
 networks are still disconnected.
 """
 
@@ -72,6 +71,29 @@ def _entity_direction(e: Any) -> int:
         return 0
 
 
+def _port_offset(direction: int, side: str) -> tuple[int, int]:
+    """Offset of a combinator's input/output circuit port from its anchor tile.
+
+    Combinators are 1x2 (north/south) or 2x1 (east/west); the anchor is the
+    TOP tile for north/south and the LEFT tile for east/west.  A circuit port
+    sits at the centre of its own 1-tile end: for a north-facing decider the
+    INPUT rides the BOTTOM half and the OUTPUT the TOP half (and analogously
+    for the other directions).  Non-dual entities (constant combinators,
+    lamps, speakers) have a single port at the anchor.
+    """
+    if side == "output":
+        if direction == 4:      # east
+            return (1, 0)
+        if direction == 12:     # west
+            return (-1, 0)
+        if direction == 0:      # north
+            return (0, 0)
+        return (0, 1)           # south (8) or diagonal fallback
+    if direction == 0:          # north — input on the bottom half
+        return (0, 1)
+    return (0, 0)               # south/east/west — input on the anchor tile
+
+
 def _entity_glyph(name: str, direction: int) -> list[tuple[tuple[int, int], str]]:
     """Return ``[(offset, char), ...]`` glyph cells for an entity.
 
@@ -89,13 +111,18 @@ def _entity_glyph(name: str, direction: int) -> list[tuple[tuple[int, int], str]
     if kind == "one":
         # Speaker / lamp — no facing marker
         return [((0, 0), letter)]
-    # Facing combinator
+    # Facing combinator.  Combinators are 1x2 (north/south) or 2x1
+    # (east/west) and the letter sits at the INPUT end while the direction
+    # marker sits at the OUTPUT end (the tile the combinator faces toward).
+    # For north/south the anchor (tile_position) is the TOP tile, so:
+    #   north -> "^" at the top tile (output), letter at the bottom tile
+    #   south -> letter at the top tile (input), "V" at the bottom tile
     if direction == 4:      # east
         return [((0, 0), letter), ((1, 0), ">")]
     if direction == 12:     # west
         return [((-1, 0), "<"), ((0, 0), letter)]
     if direction == 0:      # north
-        return [((0, -1), "^"), ((0, 0), letter)]
+        return [((0, 0), "^"), ((0, 1), letter)]
     return [((0, 0), letter), ((0, 1), "V")]  # south (8) or diagonal fallback
 
 
@@ -286,23 +313,35 @@ def render_blueprint(bp: Any, *, coords: bool = True) -> str:
             continue
         x, y = anchor
         oid = id(e)
+        direction = _entity_direction(e)
+        # Only 2-tile combinators have spatially distinct input/output ports;
+        # 1x1 entities (constant combinators, lamps, speakers) have a single
+        # connection point at the anchor.
+        is_combinator = _ENTITY_LETTERS.get(e.name, (".", None))[1] == "combinator"
         for color, n_maps in (("red", red_maps), ("green", green_maps)):
-            nets = sorted({
-                net_of_key[(oid, side, color)]
-                for side in ("input", "output")
-                if (oid, side, color) in net_of_key
-            })
-            if not nets:
+            # Draw each wired port at its own physical tile (the input end vs
+            # the output end of a combinator), so e.g. a north-facing
+            # decider's red (data/output) wire shows on the TOP half and its
+            # green (time/input) wire on the BOTTOM half.
+            sides: list[tuple[int, int, tuple[int, str]]] = []
+            for side in ("input", "output"):
+                key = (oid, side, color)
+                if key in net_of_key:
+                    dx, dy = _port_offset(direction, side) if is_combinator else (0, 0)
+                    sides.append((dx, dy, net_of_key[key]))
+            if not sides:
                 for mapnum in range(1, n_maps + 1):
                     wire_cells[(color, mapnum, x, y)] = "."
                 continue
             for mapnum in range(1, n_maps + 1):
-                chars_this_map = [c for (m, c) in nets if m == mapnum]
-                if not chars_this_map:
+                placed = False
+                for dx, dy, net in sides:
+                    if net[0] != mapnum:
+                        continue
+                    wire_cells[(color, mapnum, x + dx, y + dy)] = net[1]
+                    placed = True
+                if not placed:
                     wire_cells[(color, mapnum, x, y)] = " "
-                else:
-                    for i, c in enumerate(sorted(chars_this_map)):
-                        wire_cells[(color, mapnum, x + i, y)] = c
 
     # ── Assemble output ─────────────────────────────────────────
     lines: list[str] = []

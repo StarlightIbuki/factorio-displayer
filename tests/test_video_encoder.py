@@ -32,16 +32,23 @@ from factorio_display.cache_paths import version_prefix
 # Test helpers — small deterministic frames and mappings
 # ═══════════════════════════════════════════════════════════════════════
 
-def _check_bp(lb, label="") -> None:
-    """Assert a Blueprint or LogicalBlueprint is valid and has correct wire topology."""
+def _check_bp(lb, label="", *, lb_logical=None) -> None:
+    """Assert a Blueprint or LogicalBlueprint is valid and has correct wire topology.
+
+    Pass *lb_logical* (the corresponding LogicalBlueprint) to use the
+    network-aware connectivity check instead of the colour-global one, which
+    reports false positives for composed blueprints that legitimately contain
+    multiple independent same-colour networks (e.g. an unused red sub-tick
+    bus next to a green time bus).
+    """
     assert lb is not None
-    from factorio_display.logical_blueprint import to_draftsman
+    from factorio_display.logical_blueprint import assert_wire_topology, to_draftsman
     from draftsman.blueprintable import Blueprint
     if isinstance(lb, Blueprint):
         bp = lb
     else:
         bp = to_draftsman(lb)
-    assert_wire_topology(bp, label=label)
+    assert_wire_topology(bp, label=label, lb=lb_logical)
 
 
 def _dc_count(lb) -> int:
@@ -188,12 +195,16 @@ class TestEncodeFramesCore:
         assert len(lb.networks) >= 2, f"Expected ≥2 networks, got {len(lb.networks)}"
         _check_bp(lb, label="snake_wiring")
 
-    def test_memory_bank_gets_square_positions(self, sample_frames_12, small_mapping_params):
+    def test_memory_bank_gets_fixed_width_vertical_growth(self, sample_frames_12, small_mapping_params):
+        """Memory bank packs deciders into fixed-width rows (horizontal = the
+        width direction) and grows VERTICALLY — not a square sqrt packing."""
+        from factorio_display.video.encoder import _MEMORY_BANK_COLS
+
         frames, tick_ranges = sample_frames_12
         lb = _encode_frames_core(
             kept_frames=frames,
             tick_ranges=tick_ranges,
-            output_name="SquareLayout",
+            output_name="WideLayout",
             deduplicate=False,
             mapping_params=small_mapping_params,
             clock="signal-clock",
@@ -204,9 +215,9 @@ class TestEncodeFramesCore:
         xs = [e.position[0] for e in dcs if e.position is not None]
         ys = [e.position[1] for e in dcs if e.position is not None]
         assert min(xs) == 0
-        assert max(xs) <= 3  # ceil(sqrt(12)) = 4 columns -> x in 0..3
-        assert min(ys) == 0
-        assert max(ys) <= 4  # rows are pitched by 2 tiles: 0,2,4
+        assert max(xs) == _MEMORY_BANK_COLS - 1  # width direction = a full row
+        rows = math.ceil(12 / _MEMORY_BANK_COLS)
+        assert max(ys) == 2 * (rows - 1)  # vertical growth, rows pitched 2 tiles
 
     def test_memory_bank_networks_are_prewired(self, sample_frames_12, small_mapping_params):
         frames, tick_ranges = sample_frames_12
@@ -220,16 +231,25 @@ class TestEncodeFramesCore:
             current_tick=13,
         )
         dcs = [e for e in lb.entities.values() if e.type == "decider-combinator"]
+        # Unified bus schema: green = clock/time (inputs), red = data (outputs).
+        green_nets = [n for n in lb.networks if n.color == "green"]
         red_nets = [n for n in lb.networks if n.color == "red"]
-        assert len(red_nets) >= 2
-        # At least input and output buses should carry deterministic pair lists.
-        with_pairs = [n for n in red_nets if n.prewired_pairs is not None]
+        assert len(green_nets) >= 1, "expected a green clock (time) bus"
+        assert len(red_nets) >= 1, "expected a red data bus"
+        # Input (green) and output (red) buses should carry deterministic
+        # pair lists.
+        with_pairs = [n for n in lb.networks if n.prewired_pairs is not None]
         assert len(with_pairs) >= 2
         for net in with_pairs[:2]:
             assert len(net.prewired_pairs or []) == max(0, len(dcs) - 1)
 
     def test_connectors_added_to_memory_piece(self, sample_frames_3, small_mapping_params):
-        """Split-mode connectors: left/right CCs on the data bus + isolated label."""
+        """Split-mode connectors: ONE TOP and ONE BOTTOM bus connector join
+        BOTH the green clock (time) bus and the red data bus; the isolated
+        series MARKER CC sits at the TOP.  Connector signals are visible
+        (value > 0) with the CC output toggle off."""
+        from factorio_display.logical_blueprint import Endpoint
+
         frames, ticks = sample_frames_3
         lb = _encode_frames_core(
             kept_frames=frames, tick_ranges=ticks, output_name="Conn",
@@ -237,33 +257,58 @@ class TestEncodeFramesCore:
             clock="signal-clock", current_tick=4,
             connectors=True, fragment_index=2,
         )
-        cc_ids = [eid for eid in lb.entities if "_cc" in eid or "_label" in eid]
-        assert "gate_1_ccL" in lb.entities, "missing left connector CC"
-        assert "gate_1_ccR" in lb.entities, "missing right connector CC"
-        assert "gate_1_label" in lb.entities, "missing series-label CC"
+        cc_ids = [eid for eid in lb.entities if "_conn" in eid or "_marker" in eid]
+        assert "gate_1_connT" in lb.entities, "missing top bus connector CC"
+        assert "gate_1_marker" in lb.entities, "missing top series marker CC"
+        assert "gate_1_connB" in lb.entities, "missing bottom bus connector CC"
 
-        # Connectors must be on the red *output* (data) network.
-        out_net = None
-        for net in lb.networks:
-            if net.color == "red" and any(ep.entity_id == "gate_1" and ep.port == "output"
-                                          for ep in net.endpoints):
-                out_net = net
-                break
-        assert out_net is not None
-        assert any(ep.entity_id == "gate_1_ccL" for ep in out_net.endpoints)
-        assert any(ep.entity_id == "gate_1_ccR" for ep in out_net.endpoints)
-        # Label must be isolated.
-        assert not any(ep.entity_id == "gate_1_label" for n in lb.networks for ep in n.endpoints)
+        # Both bus connectors must join BOTH the green clock (time) bus and
+        # the red output (data) bus.
+        for cc in ("gate_1_connT", "gate_1_connB"):
+            green_ok = red_ok = False
+            for net in lb.networks:
+                has = Endpoint(cc, "input") in net.endpoints
+                if net.color == "green" and has:
+                    green_ok = True
+                if net.color == "red" and has:
+                    red_ok = True
+            assert green_ok, f"{cc} must join the green clock (time) bus"
+            assert red_ok, f"{cc} must join the red data bus"
 
-        # Both connectors carry the identifying signal at value 0 (no pollution).
-        for cc in ("gate_1_ccL", "gate_1_ccR"):
-            sigs = lb.entities[cc].properties.get("signals", [])
-            assert sigs and sigs[0]["value"] == 0
+        # The marker must be isolated.
+        assert not any(ep.entity_id == "gate_1_marker" for n in lb.networks for ep in n.endpoints)
 
-        # Serialises fine.
-        from factorio_display.logical_blueprint import to_draftsman
+        # Connectors carry the identifying signal at value > 0 (visible on the
+        # map) with the CC "Output" toggle OFF (enabled=False → no pollution).
+        for cc in ("gate_1_connT", "gate_1_connB"):
+            props = lb.entities[cc].properties
+            sigs = props.get("signals", [])
+            assert sigs and sigs[0]["value"] > 0, f"{cc}: identifying signal must be > 0"
+            assert props.get("enabled") is False, f"{cc}: CC output must be disabled"
+        # Marker CC: visible (1-based) and output disabled too.
+        marker_props = lb.entities["gate_1_marker"].properties
+        assert marker_props.get("signals", [{}])[0].get("value") == 3  # fragment_index + 1
+        assert marker_props.get("enabled") is False
+
+        # Serialises fine and the connector's output-off round-trips.
+        # (Draftsman round-trip drops custom entity ids, so locate CCs by
+        # position: rightmost top connector (cols-1, -1) — right-aligned with
+        # the rightmost decider.)
+        from factorio_display.logical_blueprint import from_blueprint_string, to_draftsman
+        from factorio_display.video.encoder import _MEMORY_BANK_COLS
         bp = to_draftsman(lb)
         assert bp is not None
+        s = bp.to_string()
+        assert s.startswith("0eN")
+        lb2 = from_blueprint_string(s)
+        cc_by_pos = {
+            ent.position: ent for ent in lb2.entities.values()
+            if ent.type == "constant-combinator"
+        }
+        top = cc_by_pos.get((_MEMORY_BANK_COLS - 1, -1))
+        assert top is not None, "rightmost top connector CC missing after round-trip"
+        assert top.properties.get("enabled") is False
+        assert top.properties["signals"][0]["value"] == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -346,6 +391,61 @@ class TestEncodeFramesSplit:
         assert _first_decider_ticks(f0) != _first_decider_ticks(f1), (
             "fragments should gate on different ticks"
         )
+
+    def test_split_auto_fragments_by_size(self):
+        """Default (time_chunks=1) auto-splits by estimated piece size: a tiny
+        max_piece_mb forces many fragments, a large one keeps a single piece."""
+        from factorio_display.video.encoder import encode_frames_split
+
+        w, h = 40, 40
+        frames = [
+            np.full((h, w, 3), (i * 40, i * 20, 0), dtype=np.uint8) for i in range(12)
+        ]
+
+        tiny = encode_frames_split(
+            iter(frames), "AutoFrag", fps=30.0, adaptive=False,
+            total_width=w, total_height=h, expected_frames=12, source_id="auto_frag",
+            time_chunks=1, chunk_workers=2, max_piece_mb=0.01,
+        )
+        assert tiny["time_chunks"] >= 4, (
+            f"tiny max_piece_mb should force many fragments, got {tiny['time_chunks']}"
+        )
+        assert len(tiny["pieces"]) == tiny["num_chunks"] * tiny["time_chunks"]
+
+        # A large target keeps the whole time range in a single fragment.
+        big = encode_frames_split(
+            iter(frames), "AutoFragBig", fps=30.0, adaptive=False,
+            total_width=w, total_height=h, expected_frames=12, source_id="auto_frag_big",
+            time_chunks=1, chunk_workers=2, max_piece_mb=1000.0,
+        )
+        assert big["time_chunks"] == 1, (
+            f"huge max_piece_mb should keep one fragment, got {big['time_chunks']}"
+        )
+        assert len(big["pieces"]) == big["num_chunks"]
+
+    def test_plan_time_fragments_packs_contiguously(self):
+        """_plan_time_fragments produces contiguous, ordered frame ranges that
+        cover all frames and shrink as the target size shrinks."""
+        from factorio_display.video.encoder import (
+            _CHARS_PER_UNIT, _plan_time_fragments,
+        )
+
+        # 8 dense frames over 2 vertical chunks of height 5.
+        frames = [np.full((10, 20, 3), 128, dtype=np.uint8) for _ in range(8)]
+        n = len(frames)
+        per_frame = _CHARS_PER_UNIT * (1 + 20 * 5)  # 5 rows x 20 cols lit
+        frags = _plan_time_fragments(frames, 2, 5, 10, target_chars=per_frame * 2)
+        assert frags[0][0] == 0
+        assert frags[-1][1] == n
+        for (s0, e0), (s1, _e1) in zip(frags, frags[1:]):
+            assert e0 == s1, "fragment ranges must be contiguous"
+        assert len(frags) >= 2, "small target should produce multiple fragments"
+
+        # A target larger than the whole input yields a single fragment.
+        single = _plan_time_fragments(
+            frames, 2, 5, 10, target_chars=per_frame * n * 10,
+        )
+        assert single == [(0, n)]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -434,9 +534,10 @@ class TestEncodeFramesChunked:
             source_id="test_wiring", time_chunks=3,
         )
         bp = from_draftsman(result["full"])
+        # Unified bus schema: the shared clock (time) bus is GREEN.
         clock_nets = [
             net for net in bp.networks
-            if net.color == "red" and any(ep.port == "input" for ep in net.endpoints)
+            if net.color == "green" and any(ep.port == "input" for ep in net.endpoints)
         ]
         assert len(clock_nets) == 1, f"Expected one shared clock network, got {len(clock_nets)}"
         clock_net = clock_nets[0]
@@ -918,7 +1019,7 @@ class TestSmokeEncodeFrames:
             use_cache=False,
         )
         final_bp = to_draftsman(merged)
-        _check_bp(final_bp, label="single_image_compose")
+        _check_bp(final_bp, label="single_image_compose", lb_logical=merged)
 
         report = validate_blueprint_via_logical(final_bp.to_string())
         assert report["errors"] == [], (
@@ -975,7 +1076,7 @@ class TestSmokeEncodeFrames:
             use_cache=False,
         )
         final_bp = to_draftsman(merged)
-        _check_bp(final_bp, label="regress_wire_reach")
+        _check_bp(final_bp, label="regress_wire_reach", lb_logical=merged)
 
         # Every materialised wire must be within Factorio's 9-tile reach,
         # measured between connection points (draftsman global positions).
@@ -1052,7 +1153,7 @@ class TestSmokeEncodeFrames:
             use_cache=False,
         )
         final_bp = to_draftsman(result)
-        _check_bp(final_bp, label="multi_chunk_compose")
+        _check_bp(final_bp, label="multi_chunk_compose", lb_logical=result)
 
         # Verify chunks: display should have multiple data ports
         data_ports = [p for p in display_lb.input_ports if p.startswith("data")]

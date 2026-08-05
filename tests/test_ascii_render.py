@@ -41,6 +41,52 @@ def _make_test_blueprint() -> Blueprint:
     return bp
 
 
+def _map_rows(text: str, label: str) -> dict[int, str]:
+    """Extract ``{y: row-content}`` from a wiring-map section by header label."""
+    import re
+
+    marker = f"=== Wiring - {label}"
+    rest = text[text.index(marker) + len(marker):]
+    end = rest.find("=== Wiring -")
+    if end != -1:
+        rest = rest[:end]
+    rows: dict[int, str] = {}
+    for line in rest.splitlines():
+        m = re.match(r"^ *(-?\d+) (.*)$", line)
+        if m:
+            rows[int(m.group(1))] = m.group(2)
+    return rows
+
+
+def test_north_decider_wires_on_correct_halves() -> None:
+    """A north-facing decider's red (output) wire renders on the TOP half
+    (the anchor tile) and its green (input) wire on the BOTTOM half, and
+    1x1 entities (constant combinators, lamps) render at their anchor."""
+    from factorio_display.ascii_render import render_blueprint
+
+    bp = Blueprint()
+    cc = new_entity("constant-combinator", id="cc", tile_position=(0, 2))
+    dc = new_entity(
+        "decider-combinator", id="dc", tile_position=(2, 0),
+        direction=Direction.NORTH,
+    )
+    lamp = new_entity("small-lamp", id="lamp", tile_position=(4, 2))
+    for e in (cc, dc, lamp):
+        bp.entities.append(e)
+    bp.add_circuit_connection("green", "cc", "dc", "input", "input")
+    bp.add_circuit_connection("red", "dc", "lamp", "output", "input")
+
+    text = render_blueprint(bp)
+    red = _map_rows(text, "RED connection map 1")
+    green = _map_rows(text, "GREEN connection map 1")
+    # Decider anchor at (2,0): output/red on the top half (2,0), input/green
+    # on the bottom half (2,1); 1x1 entities at their own anchors.
+    assert red[0][2] == "0", "red (output) should sit on the decider's TOP half"
+    assert green[1][2] == "0", "green (input) should sit on the decider's BOTTOM half"
+    assert red[2][4] == "0", "lamp (1x1) should render at its anchor, unshifted"
+    assert green[2][0] == "0", "constant combinator should render at its anchor"
+
+
 def test_entity_map_glyphs() -> None:
     from factorio_display.ascii_render import render_blueprint
 
@@ -68,12 +114,11 @@ def test_wiring_red_and_green_on_separate_maps() -> None:
     assert "'0' = green network" in text
 
     # Red map grid row (entities at y=0, columns 0..10):
-    #   CC '0'  |  DC '0'+'1'  |  AC '2'  |  L '1'  |  S '2'
-    assert "0 01 2  1 2" in text
-    # The DC's input (red net 0) and output (red net 1) are two separate red
-    # networks, so its cell shows both chars — without labelling which is
-    # input vs output (the entity map's direction glyph covers that).
-    assert "01" in text
+    #   CC '0'  |  DC '0'(in)+'1'(out)  |  AC '2'(out)  |  L '1'  |  S '2'
+    # Wires render at the actual port tile: the east-facing DC's red OUTPUT
+    # (net 1) sits one tile EAST of its INPUT (net 0), so the two chars are
+    # adjacent at x=2,3; the west-facing AC's red output sits one tile WEST.
+    assert "0 012   1 2" in text
 
     # Green map grid row: DC and AC both ride green1 '0'; other entities '.'.
     assert ". 0  0  . ." in text

@@ -570,15 +570,31 @@ def _make_memory_lb(clock_color: str = "red") -> LogicalBlueprint:
 class TestDeclareMemoryPorts:
     """Tests for _declare_memory_ports — clock port colour detection."""
 
-    def test_video_memory_clock_is_red(self):
-        """Video memory DCs are on RED → clock port should be RED."""
-        lb = _make_memory_lb("red")
-        _declare_memory_ports(lb)
+    def test_video_memory_clock_is_green(self):
+        """Video memory (real encoder) uses the unified GREEN time bus for the
+        clock input, and RED for the data output."""
+        import numpy as np
+        from factorio_display import CLOCK_SIGNAL, QUALITIES, SIGNAL_POOL
+        from factorio_display.video.encoder import _encode_frames_core
+
+        w, h = 4, 4
+        frames = [np.full((h, w, 3), 128, dtype=np.uint8) for _ in range(3)]
+        tr = [(i * 2, i * 2 + 1) for i in range(3)]
+        mp = {"width": w, "height": h, "qualities": QUALITIES, "signal_pool": SIGNAL_POOL}
+        lb = _encode_frames_core(frames, tr, "VideoClock", False, mp, CLOCK_SIGNAL, 6)
         assert "clock" in lb.input_ports
-        clock_net_id = lb.input_ports["clock"]
-        clock_net = next(n for n in lb.networks if n.network_id == clock_net_id)
-        assert clock_net.color == "red", (
-            f"Expected RED clock port for video memory, got {clock_net.color}"
+        clock_net = next(
+            n for n in lb.networks if n.network_id == lb.input_ports["clock"]
+        )
+        assert clock_net.color == "green", (
+            f"Expected GREEN clock (time) port for video memory, got {clock_net.color}"
+        )
+        assert "data" in lb.output_ports
+        data_net = next(
+            n for n in lb.networks if n.network_id == lb.output_ports["data"]
+        )
+        assert data_net.color == "red", (
+            f"Data port should stay RED, got {data_net.color}"
         )
 
     def test_audio_memory_clock_is_green(self):

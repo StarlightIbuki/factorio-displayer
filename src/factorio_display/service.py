@@ -158,6 +158,7 @@ class MediaConfig:
     book: bool = False
     no_book: bool = False
     output_dir: str | None = None
+    max_piece_mb: float = 2.0  # target max memory-piece size (MB)
 
     def to_argv(self, *, include_json: bool = True) -> list[str]:
         """Build the ``factorio-display encode`` argv (after ``python -m factorio_display``)."""
@@ -241,6 +242,7 @@ class MediaConfig:
             a.append("--no-book")
         if self.output_dir:
             a += ["--output-dir", self.output_dir]
+        a += ["--max-piece-mb", str(self.max_piece_mb)]
         a += list(self.inputs)
         return a
 

@@ -242,10 +242,11 @@ def _layout_and_prewire_audio_bank(
     When *connectors* is True (split-output mode), the bank also gets:
       * constant-combinator connectors on the LEFT and RIGHT, each wired
         into BOTH the green clock (time) bus and the red output (data) bus
-        and carrying *connector_label* at value 0 — a visual hint that adds
-        nothing to either bus, used for in-game wiring to the player (or the
-        neighbouring memory chunk);
-      * a non-wired series-label CC carrying *fragment_index*.
+        and carrying *connector_label* at value 1 with the CC "Output" toggle
+        OFF (``enabled=False``) — visible on the map but adding nothing to
+        either bus, used for in-game wiring to the player (or the neighbouring
+        memory chunk);
+      * a non-wired series-label CC carrying ``fragment_index + 1``.
     """
     from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
 
@@ -321,25 +322,41 @@ def _attach_audio_connectors(
     Each connector is wired into both the clock (green) and data (red)
     networks via the first DC's input/output endpoints, and added to those
     networks' prewired pairs so the wires materialise deterministically.
+
+    The connectors carry the identifying signal at value 1 with the CC
+    "Output" toggle OFF (``enabled=False``) — visible on the map but not
+    emitted onto either bus.
     """
     from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
 
     left_cc = f"{first_dc}_ccL"
     right_cc = f"{first_dc}_ccR"
+    # Connectors carry the identifying signal at value 1 with the CC "Output"
+    # toggle OFF (enabled=False) — visible on the map, never emitted onto
+    # either bus.
     lb.add_entity(LogicalEntity(
         left_cc, "constant-combinator",
-        properties={"signals": [{"name": connector_label, "value": 0}]},
+        properties={
+            "signals": [{"name": connector_label, "value": 1}],
+            "enabled": False,
+        },
         position=(-1, 0),
     ))
     lb.add_entity(LogicalEntity(
         right_cc, "constant-combinator",
-        properties={"signals": [{"name": connector_label, "value": 0}]},
+        properties={
+            "signals": [{"name": connector_label, "value": 1}],
+            "enabled": False,
+        },
         position=(cols, 0),
     ))
     if fragment_index is not None:
         lb.add_entity(LogicalEntity(
             f"{first_dc}_label", "constant-combinator",
-            properties={"signals": [{"name": "signal-info", "value": fragment_index}]},
+            properties={
+                "signals": [{"name": "signal-info", "value": fragment_index + 1}],
+                "enabled": False,
+            },
             position=(cols, 1),
         ))
 

@@ -925,6 +925,8 @@ def _entity_to_toml(entity: LogicalEntity) -> str:
             if "quality" in sig:
                 lines.append(_emit_key_val("quality", sig["quality"], "  "))
             lines.append(_emit_key_val("value", sig.get("value", 0), "  "))
+        if not props.get("enabled", True):
+            lines.append(_emit_key_val("enabled", False))
 
     elif entity.type == "programmable-speaker":
         lines.append(_emit_key_val("instrument", props.get("instrument", "piano")))
@@ -1233,6 +1235,7 @@ def _parse_entity(raw: dict[str, Any]) -> LogicalEntity:
                 s["quality"] = sig["quality"]
             signals.append(s)
         props["signals"] = signals
+        props["enabled"] = raw.get("enabled", True)
 
     elif etype == "programmable-speaker":
         props["instrument"] = raw.get("instrument", "piano")
@@ -1441,6 +1444,7 @@ def _from_draftsman_impl(bp: Any) -> LogicalBlueprint:
                     s["quality"] = quality
                 signals.append(s)
             props["signals"] = signals
+            props["enabled"] = getattr(ent, "enabled", True)
 
         elif isinstance(ent, ProgrammableSpeaker):
             vs = getattr(ent, "volume_signal", None)
@@ -2255,19 +2259,24 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
 
         elif entity.type == "constant-combinator":
             for slot, sig in enumerate(props.get("signals", [])):
-                quality = sig.get("quality")
+                # Default the quality to "normal": a missing quality makes the
+                # game treat the signal as the special "any" quality, which a
+                # constant combinator does not display on its icon.
+                quality = sig.get("quality") or "normal"
                 if _validate:
                     de.set_signal(
                         slot,
                         sig["name"],
                         sig.get("value", 0),
-                        quality if quality else None,
+                        quality,
                     )
                 else:
                     # Fast path: manipulate the signals dict directly
-                    signal_dict = {"name": sig["name"], "value": sig.get("value", 0)}
-                    if quality:
-                        signal_dict["quality"] = quality
+                    signal_dict = {
+                        "name": sig["name"],
+                        "value": sig.get("value", 0),
+                        "quality": quality,
+                    }
                     cbn = getattr(de, "control_behavior", None)
                     if cbn is not None:
                         sigs = getattr(cbn, "signals", None)
@@ -2280,15 +2289,22 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                                 slot,
                                 sig["name"],
                                 sig.get("value", 0),
-                                quality if quality else None,
+                                quality,
                             )
                     else:
                         de.set_signal(
                             slot,
                             sig["name"],
                             sig.get("value", 0),
-                            quality if quality else None,
+                            quality,
                         )
+            # "Output" toggle on the constant combinator: when disabled
+            # (``enabled=False`` → ``control_behavior.is_on=false``) the CC
+            # still *displays* its signals (e.g. on the map) but does not
+            # emit them onto the circuit network.  Used by connector CCs so
+            # a non-zero identifying signal stays visible without polluting
+            # the bus.
+            object.__setattr__(de, "enabled", props.get("enabled", True))
 
         elif entity.type == "programmable-speaker":
             if _validate:

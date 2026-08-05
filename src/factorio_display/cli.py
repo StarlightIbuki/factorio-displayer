@@ -351,15 +351,16 @@ def _build_timer_for_memory(
 ) -> LogicalBlueprint:
     """Build a combined raw+mod timer suitable for a memory blueprint.
 
-    The clock output colour is chosen to match the *memory_lb* clock
-    input port colour (detected by :func:`_declare_memory_ports`):
+    The clock output colour is chosen to match the *memory_lb* clock input
+    port colour (detected by :func:`_declare_memory_ports`).  With the unified
+    bus schema both video and audio memory use the **GREEN** time bus:
 
-    - **RED** (video memory): the mod timer output (wrapping ``clock % N``)
-      is exposed as both ``"clock"`` and ``"sub_tick"`` on RED.  The raw
-      clock stays internal.
-    - **GREEN** (audio memory): the mod timer outputs the wrapping clock
-      directly on the GREEN time bus (no red→green relay AC).  A second
+    - **GREEN** (video + audio memory): the mod timer outputs the wrapping
+      clock directly on the GREEN time bus (no red→green relay AC).  A second
       mod timer keeps ``"sub_tick"`` on RED for the progress bar.
+    - **RED** (legacy / backward compatibility): the mod timer output
+      (wrapping ``clock % N``) is exposed as both ``"clock"`` and
+      ``"sub_tick"`` on RED; the raw clock stays internal.
 
     Exposes two output ports:
     - ``"clock"`` — clock signal for memory DC gating
@@ -378,9 +379,12 @@ def _build_timer_for_memory(
     if max_tick_index < 0:
         max_tick_index = 0
 
-    # Determine the clock port colour from the memory blueprint.
+    # Determine the clock port colour from the memory blueprint.  With the
+    # unified bus schema both video and audio memory use the GREEN time bus;
+    # RED is kept only as a legacy fallback (e.g. pre-existing red-clock
+    # blueprints or the synthetic test helper).
     clock_net_id = memory_lb.input_ports.get("clock")
-    clock_color: str = "red"  # default (video memory)
+    clock_color: str = "red"  # legacy fallback
     if clock_net_id is not None:
         for net in memory_lb.networks:
             if net.network_id == clock_net_id:
@@ -399,7 +403,8 @@ def _build_timer_for_memory(
     timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
 
     if clock_color == "red":
-        # Video memory — the modded (wrapping) clock drives everything on RED.
+        # Legacy red clock bus (backward compatibility) — the modded
+        # (wrapping) clock drives everything on RED.
         # Wire raw timer (RED) → mod timer (RED input)
         _connect_nets_by_color(
             timer, "red",
@@ -412,9 +417,9 @@ def _build_timer_for_memory(
         # Drop the now-unused "raw" port
         del timer.output_ports["raw"]
     else:
-        # Audio memory — the GREEN time bus carries the *modded* (looping)
-        # clock so the song repeats.  Output it directly on GREEN from the
-        # mod AC — no red→green relay combinator is needed anymore.
+        # Unified GREEN time bus (video + audio memory) — the *modded*
+        # (looping) clock is output directly on GREEN from the mod AC — no
+        # red→green relay combinator is needed anymore.
         mod_green = build_mod_timer(
             max_tick_index + 1, name="SubTickGreen", output_color="green",
         )
@@ -480,14 +485,14 @@ def _declare_memory_ports(lb: LogicalBlueprint, clock_color: str | None = None) 
     parsed from a draftsman string.
 
     The clock port colour is determined by inspecting which network the
-    DCs' input side already belongs to (RED for video memory, GREEN for
-    audio memory).  The data port is always RED (DC outputs carry colour
-    data on the unified signal bus).
+    DCs' input side already belongs to (GREEN for both video and audio
+    memory — unified time bus).  The data port is always RED (DC outputs
+    carry colour data on the unified signal bus).
 
-    When there are no networks (single-frame video with one DC and no
+    When there are no networks (single-frame memory with one DC and no
     wires), networks are created from the DC's endpoints directly.  In that
-    case *clock_color* lets the caller force the expected colour (``"green"``
-    for audio, ``"red"`` for video).  If omitted it defaults to red.
+    case *clock_color* lets the caller force the expected colour (defaults
+    to ``"green"`` — the unified time bus).
     """
     from .logical_blueprint import Endpoint, Network
 
@@ -513,9 +518,8 @@ def _declare_memory_ports(lb: LogicalBlueprint, clock_color: str | None = None) 
     if clock_net_id is None:
         # No network at all — create a clock network containing
         # ALL DC inputs (not just the first one).  Use the caller-supplied
-        # colour when available so single-page audio memory still gets a
-        # green clock bus.
-        color = clock_color or "red"
+        # colour when available; default to the unified green time bus.
+        color = clock_color or "green"
         clock_net = Network(
             network_id=f"{color}_clock",
             color=color,
@@ -1244,6 +1248,11 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                               "piecewise chunked output (independent pieces, wired in game).")
     split_g.add_argument("--output-dir", type=str, default="split_output",
                          help="Directory to write piecewise blueprint files to (default: split_output).")
+    split_g.add_argument("--max-piece-mb", type=float, default=2.0,
+                         help="Target maximum serialised size of each memory piece in MB "
+                              "(default: 2.0). Videos whose memory would exceed this are "
+                              "auto-split into more time fragments so every piece stays "
+                              "near this size.")
     split_g.add_argument("--book", action="store_true",
                          help="Always emit a single blueprint book containing all pieces "
                               "(default: only when the total output is small, roughly <1 MB).")
@@ -1681,9 +1690,8 @@ def _handle_server(args) -> None:
 
 def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
     """Build a timer for combined video+audio, exposing:
-    - ``"clock_red"`` — modded (wrapping) clock on RED (for video memory)
-    - ``"clock_green"`` — modded (wrapping) clock on GREEN (for audio memory,
-      so the audio loops at the song length)
+    - ``"clock"`` — modded (wrapping) clock on GREEN (unified time bus: video
+      and audio memory share the same looping clock at *total_ticks*)
     - ``"sub_tick"`` — sub-tick on RED (for progress bar, from raw clock)
     """
     from .timer import build_raw_timer, build_mod_timer
@@ -1692,28 +1700,19 @@ def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
     timer = build_raw_timer("Timer", with_kick=False)
     timer.output_ports["raw"] = timer.output_ports.pop("out")
 
-    # Mod timer: reads RED clock, wraps at total_ticks+1 → RED
-    mod = build_mod_timer(total_ticks + 1, name="SubTick")
-    timer.merge(mod, entity_prefix="mod_", network_prefix="mod_")
-    timer.output_ports["clock_red"] = timer.output_ports.pop("out")
-
-    # Audio time bus: same modded (looping) clock, output on GREEN directly
-    # from a mod AC — no red→green relay combinator needed.
+    # Unified time bus: the modded (looping) clock is output directly on GREEN
+    # from a mod AC — no red→green relay combinator needed.  Video and audio
+    # memory share this clock (both wrap at total_ticks + 1).
     mod_green = build_mod_timer(total_ticks + 1, name="SubTickGreen", output_color="green")
     timer.merge(mod_green, entity_prefix="modg_", network_prefix="modg_")
-    timer.output_ports["clock_green"] = timer.output_ports.pop("out")
+    timer.output_ports["clock"] = timer.output_ports.pop("out")
 
     # Sub-tick: raw clock % 60 → RED (for progress bar)
     sub = build_mod_timer(60, name="Mod60")
     timer.merge(sub, entity_prefix="sub60_", network_prefix="sub60_")
     timer.output_ports["sub_tick"] = timer.output_ports.pop("out")
 
-    # Wire raw timer (RED) → each mod timer (RED input)
-    _connect_nets_by_color(
-        timer, "red",
-        entity_contains="_inc", port="output",
-        other_entity_contains="mod_sub", other_port="input",
-    )
+    # Wire raw timer (RED) → the green mod timer (RED input)
     _connect_nets_by_color(
         timer, "red",
         entity_contains="_inc", port="output",
@@ -2010,6 +2009,7 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
             deduplicate_cross=args.deduplicate_cross,
             use_cache=use_cache,
             split=True,
+            max_piece_mb=getattr(args, "max_piece_mb", 2.0),
         )
         pieces: list[tuple[str, str]] = [("display", split_result["display"])]
         pieces.extend(split_result["pieces"])
@@ -2104,10 +2104,10 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
         components.append(audio_mem_lb)
         components.append(player_lb)
 
-        connections.append(PortConnection("Timer", "clock_red", video_lb.label, "clock"))
+        connections.append(PortConnection("Timer", "clock", video_lb.label, "clock"))
         _connect_data_ports(connections, video_lb, display_lb)
-        connections.append(PortConnection("Timer", "clock_green", audio_mem_lb.label, "clock"))
-        connections.append(PortConnection("Timer", "clock_green", player_lb.label, "clock"))
+        connections.append(PortConnection("Timer", "clock", audio_mem_lb.label, "clock"))
+        connections.append(PortConnection("Timer", "clock", player_lb.label, "clock"))
         connections.append(PortConnection(audio_mem_lb.label, "data", player_lb.label, "data"))
     else:
         # Video-only timer

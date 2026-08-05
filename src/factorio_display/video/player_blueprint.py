@@ -93,9 +93,10 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
     When *connectors* is True (split-output mode), every chunk also gets:
       * a constant-combinator "connector" to the right of the lamp grid,
         wired into the red data bus and carrying the chunk's identifying
-        signal at value 0 (a visual hint that adds nothing to the bus) —
-        the user wires the matching memory fragment's connector to it;
-      * a non-wired series-label CC noting the chunk index.
+        signal at value 1 with the CC "Output" toggle OFF (visible on the
+        map, but never emitted onto the bus) — the user wires the matching
+        memory fragment's connector to it;
+      * a non-wired series-label CC noting the chunk index (1-based).
     """
     lb = LogicalBlueprint(label=name)
 
@@ -148,10 +149,12 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
                           Endpoint(lamp_grid[py + 1][ch_w - 1], "input"))
 
         # ── Connector CC (split mode): right of the lamp chunk, on the red bus ──
-        # Carries the chunk's identifying signal at value 0 (visual hint, no
-        # numeric pollution).  Wired into the lamp network so it is a usable
-        # in-game connection point to the matching memory fragment.
+        # Carries the chunk's identifying signal at value 1 with the CC
+        # "Output" toggle OFF (visible on the map, no numeric pollution).
+        # Wired into the lamp network so it is a usable in-game connection
+        # point to the matching memory fragment.
         conn_cc_id: str | None = None
+        conn_anchor: str | None = None
         if connectors:
             sig0 = mapping.get_signal(0, 0)
             label_sig: str | None = None
@@ -160,21 +163,48 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
                 if sig0.get("quality") and sig0["quality"] != "normal":
                     label_sig = f"{sig0['name']}@{sig0['quality']}"
             conn_cc_id = f"cc_c{ci}_data"
+            # The connector carries the chunk's identifying signal at value 1
+            # with the CC "Output" toggle OFF (enabled=False) — visible on the
+            # map as a label, but never emitted onto the data bus.
+            conn_props: dict = {"enabled": False}
+            if label_sig:
+                conn_props["signals"] = [{"name": label_sig, "value": 1}]
             lb.add_entity(LogicalEntity(
                 conn_cc_id, "constant-combinator",
-                properties={"signals": [{"name": label_sig, "value": 0}]} if label_sig else {},
+                properties=conn_props,
                 position=(ch_w, cum_y),
             ))
-            # Non-wired series-label CC (chunk index).
+            # Non-wired series-label CC (chunk index + 1 so it shows on the map).
             lb.add_entity(LogicalEntity(
                 f"cc_c{ci}_label", "constant-combinator",
-                properties={"signals": [{"name": "signal-info", "value": ci}]},
+                properties={
+                    "signals": [{"name": "signal-info", "value": ci + 1}],
+                    "enabled": False,
+                },
                 position=(ch_w, cum_y + 1),
             ))
-            # Join the red data bus (network membership).
-            if lamp_grid[0][0]:
+            # Join the red data bus (network membership).  The connector sits
+            # at x=ch_w, one tile right of the top row, so it must be wired to
+            # the *nearest* lamp — the rightmost lamp of the top row.  Wiring
+            # to the top-LEFT lamp (x=0) would span the whole chunk width and
+            # exceed Factorio's 9-tile circuit-wire reach, silently dropping
+            # the wire and leaving the connector disconnected.
+            for px in range(ch_w - 1, -1, -1):
+                if lamp_grid[0][px]:
+                    conn_anchor = lamp_grid[0][px]
+                    break
+            if conn_anchor is None:
+                # Degenerate/partial top row — fall back to any lamp.
+                for row in lamp_grid:
+                    for lid in row:
+                        if lid:
+                            conn_anchor = lid
+                            break
+                    if conn_anchor:
+                        break
+            if conn_anchor:
                 lb.connect("red", Endpoint(conn_cc_id, "input"),
-                           Endpoint(lamp_grid[0][0], "input"))
+                           Endpoint(conn_anchor, "input"))
 
         # Declare data input port for this chunk
         port_name = "data" if num_chunks == 1 else f"data_{ci}"
@@ -197,10 +227,10 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
                                 Endpoint(lamp_grid[py][ch_w - 1], "input"),
                                 Endpoint(lamp_grid[py + 1][ch_w - 1], "input"),
                             ))
-                    if conn_cc_id is not None:
+                    if conn_cc_id is not None and conn_anchor is not None:
                         pairs.append((
                             Endpoint(conn_cc_id, "input"),
-                            Endpoint(lamp_grid[0][0], "input"),
+                            Endpoint(conn_anchor, "input"),
                         ))
                     net.prewired_pairs = pairs
                     break

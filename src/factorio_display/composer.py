@@ -245,9 +245,8 @@ def _merge_components(
                 new_prefixed = prefix + new_net_id
                 if old_net_id != new_prefixed:
                     # Only merge same-colour networks.  Same-named input
-                    # ports can live on different buses — e.g. the video
-                    # memory "clock" on RED vs the audio memory / player
-                    # "clock" on GREEN (clock-bus convention).  Connecting
+                    # ports can live on different buses (e.g. a legacy RED
+                    # clock vs the unified GREEN time bus).  Connecting
                     # across colours corrupts the topology.
                     old_net = next((n for n in merged.networks if n.network_id == old_net_id), None)
                     new_net = next((n for n in merged.networks if n.network_id == new_prefixed), None)

@@ -74,9 +74,9 @@ By default `encode` emits **independently-wireable pieces** instead of one giant
 factorio-display encode ./big.mp4 --width 70 --time-chunks 3 --output-dir out
 ```
 
-- **Video** → `out/display.txt` (the lamp display, with a per-chunk **connector CC** on each red data bus) + `out/memory_c{chunk}_f{frag}.txt` (one memory piece per vertical chunk × time fragment, with **left/right connector CCs** on its data bus plus a non-wired fragment-series label CC).
+- **Video** → `out/display.txt` (the lamp display, with a per-chunk **connector CC** on each red data bus) + `out/memory_c{chunk}_f{frag}.txt` (one memory piece per vertical chunk × time fragment). Each memory bank grows **vertically** (fixed-width rows, horizontal = the width direction) and carries a **top connector CC + an isolated top series-marker CC + a bottom connector CC**, all right-aligned. The time axis is **auto-split** so every memory piece's serialised blueprint stays around **~2 MB** (tune with `--max-piece-mb`); pass `--time-chunks N` for an explicit uniform split instead.
 - **Audio / video soundtrack** → `out/player.txt` (the decoder, with a **bottom-edge connector CC** per rail) + `out/memory_r{rail}.txt` (one memory piece per rail, connector CCs on **both ends**).
-- Connector CCs join the **red data bus** and the **green time/clock bus** (they carry the identifying signal at value 0, so nothing is added to either bus). The player/memory connectors for the same rail share the identifying signal; an isolated `signal-info` CC notes the chunk/rail series number.
+- **Unified bus colours:** the **time/clock bus is GREEN** and the **data bus is RED** (video and audio alike). Connector CCs join **both** buses so a single wire pair links neighbouring pieces. Each connector carries the matching identifying signal at **value 1** with the CC **"Output" toggle OFF** (`is_on=false`) — the signal is visible on the map as a label but is never emitted onto either bus. An isolated `signal-info` CC notes the chunk/rail series number (1-based, also visible).
 
 Pieces are built and materialised in **parallel worker processes**, so generation scales with the number of cores.
 
@@ -313,7 +313,7 @@ The audio decoder drives a 48-speaker matrix (12 semitones × 4 octaves, F3–E7
 6.  **Speakers:** 48 programmable speakers (4 rows × 12 columns), each listening on its assigned `(signal, quality)` pair with `allow_polyphony=True`.
 
 **Total entities:** 48 spk + 85 AC + 12 DC + 13 CC = 158.  
-**Wire colors:** RED = page data bus + sub_tick distribution, GREEN = CC lookup outputs + bell bus. In piecewise output the **time/clock bus is carried on GREEN** (the mod AC outputs it directly — no red→green relay combinator) and the **data bus on RED**, and each connector CC joins both so pieces wire up with red data + green time.
+**Wire colors:** RED = page data bus + sub_tick distribution, GREEN = CC lookup outputs + bell bus. In piecewise output the **time/clock bus is carried on GREEN** (the mod AC outputs it directly — no red→green relay combinator) and the **data bus on RED** (unified for video and audio), and each connector CC joins both so pieces wire up with red data + green time. Connector CCs carry their identifying signal at value 1 with the **"Output" toggle off** — visible on the map, never emitted onto either bus.
 
 ### Audio Normalization
 

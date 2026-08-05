@@ -197,6 +197,86 @@ def _to_fixed_string(bp: Blueprint) -> str:
     return JSON_to_string(d)
 
 
+def _fix_cc_control_behaviors(d: dict) -> None:
+    """Clean up constant-combinator ``control_behavior`` in *place*.
+
+    Draftsman writes CC signals in Factorio 2.0 ``sections`` (signal-group)
+    form.  A missing ``quality`` on a signal filter makes the game treat the
+    signal as the special "any" quality, which a constant combinator does not
+    display (it shows the signal at value 0).  This pass ensures every CC
+    signal filter carries ``quality: "normal"``.  The ``comparator`` key must
+    stay — Factorio 2.0 requires it on CC filters (importing one without it
+    errors with "key comparator not found").
+    """
+    for entity in d.get("blueprint", {}).get("entities", []):
+        if entity.get("name") != "constant-combinator":
+            continue
+        sections = (
+            ((entity.get("control_behavior") or {}).get("sections") or {})
+            .get("sections") or []
+        )
+        if not sections:
+            continue
+        for sec in sections:
+            for f in sec.get("filters", []):
+                f.setdefault("quality", "normal")
+
+
+def _rotate_memory_piece(d: dict) -> None:
+    """Rotate a memory-piece blueprint dict 270 degrees counter-clockwise.
+
+    Memory banks are generated in the display's orientation (wide rows growing
+    downward, north-facing deciders).  The user places each memory piece next
+    to the display after a 90-degree counter-clockwise rotation followed by a
+    further 180 degrees (i.e. 270 degrees counter-clockwise total), so we bake
+    that rotation in: every entity's position is rotated ``(x, y) -> (y, -x)``
+    and every facing combinator's direction is rotated three steps
+    counter-clockwise (north -> east, etc.).  The constant-combinator
+    connectors are re-oriented to keep facing NORTH, so they align with the
+    display chunk's own (north-facing) connector CCs.
+    """
+    for entity in d.get("blueprint", {}).get("entities", []):
+        pos = entity.get("position") or {}
+        x, y = pos.get("x", 0.0), pos.get("y", 0.0)
+        pos["x"], pos["y"] = y, -x
+        if entity.get("name") == "constant-combinator":
+            entity["direction"] = 0  # keep facing north (aligns with display CCs)
+        elif entity.get("name") in (
+            "decider-combinator",
+            "arithmetic-combinator",
+            "selector-combinator",
+        ):
+            # Rotate the facing 270 degrees counter-clockwise.  Draftsman
+            # omits the default (north) direction from the dict, so always
+            # write it.
+            entity["direction"] = (int(entity.get("direction", 0)) + 4) % 16
+
+
+def _display_string(bp: Blueprint) -> str:
+    """Serialise the display blueprint with ``compare_type`` + CC-signal fixes
+    (no rotation — the display stays in world orientation)."""
+    from draftsman.utils import JSON_to_string
+    d = bp.to_dict()
+    _fix_conditions_in_dict(d)
+    _fix_cc_control_behaviors(d)
+    return JSON_to_string(d)
+
+
+def _piece_string(bp: Blueprint) -> str:
+    """Serialise a split-output memory piece with all dict fixes applied.
+
+    Fixes the decider ``compare_type`` fields, normalises constant-combinator
+    signal quality, and rotates the whole piece 270 degrees counter-clockwise
+    (DC facings rotated, CCs kept facing north).
+    """
+    from draftsman.utils import JSON_to_string
+    d = bp.to_dict()
+    _fix_conditions_in_dict(d)
+    _fix_cc_control_behaviors(d)
+    _rotate_memory_piece(d)
+    return JSON_to_string(d)
+
+
 def _fix_blueprint_conditions(bp: Blueprint) -> Blueprint:
     """Convenience wrapper that returns a *new* Blueprint with fixed conditions.
     Prefer :func:`_to_fixed_string` for serialization to avoid re-serializing
@@ -220,20 +300,29 @@ def _layout_and_prewire_memory_bank(
     connector_label: str | None = None,
     fragment_index: int | None = None,
 ) -> None:
-    """Assign compact square positions and deterministic internal prewiring.
+    """Assign positions and deterministic internal prewiring.
 
-    Memory banks are regular: all DC inputs share one red network and all DC
-    outputs share another. We assign a square-ish layout and attach prewired
-    snake connections on both buses so the bank can be treated as one compact
-    block during composition.
+    Memory banks are regular: all DC inputs share one green (time/clock) bus
+    and all DC outputs share one red (data) bus. The bank GROWS VERTICALLY:
+    deciders are packed row-major into rows of fixed width
+    :data:`_MEMORY_BANK_COLS` (horizontal = the bank's width direction), so
+    additional frames (time) stack downward and the last row may be partial.
+    We attach prewired snake connections on both buses so the bank can be
+    treated as one compact block during composition.
 
-    When *connectors* is True (split-output mode), the bank also gets:
-      * constant-combinator connectors on the LEFT and RIGHT, wired into the
-        red *output* (data) bus and carrying *connector_label* at value 0 —
-        a visual hint that adds nothing to the bus, used for in-game wiring
-        to the matching display chunk;
-      * a non-wired series-label CC carrying *fragment_index* (which time
-        fragment this piece is).
+    When *connectors* is True (split-output mode), the bank also gets (all
+    RIGHT-ALIGNED so the rightmost connector lines up with the rightmost
+    decider, following the vertical growth axis):
+      * one bus connector at the TOP, position ``(cols-1, -1)``, wired into
+        BOTH the green clock (time) bus and the red output (data) bus and
+        carrying *connector_label* at value 1 with the CC "Output" toggle off
+        (``enabled=False``) — visible on the map yet contributing nothing to
+        either bus; used for in-game wiring to the matching display chunk;
+      * one isolated series MARKER at the TOP, position ``(cols-2, -1)``,
+        carrying ``fragment_index + 1`` (visible on the map, output disabled);
+      * one bus connector at the BOTTOM, position ``(cols-1, rows*2)``, wired
+        into BOTH buses (same properties as the top connector) so pieces can
+        be daisy-chained downward along the growth direction.
     """
     from ..logical_blueprint import Endpoint, LogicalEntity
 
@@ -241,7 +330,8 @@ def _layout_and_prewire_memory_bank(
     if n == 0:
         return
 
-    cols = max(1, math.ceil(math.sqrt(n)))
+    cols = _MEMORY_BANK_COLS
+    rows = math.ceil(n / cols)
 
     # Decider combinators are 1x2 (north-facing) in this project.
     for idx, dc_id in enumerate(dc_ids):
@@ -252,10 +342,70 @@ def _layout_and_prewire_memory_bank(
             continue
         ent.position = (col, row * 2)
 
+    input_anchor = Endpoint(dc_ids[0], "input")
+    output_anchor = Endpoint(dc_ids[0], "output")
+
+    # ── Connector CCs (split mode) ──────────────────────────────────
+    # The bank grows VERTICALLY, so the connector layout follows the growth
+    # axis: ONE bus connector at the TOP (right-aligned, ``(cols-1, -1)``),
+    # ONE isolated series MARKER at the TOP (right-aligned, ``(cols-2, -1)``)
+    # and ONE bus connector at the BOTTOM (right-aligned, ``(cols-1, rows*2)``).
+    # Both bus connectors join BOTH the green (time) bus and the red (data)
+    # bus, so the user wires matching connector CCs in game to join pieces /
+    # display along the vertical growth direction; the marker is isolated.
+    # All CCs carry their identifying signal at value 1 (so it shows on the
+    # map) with the combinator "Output" toggle OFF (``enabled=False`` →
+    # ``control_behavior.is_on=false``), so the signal is displayed but never
+    # emitted onto either bus.
+    top_conn: str | None = None
+    marker_cc: str | None = None
+    bottom_conn: str | None = None
+    if connectors and connector_label:
+        top_conn = f"{dc_ids[0]}_connT"
+        marker_cc = f"{dc_ids[0]}_marker"
+        bottom_conn = f"{dc_ids[0]}_connB"
+        lb.add_entity(LogicalEntity(
+            top_conn, "constant-combinator",
+            properties={
+                "signals": [{"name": connector_label, "value": 1}],
+                "enabled": False,
+            },
+            position=(cols - 1, -1),
+        ))
+        if fragment_index is not None:
+            lb.add_entity(LogicalEntity(
+                marker_cc, "constant-combinator",
+                properties={
+                    "signals": [{"name": "signal-info", "value": fragment_index + 1}],
+                    "enabled": False,
+                },
+                position=(cols - 2, -1),
+            ))
+        lb.add_entity(LogicalEntity(
+            bottom_conn, "constant-combinator",
+            properties={
+                "signals": [{"name": connector_label, "value": 1}],
+                "enabled": False,
+            },
+            position=(cols - 1, rows * 2),
+        ))
+        # Wiring anchors nearest to each connector (keeps every wire within
+        # Factorio's 9-tile circuit-wire reach): the top connector joins via
+        # the decider at the bank's top-right, the bottom connector via the
+        # last (bottom-right) decider.  Green = time/clock (input) bus, red
+        # = data (output) bus.
+        top_anchor = Endpoint(dc_ids[min(cols - 1, n - 1)], "input")
+        top_anchor_out = Endpoint(dc_ids[min(cols - 1, n - 1)], "output")
+        last_anchor = Endpoint(dc_ids[n - 1], "input")
+        last_anchor_out = Endpoint(dc_ids[n - 1], "output")
+        lb.connect("green", Endpoint(top_conn, "input"), top_anchor)
+        lb.connect("red", Endpoint(top_conn, "input"), top_anchor_out)
+        lb.connect("green", Endpoint(bottom_conn, "input"), last_anchor)
+        lb.connect("red", Endpoint(bottom_conn, "input"), last_anchor_out)
+
     if n <= 1:
         return
 
-    rows = math.ceil(n / cols)
     snake_ids: list[str] = []
     for row in range(rows):
         row_start = row * cols
@@ -271,40 +421,19 @@ def _layout_and_prewire_memory_bank(
             for i in range(len(snake_ids) - 1)
         ]
 
-    input_anchor = Endpoint(dc_ids[0], "input")
-    output_anchor = Endpoint(dc_ids[0], "output")
     for net in lb.networks:
-        if net.color != "red":
-            continue
-        if input_anchor in net.endpoints:
-            net.prewired_pairs = _pairs_for_port("input")
-        elif output_anchor in net.endpoints:
-            output_pairs = _pairs_for_port("output")
-            if connectors and connector_label:
-                left_cc = f"{dc_ids[0]}_ccL"
-                right_cc = f"{dc_ids[0]}_ccR"
-                lb.add_entity(LogicalEntity(
-                    left_cc, "constant-combinator",
-                    properties={"signals": [{"name": connector_label, "value": 0}]},
-                    position=(-1, 0),
-                ))
-                lb.add_entity(LogicalEntity(
-                    right_cc, "constant-combinator",
-                    properties={"signals": [{"name": connector_label, "value": 0}]},
-                    position=(cols, 0),
-                ))
-                if fragment_index is not None:
-                    lb.add_entity(LogicalEntity(
-                        f"{dc_ids[0]}_label", "constant-combinator",
-                        properties={"signals": [{"name": "signal-info", "value": fragment_index}]},
-                        position=(cols, 1),
-                    ))
-                # Join the data bus (network membership) + include in prewired.
-                lb.connect("red", Endpoint(left_cc, "input"), output_anchor)
-                lb.connect("red", Endpoint(right_cc, "input"), output_anchor)
-                output_pairs.append((Endpoint(left_cc, "input"), output_anchor))
-                output_pairs.append((Endpoint(right_cc, "input"), output_anchor))
-            net.prewired_pairs = output_pairs
+        if net.color == "green" and input_anchor in net.endpoints:
+            pairs = _pairs_for_port("input")
+            if top_conn is not None:
+                pairs.append((Endpoint(top_conn, "input"), top_anchor))
+                pairs.append((Endpoint(bottom_conn, "input"), last_anchor))
+            net.prewired_pairs = pairs
+        elif net.color == "red" and output_anchor in net.endpoints:
+            pairs = _pairs_for_port("output")
+            if top_conn is not None:
+                pairs.append((Endpoint(top_conn, "input"), top_anchor_out))
+                pairs.append((Endpoint(bottom_conn, "input"), last_anchor_out))
+            net.prewired_pairs = pairs
 
 def _encode_frames_core(
     kept_frames: list[np.ndarray],
@@ -426,12 +555,13 @@ def _encode_frames_core(
         lb.add_entity(dc)
         dc_ids.append(dc_id)
 
-    # ── Join all inputs together (red), all outputs together (red) ──
-    # This expresses logical network membership — no spatial knowledge.
+    # ── Join all inputs together (green = time/clock bus), all outputs
+    # together (red = data bus).  This expresses logical network membership —
+    # no spatial knowledge.  Unified bus colours: green = time, red = data.
     if len(dc_ids) >= 2:
         first_id = dc_ids[0]
         for dc_id in dc_ids[1:]:
-            lb.connect("red", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
+            lb.connect("green", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
             lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
 
     # ── Declare ports ───────────────────────────────────────────────
@@ -450,9 +580,10 @@ def _encode_frames_core(
     )
 
     if dc_ids:
+        # Clock (time) port lives on the GREEN bus; data port on RED.
         first_input_ep = Endpoint(dc_ids[0], "input")
         for net in lb.networks:
-            if net.color == "red" and first_input_ep in net.endpoints:
+            if net.color == "green" and first_input_ep in net.endpoints:
                 lb.set_input_port("clock", net.network_id)
                 break
         last_output_ep = Endpoint(dc_ids[-1], "output")
@@ -583,11 +714,12 @@ def _encode_frames_logical(
         lb.add_entity(dc)
         dc_ids.append(dc_id)
 
-    # Wire all inputs together (red) and all outputs together (red)
+    # Wire all inputs together (green = time/clock bus) and all outputs
+    # together (red = data bus).  Unified bus colours: green = time, red = data.
     if len(dc_ids) >= 2:
         first_id = dc_ids[0]
         for dc_id in dc_ids[1:]:
-            lb.connect("red", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
+            lb.connect("green", Endpoint(first_id, "input"), Endpoint(dc_id, "input"))
             lb.connect("red", Endpoint(first_id, "output"), Endpoint(dc_id, "output"))
 
     # Declare ports
@@ -596,7 +728,7 @@ def _encode_frames_logical(
     if dc_ids:
         first_input_ep = Endpoint(dc_ids[0], "input")
         for net in lb.networks:
-            if net.color == "red" and first_input_ep in net.endpoints:
+            if net.color == "green" and first_input_ep in net.endpoints:
                 lb.set_input_port("clock", net.network_id)
                 break
         last_output_ep = Endpoint(dc_ids[-1], "output")
@@ -1493,7 +1625,68 @@ def _build_split_piece_worker(payload: bytes) -> tuple[str, str]:
         connectors=True,
         fragment_index=data.get("fragment_index"),
     )
-    return data["label"], to_draftsman(lb).to_string()
+    return data["label"], _piece_string(to_draftsman(lb))
+
+
+# Calibrated estimate of the compressed blueprint-string size per
+# ``(DC + emitted colour output-signal)`` unit.  Measured on real 28-wide
+# display-chunk content with the project signal pool: ~14.2 chars/unit for
+# dense content, ~12.1 for sparse.  Rounded up to stay safely *under* the
+# target piece size even for dense video.
+_CHARS_PER_UNIT = 15.0
+
+# Fixed width (number of deciders per row) of a memory bank.  Memory banks
+# grow VERTICALLY (one row per packing row; growth = time/frames) while the
+# horizontal axis is the bank's width.  A fixed width (rather than a square
+# ``ceil(sqrt(n))`` packing, which grows in both directions) keeps the bank
+# wide and lets it grow purely downward, with a possibly-partial last row.
+_MEMORY_BANK_COLS = 10
+
+
+def _plan_time_fragments(
+    kept_frames: list[np.ndarray],
+    num_chunks: int,
+    chunk_height: int,
+    total_height: int,
+    target_chars: float,
+) -> list[tuple[int, int]]:
+    """Greedily pack frames into time fragments so each memory piece's
+    serialised blueprint is roughly *target_chars* characters long.
+
+    Per-frame cost is estimated from the number of DCs (one per frame) plus
+    the number of colour output signals (non-zero pixels).  Because every
+    vertical chunk shares the same fragment boundaries, the estimate uses the
+    *worst-case* (max over vertical chunks) non-zero pixel count per frame,
+    so no single chunk's piece exceeds the target by much.
+
+    Returns a list of ``(start, end)`` frame-index ranges.
+    """
+    total = len(kept_frames)
+    if total == 0:
+        return []
+    costs: list[float] = []
+    for fr in kept_frames:
+        worst = 0
+        for ci in range(num_chunks):
+            y0 = ci * chunk_height
+            y1 = min(y0 + chunk_height, total_height)
+            nz = int(np.count_nonzero(np.any(fr[y0:y1] != 0, axis=2)))
+            if nz > worst:
+                worst = nz
+        costs.append(_CHARS_PER_UNIT * (1.0 + worst))
+
+    frags: list[tuple[int, int]] = []
+    start = 0
+    acc = 0.0
+    for i, cost in enumerate(costs):
+        if acc + cost > target_chars and i > start:
+            frags.append((start, i))
+            start = i
+            acc = 0.0
+        acc += cost
+    if start < total:
+        frags.append((start, total))
+    return frags
 
 
 def encode_frames_split(
@@ -1508,8 +1701,9 @@ def encode_frames_split(
     expected_frames: int | None = None,
     source_id: str = "",
     *,
-    time_chunks: int = 2,
+    time_chunks: int = 1,
     chunk_workers: int | None = None,
+    max_piece_mb: float = 2.0,
 ) -> dict:
     """Encode a video into independently-wireable pieces (split output).
 
@@ -1517,11 +1711,18 @@ def encode_frames_split(
     grid of pieces — one per (vertical display chunk × time fragment) — and
     the display as a single blueprint with per-chunk connector CCs.
 
-    Each memory piece carries constant-combinator connectors on the LEFT and
-    RIGHT of its data bus (carrying the chunk's identifying signal at value 0,
-    so they add nothing to the bus) plus a non-wired fragment-series label CC.
-    The display chunk connectors carry the same identifying signal.  The user
-    places the display and each piece, then wires matching connectors in game.
+    Each memory piece carries a bus connector at the TOP and one at the BOTTOM
+    of its bank (both carrying the chunk's identifying signal at value 1,
+    visible on the map, with the CC "Output" toggle off so nothing is added
+    to the bus, and both joining the green time bus and the red data bus) plus
+    an isolated fragment-series marker CC at the TOP.  The display chunk
+    connectors carry the same identifying signal.  The user places the display
+    and each piece, then wires matching connectors in game.
+
+    **Fragment sizing** — by default (``time_chunks <= 1``) the time axis is
+    auto-split so every memory piece's serialised blueprint is ~``max_piece_mb``
+    MB (default 2.0 MB), estimated from the frame content.  Pass
+    ``time_chunks > 1`` for the legacy explicit uniform split.
 
     Each piece is built and materialised (``to_draftsman`` + ``to_string``)
     in a worker process, so the dominant cost parallelises across pieces.
@@ -1590,14 +1791,28 @@ def encode_frames_split(
     display_lb = build_display_logical(
         f"{output_name} Display", total_w, total_h, connectors=True,
     )
-    display_str = to_draftsman(display_lb).to_string()
+    display_str = _display_string(to_draftsman(display_lb))
 
     # ── Vertical chunks × time fragments ────────────────────────────
     from ..integer2signal.mapping import compute_chunking
     chunk_height, num_chunks = compute_chunking(total_w, total_h, signal_pool, qualities)
 
-    time_chunks = max(1, time_chunks)
-    fragment_size = math.ceil(total_input / time_chunks)
+    # Fragment boundaries (frame-index ranges), shared across vertical chunks.
+    #  * time_chunks > 1  → legacy explicit uniform split.
+    #  * otherwise        → auto-split so each piece is ~max_piece_mb MB.
+    if time_chunks > 1:
+        fragment_size = math.ceil(total_input / time_chunks)
+        frag_ranges = [
+            (f * fragment_size, min((f + 1) * fragment_size, total_input))
+            for f in range(time_chunks)
+        ]
+        frag_ranges = [r for r in frag_ranges if r[0] < r[1]]
+    else:
+        frag_ranges = _plan_time_fragments(
+            kept_frames, num_chunks, chunk_height, total_h,
+            max(0.01, max_piece_mb) * 1_000_000,
+        )
+    effective_time_chunks = len(frag_ranges)
 
     payloads: list[bytes] = []
     for ci in range(num_chunks):
@@ -1610,11 +1825,7 @@ def encode_frames_split(
             "qualities": ch_mapping.qualities,
             "signal_pool": ch_mapping.base_signals,
         }
-        for f in range(time_chunks):
-            start = f * fragment_size
-            end = min(start + fragment_size, total_input)
-            if start >= end:
-                continue
+        for f, (start, end) in enumerate(frag_ranges):
             chunk_frames = [fr[y0:y1, :, :] for fr in kept_frames[start:end]]
             frag_ticks = tick_ranges[start:end]
             last_tick = frag_ticks[-1][1] if frag_ticks else 0
@@ -1627,14 +1838,14 @@ def encode_frames_split(
                 "mapping_params": mp,
                 "clock": CLOCK_SIGNAL,
                 "current_tick": last_tick + 1,
-                "label_suffix": f" [chunk {ci + 1}/{num_chunks}, frag {f + 1}/{time_chunks}]",
+                "label_suffix": f" [chunk {ci + 1}/{num_chunks}, frag {f + 1}/{effective_time_chunks}]",
                 "fragment_index": f,
             }))
 
     workers = chunk_workers or os.cpu_count() or 1
     workers = min(workers, len(payloads)) if payloads else 1
     sys.stderr.write(
-        f"Splitting into {num_chunks} vertical chunk(s) × {time_chunks} time "
+        f"Splitting into {num_chunks} vertical chunk(s) × {effective_time_chunks} time "
         f"fragment(s) = {len(payloads)} memory piece(s), built with "
         f"{workers} worker(s)...\n"
     )
@@ -1656,7 +1867,7 @@ def encode_frames_split(
         "display": display_str,
         "pieces": pieces,
         "num_chunks": num_chunks,
-        "time_chunks": time_chunks,
+        "time_chunks": effective_time_chunks,
     }
 
 
@@ -1681,6 +1892,7 @@ def encode_video(
     deduplicate_cross: bool = False,
     use_cache: bool = False,
     split: bool = False,
+    max_piece_mb: float = 2.0,
 ) -> Blueprint:
     """Encode a video file (``.mp4``, ``.avi``, ``.mov``, etc.).
 
@@ -1736,6 +1948,7 @@ def encode_video(
                 total_width=resolved_w, total_height=resolved_h,
                 expected_frames=expected_frames, source_id=source_id,
                 time_chunks=time_chunks, chunk_workers=chunk_workers,
+                max_piece_mb=max_piece_mb,
             )
         if time_chunks > 1 or deduplicate_cross:
             result = encode_frames_chunked(
@@ -1962,6 +2175,7 @@ def encode_auto(
     deduplicate_cross: bool = False,
     use_cache: bool = False,
     split: bool = False,
+    max_piece_mb: float = 2.0,
 ) -> Blueprint:
     """Auto-detect input type and call the appropriate encoder.
 
@@ -1979,6 +2193,9 @@ def encode_auto(
         "deduplicate_cross": deduplicate_cross,
         "use_cache": use_cache,
     }
+    # Split mode is video-only, and only it consumes the piece-size target.
+    if split:
+        chunk_kwargs["max_piece_mb"] = max_piece_mb
 
     if path.is_dir():
         pngs = sorted(path.glob("*.png"))

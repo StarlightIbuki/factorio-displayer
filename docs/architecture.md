@@ -315,29 +315,41 @@ Call this in every test that produces a blueprint string.
 
 | Wire  | Carries                              |
 |-------|--------------------------------------|
-| RED   | Unified signal bus — clock, sub-tick, DC page data, display lamp signals, progress bar |
-| GREEN | Audio decoder: CC lookup outputs, bell bus, intermediate signals; **audio time/clock bus in piecewise output** |
+| RED   | Unified signal bus — data, sub-tick, DC page data, display lamp signals, progress bar |
+| GREEN | **Time/clock bus (video + audio)**; audio decoder CC lookup outputs, bell bus, intermediate signals |
 
-In the video all-in-one blueprint, the RED wire carries everything —
-the raw clock (self-loop), the modulo clock (sub-tick for DC gating),
-DC outputs (colour data), display lamp inputs, and progress bar.
+The **time/clock bus is GREEN and the data bus is RED** for both video and
+audio memory (unified schema).  The mod timer outputs the looping clock
+**directly on GREEN** (`build_mod_timer(..., output_color="green")`) — the
+old red→green `build_clock_bridge` relay combinator has been removed.  The
+sub-tick signal for the progress bar stays on RED.  In the legacy video
+all-in-one blueprint, the RED wire also carried the raw clock self-loop
+internally.
 
 ### Piecewise (chunked) output — connectors & the time bus
 
 `encode` emits independent pieces by default (book for small outputs,
 `--all-in-one` for the legacy merged blueprint — not recommended):
 
-- **Video memory pieces**: left/right connector CCs on the red data bus.
+- **Video memory pieces**: the memory bank grows **vertically** (deciders
+  packed in fixed-width rows — horizontal is the width direction) and carries
+  a **top connector CC + an isolated top series-marker CC + a bottom
+  connector CC**, all right-aligned.  The top and bottom connectors each
+  join the green **time/clock bus** *and* the red **data** bus.  The time
+  axis is **auto-split** so each memory piece's serialised blueprint stays
+  near `--max-piece-mb` (default ~2 MB); `--time-chunks N` forces a uniform
+  split.
 - **Audio memory pieces**: connector CCs on both ends, each joining the
   green **time/clock bus** *and* the red **data** bus.
 - **Audio player**: one bottom-edge connector CC per rail, joining the same
-  two buses.  The mod timer outputs the looping clock **directly on GREEN**
-  (`build_mod_timer(..., output_color="green")`) — the old red→green
-  `build_clock_bridge` relay combinator has been removed.
+  two buses.
+- **Display**: one connector CC per chunk on the red data bus.
 
-All connector CCs carry their identifying signal at **value 0** (dropped by
-Factorio, so no bus pollution); an isolated `signal-info` CC notes the
-chunk/rail series number.
+All connector CCs carry their identifying signal at **value 1** with the CC
+**"Output" toggle OFF** (`enabled=False` → `control_behavior.is_on=false`) —
+visible on the map as a label, but never emitted onto either bus.  An
+isolated (non-wired) `signal-info` CC notes the chunk/rail series number
+(1-based, also output-disabled).
 
 ## Logical Blueprint DSL (preferred authoring format)
 
