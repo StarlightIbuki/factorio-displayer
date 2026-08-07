@@ -239,16 +239,21 @@ def _layout_and_prewire_audio_bank(
 ) -> None:
     """Assign compact positions and deterministic internal bus prewiring.
 
-    When *connectors* is True (split-output mode), the bank also gets:
-      * constant-combinator connectors on the LEFT and RIGHT, each wired
-        into BOTH the green clock (time) bus and the red output (data) bus
-        and carrying *connector_label* at value 1 with the CC "Output" toggle
-        OFF (``enabled=False``) — visible on the map but adding nothing to
-        either bus, used for in-game wiring to the player (or the neighbouring
-        memory chunk);
-      * a non-wired series-label CC carrying ``fragment_index + 1``.
+    When *connectors* is True (split-output mode), the whole bank is rotated
+    90° CCW — matching the player's orientation — so the page grid becomes a
+    horizontal strip, and constant-combinator connectors are placed at the
+    LEFT and RIGHT ends of the strip.  Each connector is wired into BOTH the
+    green clock (time) bus and the red output (data) bus and carries
+    *connector_label* at value 1 with the CC "Output" toggle OFF
+    (``enabled=False``) — visible on the map but adding nothing to either
+    bus, used for in-game wiring to the timer (left) and player (right).
+    A non-wired series-label CC carries ``fragment_index + 1``.
+
+    The connectors are attached BEFORE the prewired pairs are set: joining a
+    new endpoint to a pre-wired network wipes its prewired pairs, so the
+    full deterministic wiring (snake + connector pairs) is assigned last.
     """
-    from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
+    from ..logical_blueprint import Endpoint  # pylint: disable=import-outside-toplevel
 
     n = len(dc_ids)
     if n == 0:
@@ -258,27 +263,61 @@ def _layout_and_prewire_audio_bank(
     # rail spacing and never overlaps the neighbouring rail's player (a
     # sqrt-based width grows to 15+ columns for 200+ pages).
     cols = min(12, max(1, math.ceil(math.sqrt(n))))
+    rows = math.ceil(n / cols)
 
+    # ── Place DCs ───────────────────────────────────────────────
+    # All-in-one: north-facing grid ``(col, row*2)``.  Split mode: rotate the
+    # whole grid 90° CCW (matching the player) so each north 1×2 DC at
+    # ``(col, row*2)`` becomes a west 2×1 DC at ``(-(row*2+2), col)`` — the
+    # bank is now a horizontal strip ~``2*rows`` tiles wide × ``cols`` tall,
+    # aligned with the rotated player.
     for idx, dc_id in enumerate(dc_ids):
-        row = idx // cols
-        col = idx % cols
         ent = lb.entities.get(dc_id)
         if ent is None:
             continue
-        ent.position = (col, row * 2)
+        row, col = idx // cols, idx % cols
+        if connectors:
+            ent.position = (-(row * 2 + 2), col)
+            ent.direction = 12  # west (90° CCW from north)
+        else:
+            ent.position = (col, row * 2)
 
     input_anchor = Endpoint(dc_ids[0], "input")
     output_anchor = Endpoint(dc_ids[0], "output")
 
+    # ── Connectors (split mode only) — attach FIRST ─────────────
+    conn_eps: tuple[str, str, str, str] | None = None
+    if connectors and connector_label:
+        conn_eps = _attach_rotated_connectors(
+            lb, dc_ids, cols, rows, input_anchor, output_anchor,
+            connector_label, fragment_index,
+        )
+
+    def _conn_pairs(color: str) -> list[tuple[Endpoint, Endpoint]]:
+        if conn_eps is None:
+            return []
+        left, right, left_dc, right_dc = conn_eps
+        if color == "green":
+            return [
+                (Endpoint(left, "input"), Endpoint(left_dc, "input")),
+                (Endpoint(right, "input"), Endpoint(right_dc, "input")),
+            ]
+        return [
+            (Endpoint(left, "input"), Endpoint(left_dc, "output")),
+            (Endpoint(right, "input"), Endpoint(right_dc, "output")),
+        ]
+
     if n <= 1:
-        # A single page has no snake bus, but the connector CCs still need
-        # to join the (explicitly declared) clock/data networks.
-        if connectors and connector_label:
-            _attach_audio_connectors(lb, dc_ids[0], cols, input_anchor, output_anchor,
-                                     connector_label, fragment_index)
+        # A single page has no snake bus, but the connector CCs still join
+        # the (explicitly declared) clock/data networks.
+        for net in lb.networks:
+            if net.color == "green" and input_anchor in net.endpoints:
+                net.prewired_pairs = _conn_pairs("green")
+            elif net.color == "red" and output_anchor in net.endpoints:
+                net.prewired_pairs = _conn_pairs("red")
         return
 
-    rows = math.ceil(n / cols)
+    # ── Snake bus pairs (grid order — rotation is rigid, wires stay short) ─
     snake_ids: list[str] = []
     for row in range(rows):
         row_start = row * cols
@@ -299,56 +338,51 @@ def _layout_and_prewire_audio_bank(
 
     for net in lb.networks:
         if net.color == "green" and input_anchor in net.endpoints:
-            net.prewired_pairs = in_pairs
+            net.prewired_pairs = list(in_pairs) + _conn_pairs("green")
         elif net.color == "red" and output_anchor in net.endpoints:
-            net.prewired_pairs = out_pairs
-
-    if connectors and connector_label:
-        _attach_audio_connectors(lb, dc_ids[0], cols, input_anchor, output_anchor,
-                                 connector_label, fragment_index)
+            net.prewired_pairs = list(out_pairs) + _conn_pairs("red")
 
 
-def _attach_audio_connectors(
+def _attach_rotated_connectors(
     lb: "LogicalBlueprint",  # noqa: F821
-    first_dc: str,
+    dc_ids: list[str],
     cols: int,
+    rows: int,
     input_anchor: "Endpoint",  # noqa: F821
     output_anchor: "Endpoint",  # noqa: F821
     connector_label: str,
     fragment_index: int | None,
-) -> None:
-    """Add left/right connector CCs joining the green clock + red data buses.
+) -> tuple[str, str, str, str]:
+    """Add left/right connector CCs to a 90°-CCW-rotated audio-memory bank.
 
-    Each connector is wired into both the clock (green) and data (red)
-    networks via the first DC's input/output endpoints, and added to those
-    networks' prewired pairs so the wires materialise deterministically.
+    The strip's DC grid spans post columns ``-(rows*2) .. -2`` on row 0; the
+    LEFT connector sits one tile outside the left end and the RIGHT connector
+    one tile outside the right end.  Each joins the green clock (time) bus
+    and the red output (data) bus via the nearest DC on that row.
 
-    The connectors carry the identifying signal at value 1 with the CC
-    "Output" toggle OFF (``enabled=False``) — visible on the map but not
-    emitted onto either bus.
+    Returns ``(left_id, right_id, left_dc, right_dc)`` so the caller can fold
+    the connector wires into the buses' prewired pairs.
     """
     from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
 
-    left_cc = f"{first_dc}_ccL"
-    right_cc = f"{first_dc}_ccR"
-    # Connectors carry the identifying signal at value 1 with the CC "Output"
-    # toggle OFF (enabled=False) — visible on the map, never emitted onto
-    # either bus.
+    first_dc = dc_ids[0]
+    left_id = f"{first_dc}_ccL"
+    right_id = f"{first_dc}_ccR"
     lb.add_entity(LogicalEntity(
-        left_cc, "constant-combinator",
+        left_id, "constant-combinator",
         properties={
             "signals": [{"name": connector_label, "value": 1}],
             "enabled": False,
         },
-        position=(-1, 0),
+        position=(-(rows * 2 + 1), 0),  # left of the strip's top row
     ))
     lb.add_entity(LogicalEntity(
-        right_cc, "constant-combinator",
+        right_id, "constant-combinator",
         properties={
             "signals": [{"name": connector_label, "value": 1}],
             "enabled": False,
         },
-        position=(cols, 0),
+        position=(0, 0),  # right of the strip's top row
     ))
     if fragment_index is not None:
         lb.add_entity(LogicalEntity(
@@ -357,28 +391,20 @@ def _attach_audio_connectors(
                 "signals": [{"name": "signal-info", "value": fragment_index + 1}],
                 "enabled": False,
             },
-            position=(cols, 1),
+            position=(0, 1),  # just right of the strip, below the right connector
         ))
-
-    # Join the green clock (time) bus — via the first DC's input.
-    lb.connect("green", Endpoint(left_cc, "input"), input_anchor)
-    lb.connect("green", Endpoint(right_cc, "input"), input_anchor)
-    # Join the red data bus — via the first DC's output.
-    lb.connect("red", Endpoint(left_cc, "input"), output_anchor)
-    lb.connect("red", Endpoint(right_cc, "input"), output_anchor)
-
-    # Include the connector wires in the prewired pairs of both buses.
-    for net in lb.networks:
-        if net.color == "green" and input_anchor in net.endpoints:
-            pairs = list(net.prewired_pairs or [])
-            pairs.append((Endpoint(left_cc, "input"), input_anchor))
-            pairs.append((Endpoint(right_cc, "input"), input_anchor))
-            net.prewired_pairs = pairs
-        elif net.color == "red" and output_anchor in net.endpoints:
-            pairs = list(net.prewired_pairs or [])
-            pairs.append((Endpoint(left_cc, "input"), output_anchor))
-            pairs.append((Endpoint(right_cc, "input"), output_anchor))
-            net.prewired_pairs = pairs
+    # Nearest DCs on the strip's top row: right = first DC (post tile (-2, 0),
+    # spanning tiles -2..-1), left = the DC from the last grid row / first
+    # column → post tile (-(rows*2), 0) spanning -(rows*2)..-(rows*2+1).
+    right_dc = first_dc
+    left_dc = dc_ids[(rows - 1) * cols] if rows > 1 else first_dc
+    # Join the green clock (time) bus — via the nearest DC's input.
+    lb.connect("green", Endpoint(left_id, "input"), Endpoint(left_dc, "input"))
+    lb.connect("green", Endpoint(right_id, "input"), Endpoint(right_dc, "input"))
+    # Join the red data bus — via the nearest DC's output.
+    lb.connect("red", Endpoint(left_id, "input"), Endpoint(left_dc, "output"))
+    lb.connect("red", Endpoint(right_id, "input"), Endpoint(right_dc, "output"))
+    return left_id, right_id, left_dc, right_dc
 
 
 # ── main encoder entry point ───────────────────────────────────────────
@@ -466,7 +492,8 @@ def encode_audio_memory(
     if own_blueprint:
         blueprint = Blueprint()
         blueprint.label = f"Audio Memory: {output_name}"
-        blueprint.icons = ["signal-0"]
+        from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
+        _set_blueprint_icon(blueprint, "constant-combinator")
 
     # Each entry: (dc_id, page_idx, tick_start, conditions, outputs)
     PageEntry = tuple[str, int, int, list, list]
@@ -482,11 +509,16 @@ def encode_audio_memory(
         tick_end = (min(page_end_cell, total_cells) - 1) // cells_per_tick
 
         # Condition: clock >= tick_start AND clock <= tick_end
+        # Draftsman's Condition.compare_type defaults to "or" and to_dict()
+        # omits default values; Factorio then joins the two conditions with
+        # OR, making every DC fire on every tick.  Set "and" explicitly on
+        # BOTH conditions so the range gates correctly.
         conditions = [
             DeciderCombinator.Condition(
                 first_signal={"name": clock_signal},
                 comparator=">=",
                 constant=tick_start,
+                compare_type="and",
             ),
             DeciderCombinator.Condition(
                 first_signal={"name": clock_signal},
@@ -1018,7 +1050,8 @@ def _encode_midi(
     with _cl.redirect_stdout(_io.StringIO()):
         combined = Blueprint()
         combined.label = f"Audio: {path}"
-        combined.icons = ["signal-0"]
+        from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
+        _set_blueprint_icon(combined, "constant-combinator")
 
         # Build rails one at a time: player + memory per rail, side by side.
         # Memory sits directly above its player at the same X offset.
@@ -1364,6 +1397,7 @@ def encode_audio_to_logical(
     )
 
     lb = LogicalBlueprint(label=f"Audio Memory: {output_name}")
+    lb.icon = "constant-combinator"  # constant-combinator icon in the book
 
     dc_ids: list[str] = []
     created_count = 0
@@ -1377,9 +1411,14 @@ def encode_audio_to_logical(
         tick_end = (min(page_end_cell, total_cells) - 1) // cells_per_tick
 
         # Build conditions and outputs
+        # Both conditions carry compare_type="and": Draftsman's Condition
+        # default is "or" and missing compare_type is omitted, so Factorio
+        # would OR the range and fire every DC on every tick (noise).
         conditions = [
-            {"first": clock_signal, "op": ">=", "constant": tick_start},
-            {"first": clock_signal, "op": "<=", "constant": tick_end},
+            {"first": clock_signal, "op": ">=", "constant": tick_start,
+             "compare_type": "and"},
+            {"first": clock_signal, "op": "<=", "constant": tick_end,
+             "compare_type": "and"},
         ]
 
         outputs: list[dict] = []
@@ -1469,6 +1508,44 @@ def encode_audio_to_logical(
     return lb
 
 
+def _rotate_player_90_ccw(d: dict) -> None:
+    """Rotate a player-piece blueprint dict 90 degrees counter-clockwise.
+
+    The player is laid out as a vertical strip (speakers on top, connector
+    at the bottom-right); the user places it next to the (270° CCW rotated)
+    memory banks after a 90° CCW rotation, so we bake that rotation in:
+    every entity's position is rotated ``(x, y) -> (-y, x)`` and every facing
+    combinator's direction is rotated one step counter-clockwise (north ->
+    west, east -> north, ...).  The connector constant combinators are
+    re-oriented to keep facing NORTH, so they align with the memory /
+    display connector CCs.
+    """
+    for entity in d.get("blueprint", {}).get("entities", []):
+        pos = entity.get("position") or {}
+        x, y = pos.get("x", 0.0), pos.get("y", 0.0)
+        pos["x"], pos["y"] = -y, x
+        if entity.get("name") == "constant-combinator":
+            entity["direction"] = 0  # keep facing north (aligns with display CCs)
+        elif entity.get("name") in (
+            "decider-combinator",
+            "arithmetic-combinator",
+            "selector-combinator",
+        ):
+            # Rotate the facing 90 degrees counter-clockwise.  Draftsman
+            # omits the default (north) direction from the dict, so always
+            # write it.
+            entity["direction"] = (int(entity.get("direction", 0)) + 12) % 16
+
+
+def _player_string(bp: Any) -> str:
+    """Serialise a split-output player piece (with the 90° CCW rotation)."""
+    from draftsman.utils import JSON_to_string  # pylint: disable=import-outside-toplevel
+
+    d = bp.to_dict()
+    _rotate_player_90_ccw(d)
+    return JSON_to_string(d)
+
+
 def encode_audio_split(
     int_data_list: Sequence[Sequence[Sequence[int]]],
     instruments: Sequence[str],
@@ -1510,7 +1587,7 @@ def encode_audio_split(
         ticks_per_page=list(rail_ticks_per_page) if rail_ticks_per_page else None,
         connectors=True,
     )
-    player_str = to_draftsman(player_lb).to_string()
+    player_str = _player_string(to_draftsman(player_lb))
 
     pieces: list[tuple[str, str]] = []
     for ri, int_data in enumerate(int_data_list):
@@ -1532,8 +1609,12 @@ def encode_audio_split(
         mem_str = to_draftsman(mem).to_string()
         pieces.append((f"memory_r{ri}", mem_str))
 
+    total_ticks = max(
+        (len(td) - 1 for td in int_data_list if td), default=0,
+    )
     return {
         "player": player_str,
         "pieces": pieces,
         "num_rails": num_rails,
+        "total_ticks": total_ticks,
     }

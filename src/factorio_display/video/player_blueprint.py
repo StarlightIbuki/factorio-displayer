@@ -99,6 +99,7 @@ def _build_display_chunked(  # pylint: disable=too-many-locals,too-many-argument
       * a non-wired series-label CC noting the chunk index (1-based).
     """
     lb = LogicalBlueprint(label=name)
+    lb.icon = "display-panel"  # show a display-panel icon in the blueprint book
 
     cum_y = 0
     margin = 0  # lamps are 1x1, no overlap risk

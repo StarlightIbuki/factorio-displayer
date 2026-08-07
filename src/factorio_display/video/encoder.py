@@ -495,6 +495,7 @@ def _encode_frames_core(
         unique_frames = [(resized, list(ranges)) for resized, ranges in frame_entries]
 
     lb = LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
+    lb.icon = "constant-combinator"  # constant-combinator icon in the book
 
     # ── Build DC entities — no spatial layout (that's the composer's job).
     # All DCs join a shared red network: inputs star-joined, outputs star-joined.
@@ -656,6 +657,7 @@ def _encode_frames_logical(
         unique_frames = [(resized, list(ranges)) for resized, ranges in frame_entries]
 
     lb = LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
+    lb.icon = "constant-combinator"  # constant-combinator icon in the book
 
     dc_ids: list[str] = []
     for gate_num, (resized, ranges) in enumerate(unique_frames, start=1):
@@ -1093,7 +1095,8 @@ def encode_frames(
         sys.stderr.write("No frames to encode.\n")
         bp = Blueprint()
         bp.label = f"Video Memory: {output_name}"
-        bp.icons = ["signal-0"]
+        from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
+        _set_blueprint_icon(bp, "constant-combinator")
         return bp
 
     # ==================================================================
@@ -1422,7 +1425,8 @@ def encode_frames_chunked(
         sys.stderr.write("No frames to encode.\n")
         bp = Blueprint()
         bp.label = f"Video Memory: {output_name}"
-        bp.icons = ["signal-0"]
+        from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
+        _set_blueprint_icon(bp, "constant-combinator")
         return {"full": bp, "chunks": []}
 
     # ── Determine signal pool for mapping ─────────────────────────────
@@ -1868,6 +1872,7 @@ def encode_frames_split(
         "pieces": pieces,
         "num_chunks": num_chunks,
         "time_chunks": effective_time_chunks,
+        "total_ticks": current_tick - 1,  # max tick index across the whole video
     }
 
 

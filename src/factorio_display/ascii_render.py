@@ -85,13 +85,15 @@ def _port_offset(direction: int, side: str) -> tuple[int, int]:
         if direction == 4:      # east
             return (1, 0)
         if direction == 12:     # west
-            return (-1, 0)
+            return (0, 0)
         if direction == 0:      # north
             return (0, 0)
         return (0, 1)           # south (8) or diagonal fallback
+    if direction == 12:         # west — input on the EAST tile
+        return (1, 0)
     if direction == 0:          # north — input on the bottom half
         return (0, 1)
-    return (0, 0)               # south/east/west — input on the anchor tile
+    return (0, 0)               # south/east — input on the anchor tile
 
 
 def _entity_glyph(name: str, direction: int) -> list[tuple[tuple[int, int], str]]:
@@ -120,7 +122,7 @@ def _entity_glyph(name: str, direction: int) -> list[tuple[tuple[int, int], str]
     if direction == 4:      # east
         return [((0, 0), letter), ((1, 0), ">")]
     if direction == 12:     # west
-        return [((-1, 0), "<"), ((0, 0), letter)]
+        return [((0, 0), "<"), ((1, 0), letter)]
     if direction == 0:      # north
         return [((0, 0), "^"), ((0, 1), letter)]
     return [((0, 0), letter), ((0, 1), "V")]  # south (8) or diagonal fallback

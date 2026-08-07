@@ -70,7 +70,12 @@ function _direction(ent) {
   return ent.direction ?? 0;
 }
 
-/** Glyph cells [[dx, dy, char], ...] relative to the entity's anchor tile. */
+/** Glyph cells [[dx, dy, char], ...] relative to the entity's anchor tile.
+ * Combinators are 1x2 (north/south) or 2x1 (east/west); the letter sits at the
+ * INPUT end and the direction marker at the OUTPUT end (the tile it faces).
+ * For north/south the anchor (tile_position) is the TOP tile, so:
+ *   north -> "^" at the top tile (output), letter at the bottom tile (input)
+ *   south -> letter at the top tile (input), "V" at the bottom tile (output) */
 function _glyph(name, dir) {
   const info = _ENTITY_LETTERS[name];
   if (!info) return [[0, 0, "."]];
@@ -79,8 +84,24 @@ function _glyph(name, dir) {
   if (kind === "one") return [[0, 0, letter]];
   if (dir === 4) return [[0, 0, letter], [1, 0, ">"]];
   if (dir === 12) return [[-1, 0, "<"], [0, 0, letter]];
-  if (dir === 0) return [[0, -1, "^"], [0, 0, letter]];
+  if (dir === 0) return [[0, 0, "^"], [0, 1, letter]];
   return [[0, 0, letter], [0, 1, "V"]];
+}
+
+/** Offset of a combinator's input/output circuit port from its anchor tile.
+ * A port sits at the centre of its own 1-tile end: for a north-facing decider
+ * the INPUT rides the BOTTOM half and the OUTPUT the TOP half (and
+ * analogously for the other directions).  Non-dual entities (constant
+ * combinators, lamps, speakers) have a single port at the anchor. */
+function _portOffset(dir, side) {
+  if (side === "output") {
+    if (dir === 4) return [1, 0];   // east → output right
+    if (dir === 12) return [-1, 0]; // west → output left
+    if (dir === 0) return [0, 0];   // north → output top (anchor)
+    return [0, 1];                  // south → output bottom
+  }
+  if (dir === 0) return [0, 1];     // north → input bottom
+  return [0, 0];                    // south/east/west → input on the anchor
 }
 
 /**
@@ -175,7 +196,10 @@ function _renderGrid(cells, coords = true) {
   for (const [x, y] of keys) rows[y - minY][x - minX] = cells[`${x},${y}`];
   const lines = [];
   if (coords) {
-    lines.push("     " + Array.from({ length: width }, (_, i) => String((i + minX) % 10)).join(""));
+    // Python-style modulo: JS `%` keeps the dividend's sign, so `-9 % 10`
+    // is -9 here but +1 in the Python reference renderer.
+    const mod10 = (n) => ((n % 10) + 10) % 10;
+    lines.push("     " + Array.from({ length: width }, (_, i) => String(mod10(i + minX))).join(""));
   }
   rows.forEach((row, i) => {
     const prefix = coords ? `${String(i + minY).padStart(4, " ")} ` : "";
@@ -278,31 +302,36 @@ export function renderBlueprintAscii(doc, opts = {}) {
   const redMaps = mapCount("red");
   const greenMaps = mapCount("green");
 
-  // wire_cells["color|mapnum|x,y"] -> char
+  // wire_cells["color|mapnum|x,y"] -> char.  Each wired port is drawn at its
+  // own physical tile (the input end vs the output end of a combinator), so a
+  // north-facing decider's red (data/output) wire shows on the TOP half and
+  // its green (time/input) wire on the BOTTOM half; 1x1 entities (constant
+  // combinators, lamps, speakers) draw at their anchor.
   const wireCells = {};
   for (const e of entities) {
     const a = _anchor(e);
     if (!a) continue;
     const [x, y] = a;
     const num = e.entity_number;
+    const isComb = _ENTITY_LETTERS[e.name] && _ENTITY_LETTERS[e.name][1] === "combinator";
+    const dir = _direction(e);
     for (const [color, nMaps] of [["red", redMaps], ["green", greenMaps]]) {
-      const nets = new Set();
+      const sides = [];
       for (const side of ["input", "output"]) {
         const rec = netOfKey.get(_key(num, side, color));
-        if (rec) nets.add(`${rec[0]}|${rec[1]}`);
+        if (rec) {
+          const [dx, dy] = isComb ? _portOffset(dir, side) : [0, 0];
+          sides.push({ dx, dy, m: rec[0], c: rec[1] });
+        }
       }
-      const sortedNets = [...nets].sort();
-      if (!sortedNets.length) {
+      if (!sides.length) {
         for (let m = 1; m <= nMaps; m++) wireCells[`${color}|${m}|${x},${y}`] = ".";
         continue;
       }
       for (let m = 1; m <= nMaps; m++) {
-        const charsThisMap = sortedNets
-          .filter((s) => s.startsWith(m + "|"))
-          .map((s) => s.split("|")[1])
-          .sort();
-        if (!charsThisMap.length) wireCells[`${color}|${m}|${x},${y}`] = " ";
-        else charsThisMap.forEach((c, i) => { wireCells[`${color}|${m}|${x + i},${y}`] = c; });
+        const cells = sides.filter((s) => s.m === m);
+        if (!cells.length) wireCells[`${color}|${m}|${x},${y}`] = " ";
+        else cells.forEach((s) => { wireCells[`${color}|${m}|${x + s.dx},${y + s.dy}`] = s.c; });
       }
     }
   }

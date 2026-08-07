@@ -220,7 +220,7 @@ PORT_X = 12         # page input port X (relative to rail origin)
 PORT_Y = 18         # page input port Y — same row as selectors
 MOD_X = 12          # modulo AC X (relative to rail origin, or absolute for shared)
 MOD_Y = 24          # modulo AC Y — separate row above LUT to avoid overlap
-LUT_Y = 22          # lookup CCs Y
+LUT_Y = 23          # lookup CCs Y
 MATCH_Y = 20        # match DCs Y (each == sub_tick)
 SEL_Y = 18          # selector ACs Y + page port
 UNP_L1_Y = 16       # l1 = bell >> 21
@@ -235,10 +235,22 @@ DEBUG_Y = -2        # debug lamp row offset below speakers (4 rows: -2..1)
 SUB_TICK_SIG = "signal-M"
 BELL_SIG = "signal-B"
 
-# Bottom-edge connector row — one row below the rail's mod AC (rightmost
-# column), so a single connector CC per rail sits on the player's bottom
-# edge and stays within wire reach of the port (y=18) and mod (y=24).
-CONN_Y = MOD_Y + 2
+# Connector block row — ONE row BELOW the lookup CCs (``LUT_Y + 1``), so
+# the player's bottom block is:
+#
+#     row LUT_Y:    CCCCCCCCCCCC         <- 12 lookup CCs (cols 0..11)
+#     row CONN_Y:   C C A>               <- conn CC, series-label marker CC,
+#                                           mod AC (east-facing, cols 0..3)
+#
+# After the 90° CCW rotation the connector block lands in the LEFTMOST column
+# (col 0, rows 0..3) and the 12 lookup CCs in col 1 (rows 0..11) — with the
+# match DCs directly to their right.  Keeping the connector block at the same
+# row as the lookup CCs would merge them into one post column; keeping it
+# adjacent (one row below) puts them in distinct post columns with no gap.
+#
+# The mod AC is east-facing (``A>``) here so a 90° CCW rotation of the whole
+# player brings it back to facing north (same as the other decoder ACs).
+CONN_Y = LUT_Y + 1
 
 
 def _rail_marker_signal(ri: int) -> str:
@@ -259,52 +271,6 @@ def _rail_marker_signal(ri: int) -> str:
     return _MARKERS[ri % len(_MARKERS)]
 
 
-def _add_player_connector(  # noqa: F821
-    lb: "LogicalBlueprint",  # noqa: F821
-    prefix: str,
-    rail_x: int,
-    port_id: str,
-    marker_signal: str,
-    series_index: int,
-) -> None:
-    """Add a bottom-edge connector CC joining the green clock + red data
-    buses of a single player rail, plus an isolated series-label CC.
-
-    The connector is wired into BOTH the green (time) bus — via the page
-    port's input — and the red (data) bus — via the page port's output —
-    so wiring this connector to a memory chunk's connector joins both
-    buses between the pieces.
-    """
-    from ..logical_blueprint import Endpoint, LogicalEntity  # pylint: disable=import-outside-toplevel
-
-    conn_id = f"{prefix}conn"
-    conn_x = rail_x + PORT_X
-    conn_y = CONN_Y
-    # Connector carries the marker at value 1 with the CC "Output" toggle OFF
-    # (enabled=False) — visible on the map, but never emitted onto the bus.
-    lb.add_entity(LogicalEntity(
-        conn_id, "constant-combinator",
-        properties={
-            "signals": [{"name": marker_signal, "value": 1}],
-            "enabled": False,
-        },
-        position=(conn_x, conn_y),
-    ))
-    # Non-wired series-label CC noting the rail index (1-based so it shows
-    # on the map), output also disabled.
-    lb.add_entity(LogicalEntity(
-        f"{prefix}conn_label", "constant-combinator",
-        properties={
-            "signals": [{"name": "signal-info", "value": series_index + 1}],
-            "enabled": False,
-        },
-        position=(conn_x, conn_y + 1),
-    ))
-    # Join the green clock (time) bus + red data bus.
-    lb.connect("green", Endpoint(conn_id, "input"), Endpoint(port_id, "input"))
-    lb.connect("red", Endpoint(conn_id, "input"), Endpoint(port_id, "output"))
-
-
 # ═══════════════════════════════════════════════════════════════════════
 # Rail builder — builds one 48-speaker decoder column block
 # ═══════════════════════════════════════════════════════════════════════
@@ -316,7 +282,7 @@ class _RailEndpoints:
         self.first_match_id: str = ""     # ch11_match (receives sub_tick on red)
         self.first_sel_id: str = ""       # ch11_sel (receives page data on red)
         self.last_sel_id: str = ""        # ch0_sel (for daisy-chain out)
-        self.port_id: str = ""            # page_port CC
+        self.port_id: str = ""            # page_port CC (all-in-one) / conn CC (split)
         self.mod_id: str = ""             # modulo AC (clock % 60)
         self.last_speaker_id: str = ""    # last speaker in red chain (for debug bridge)
         self.first_dbg_id: str = ""       # first debug lamp (for cross-rail bridge)
@@ -706,7 +672,8 @@ def build_multi_rail_decoder(  # pylint: disable=too-many-locals,too-many-branch
     if own_blueprint:
         blueprint = Blueprint()
         blueprint.label = name
-        blueprint.icons = ["signal-0"]
+        from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
+        _set_blueprint_icon(blueprint, "programmable-speaker")
 
     # ── Build all rails ────────────────────────────────────────────
     endpoints: list[_RailEndpoints] = []
@@ -805,6 +772,8 @@ def _build_rail_logical(
     active_drum_pitches: set[int] | None = None,
     ticks_per_page: int = TICKS_PER_PAGE,
     speaker_count: int | None = None,
+    rail_index: int = 0,
+    connectors: bool = False,
 ) -> "_RailEndpoints":  # noqa: F821
     """Build one rail's 48-speaker decoder into *lb* as logical entities/networks.
 
@@ -812,6 +781,11 @@ def _build_rail_logical(
     speaker (the drum types the song actually uses).  When ``None`` the full
     48-speaker grid is emitted (used by the standalone exporters, which have
     no audio data to know which drums are used).
+
+    *connectors* — split-output mode: the mod AC moves to the compact
+    ``CCA>`` connector row (east-facing) at the rail's right.  In all-in-one
+    mode it stays at ``(port_x, MOD_Y)`` north-facing so it never overlaps
+    the memory bank the composer places to the right of the page port.
 
     Entity ids are prefixed with *prefix* (e.g. ``"r0_"``) and positions are
     offset by *rail_x* so multiple rails can sit side by side.  Returns the
@@ -873,22 +847,81 @@ def _build_rail_logical(
     port_x = rail_x + PORT_X
     channel_x = rail_x + PORT_X - cells_per_tick  # channels at channel_x + c
 
-    # ── Page input port ──────────────────────────────────────────
-    port_id = f"{prefix}page_port"
-    # The page port's red output is connected to the upstream audio memory
-    # data bus, so it must not emit any non-audio signal.  Keep it as an
-    # empty constant combinator; its input side still receives the clock
-    # (green) from the timer.
-    lb.add_entity(LogicalEntity(
-        entity_id=port_id,
-        type="constant-combinator",
-        properties={"signals": []},
-        position=(port_x, PORT_Y),
-    ))
+    # ── Layout rows (mode-dependent) ────────────────────────────
+    # The split/rotated player stacks the decoder stages two rows lower
+    # (selector/match rows 20-21/22-23, lookup 24, connector 25) so that
+    # after the 90° CCW rotation the connector, lookup, match and AC
+    # columns are adjacent with NO gaps.  The all-in-one player keeps the
+    # original compact spacing (selector 18-19, match 20-21, lookup 23) —
+    # the composer places the memory next to it and relies on those rows.
+    if connectors:
+        _lut_y, _match_y, _sel_y, _unp1_y = (
+            LUT_Y + 1, MATCH_Y + 2, SEL_Y + 2, UNP_L1_Y + 2,
+        )
+        _conn_y = _lut_y + 1  # connector row directly below the lookup
+    else:
+        _lut_y, _match_y, _sel_y, _unp1_y = (
+            LUT_Y, MATCH_Y, SEL_Y, UNP_L1_Y,
+        )
+        _conn_y = CONN_Y  # unused in all-in-one mode (port/mod sit elsewhere)
+
+    # ── Page input port / split connector block ─────────────────
+    if connectors:
+        # Split-output mode: there is NO separate page-port CC — the
+        # connector block IS the entry.  ``conn`` carries the per-rail
+        # marker signal (matches the memory piece's connector, so the user
+        # can identify matching connectors) at value 1 with the CC "Output"
+        # toggle OFF (enabled=False); its red input feeds the NEAREST
+        # selector (ch0_sel — the whole selector row shares one data
+        # network) and its green input rides the shared clock bus.  The
+        # isolated ``conn_label`` CC carries the 1-based series index as a
+        # map label.  Both sit at the bottom-left (``(rail_x, CONN_Y)``), so
+        # after the 90° CCW rotation they land in the leftmost column with
+        # the mod AC.
+        port_id = f"{prefix}conn"
+        lb.add_entity(LogicalEntity(
+            port_id, "constant-combinator",
+            properties={
+                "signals": [{"name": _rail_marker_signal(rail_index), "value": 1}],
+                "enabled": False,
+            },
+            position=(rail_x, _conn_y),  # "C" at (rail_x, CONN_Y)
+        ))
+        lb.add_entity(LogicalEntity(
+            f"{prefix}conn_label", "constant-combinator",
+            properties={
+                "signals": [{"name": "signal-info", "value": rail_index + 1}],
+                "enabled": False,
+            },
+            position=(rail_x + 1, _conn_y),  # "C" at (rail_x+1, CONN_Y)
+        ))
+    else:
+        # All-in-one mode: the empty page-port CC stays on the selector row
+        # (rightmost column) so the data bus reaches the far selector
+        # directly; its input side still receives the clock (green).
+        port_id = f"{prefix}page_port"
+        lb.add_entity(LogicalEntity(
+            port_id, "constant-combinator",
+            properties={"signals": []},
+            position=(port_x, PORT_Y),
+        ))
     ep.port_id = port_id
 
     # ── Modulo AC: clock % 60 → signal-M ─────────────────────────
     mod_id = f"{prefix}mod"
+    if connectors:
+        # Split-output mode: the mod AC is the "A>" of the compact connector
+        # block at the bottom-left (``(rail_x + 2, CONN_Y)``) — east-facing
+        # here so a 90° CCW rotation of the player brings it back to north
+        # (matching the other decoder ACs).  The conn / conn_label CCs are
+        # placed above it (see the connector-block section).
+        mod_pos = (rail_x + 2, _conn_y)  # "A>" at cols rail_x+2..rail_x+3
+        mod_dir = 4
+    else:
+        # All-in-one mode: keep the mod under the page port (same column) so
+        # the composer's memory bank (right of the port) never overlaps it.
+        mod_pos = (port_x, MOD_Y)
+        mod_dir = 0
     lb.add_entity(LogicalEntity(
         entity_id=mod_id,
         type="arithmetic-combinator",
@@ -898,7 +931,8 @@ def _build_rail_logical(
             "second_operand": ticks_per_page,
             "output_signal": "signal-M",
         },
-        position=(port_x, MOD_Y),
+        position=mod_pos,
+        direction=mod_dir,
     ))
     ep.mod_id = mod_id
 
@@ -973,7 +1007,7 @@ def _build_rail_logical(
         n_ac = len(ac_specs)
         # Speakers sit just below the last AC (or below the selector for a
         # raw cell) so no dead space is left when lanes are unused.
-        first_spk_y = (UNP_L1_Y - 2 * (n_ac - 1) - 1) if n_ac else (SEL_Y - 1)
+        first_spk_y = (_unp1_y - 2 * (n_ac - 1) - 1) if n_ac else (_sel_y - 1)
 
         # Lookup CC
         cc_id = f"{base_id}_lut"
@@ -996,7 +1030,7 @@ def _build_rail_logical(
             entity_id=cc_id,
             type="constant-combinator",
             properties={"signals": cc_signals},
-            position=(col, LUT_Y),
+            position=(col, _lut_y),
         ))
 
         # Match DC (handles sub_tick 1..59)
@@ -1012,7 +1046,7 @@ def _build_rail_logical(
                     {"signal": "signal-each", "copy_count": False, "constant": 1},
                 ],
             },
-            position=(col, MATCH_Y),
+            position=(col, _match_y),
         ))
 
         # Selector AC: each(red) * each(green) → drum signal (raw) or bell
@@ -1028,14 +1062,14 @@ def _build_rail_logical(
                 "second_operand_wires": ["green"],
                 "output_signal": sel_out_signal,
             },
-            position=(col, SEL_Y),
+            position=(col, _sel_y),
         ))
 
         # Unpacker ACs (only for packed cells, stacked below the selector)
         ac_id: dict[str, str] = {}
         if not raw:
             for i, (uid, first_op, op, second_op, out) in enumerate(ac_specs):
-                ac_id[uid] = _add_ac(uid, first_op, op, second_op, out, UNP_L1_Y - 2 * i)
+                ac_id[uid] = _add_ac(uid, first_op, op, second_op, out, _unp1_y - 2 * i)
 
         # Speakers (beneath the unpackers / selector, one row per lane)
         for lane, pitch_idx in sorted(ch_lanes):
@@ -1134,13 +1168,69 @@ def _build_rail_logical(
     for ch in range(cells_per_tick - 1, 0, -1):
         lb.connect("red", Endpoint(f"{prefix}ch{ch}_match", "input"), Endpoint(f"{prefix}ch{ch-1}_match", "input"))
 
-    # Page data red bus: port → ch{C-1}_sel → … → ch0_sel
-    lb.connect("red", Endpoint(port_id, "output"), Endpoint(f"{prefix}ch{cells_per_tick - 1}_sel", "input"))
-    for ch in range(cells_per_tick - 1, 0, -1):
-        lb.connect("red", Endpoint(f"{prefix}ch{ch}_sel", "input"), Endpoint(f"{prefix}ch{ch-1}_sel", "input"))
+    # Page data red bus.  In split mode the conn sits at the bottom-left
+    # connector block, so it feeds the NEAREST selector (ch0_sel) and the
+    # chain runs ch0 → ch1 → … → ch{C-1} — every selector shares one data
+    # network, so any entry point works.  In all-in-one mode the page port
+    # stays on the selector row and feeds the far end (ch{C-1}_sel) as
+    # before.
+    if connectors:
+        lb.connect("red", Endpoint(port_id, "input"), Endpoint(f"{prefix}ch0_sel", "input"))
+        for ch in range(0, cells_per_tick - 1):
+            lb.connect("red", Endpoint(f"{prefix}ch{ch}_sel", "input"), Endpoint(f"{prefix}ch{ch+1}_sel", "input"))
+        # Deterministic short wiring for the data bus: conn → ch0_sel →
+        # ch1_sel → …  Without explicit pairs ``_wire_horizontal_first``'s
+        # rightmost-bridge rule would jump the conn to the far selector,
+        # exceeding Factorio's 9-tile wire reach.
+        for net in lb.networks:
+            if net.color != "red" or Endpoint(port_id, "input") not in net.endpoints:
+                continue
+            sel_eps: list[tuple[int, Endpoint]] = []
+            for ep_ in net.endpoints:
+                if ep_.entity_id.endswith("_sel"):
+                    try:
+                        ch = int(ep_.entity_id.split("ch")[1].split("_")[0])
+                    except (ValueError, IndexError):
+                        ch = 999
+                    sel_eps.append((ch, ep_))
+            sel_eps.sort(key=lambda ce: ce[0])
+            sels = [ep_ for _, ep_ in sel_eps]
+            pairs: list[tuple[Endpoint, Endpoint]] = []
+            if sels:
+                pairs.append((Endpoint(port_id, "input"), sels[0]))
+                for i in range(len(sels) - 1):
+                    pairs.append((sels[i], sels[i + 1]))
+            net.prewired_pairs = pairs
+            break
+    else:
+        lb.connect("red", Endpoint(port_id, "output"), Endpoint(f"{prefix}ch{cells_per_tick - 1}_sel", "input"))
+        for ch in range(cells_per_tick - 1, 0, -1):
+            lb.connect("red", Endpoint(f"{prefix}ch{ch}_sel", "input"), Endpoint(f"{prefix}ch{ch-1}_sel", "input"))
 
-    # Mod → last match (red, sub_tick injection)
-    lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch{cells_per_tick - 1}_match", "input"))
+    # Mod → match (red, sub_tick injection).  All match DC inputs share one
+    # sub-tick network, so in split mode the mod feeds the match DC on the
+    # SAME post-rotation row as itself (ch2 — "row #2's DC"), giving a
+    # short straight wire instead of a diagonal to ch0.  The prewired pairs
+    # pin that wire deterministically — without them ``_wire_horizontal_first``
+    # would re-route the mod to ch0_match (a diagonal).  All-in-one mode
+    # keeps the far-end injection as before.
+    if connectors:
+        lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch2_match", "input"))
+        for net in lb.networks:
+            if net.color != "red" or Endpoint(mod_id, "output") not in net.endpoints:
+                continue
+            pairs: list[tuple[Endpoint, Endpoint]] = [
+                (Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch2_match", "input")),
+            ]
+            for ch in range(cells_per_tick - 1, 0, -1):
+                pairs.append((
+                    Endpoint(f"{prefix}ch{ch}_match", "input"),
+                    Endpoint(f"{prefix}ch{ch - 1}_match", "input"),
+                ))
+            net.prewired_pairs = pairs
+            break
+    else:
+        lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch{cells_per_tick - 1}_match", "input"))
 
     # Clock green bus: all ports → mod
     lb.connect("green", Endpoint(port_id, "input"), Endpoint(mod_id, "input"))
@@ -1198,23 +1288,30 @@ def build_audio_decoder_logical(
         qualities = list(QUALITIES)
 
     lb = LogicalBlueprint(label=name)
+    lb.icon = "programmable-speaker"  # speaker icon in the blueprint book
     _build_rail_logical(
         lb, "", 0, instrument, signal_pool, qualities,
         map_drums, INSTRUMENT_MIDI_BASES.get(instrument, 53), clock_signal,
         active_drum_pitches=active_drum_pitches,
         ticks_per_page=ticks_per_page,
+        rail_index=0,
+        connectors=connectors,
     )
 
-    for net in lb.networks:
-        if net.color == "red" and Endpoint("page_port", "output") in net.endpoints:
-            lb.set_input_port("data", net.network_id)
-        elif net.color == "green" and Endpoint("page_port", "input") in net.endpoints:
-            lb.set_input_port("clock", net.network_id)
-
     if connectors:
-        _add_player_connector(
-            lb, "", 0, "page_port", _rail_marker_signal(0), 0,
-        )
+        # Split mode: the ``conn`` CC is the data/clock entry (both colors
+        # ride its single circuit port); there is no page_port.
+        for net in lb.networks:
+            if net.color == "red" and Endpoint("conn", "input") in net.endpoints:
+                lb.set_input_port("data", net.network_id)
+            elif net.color == "green" and Endpoint("conn", "input") in net.endpoints:
+                lb.set_input_port("clock", net.network_id)
+    else:
+        for net in lb.networks:
+            if net.color == "red" and Endpoint("page_port", "output") in net.endpoints:
+                lb.set_input_port("data", net.network_id)
+            elif net.color == "green" and Endpoint("page_port", "input") in net.endpoints:
+                lb.set_input_port("clock", net.network_id)
 
     return lb
 
@@ -1258,6 +1355,7 @@ def build_multi_rail_decoder_logical(
         qualities = list(QUALITIES)
 
     lb = LogicalBlueprint(label=name)
+    lb.icon = "programmable-speaker"  # speaker icon in the blueprint book
     rail_info: list[_RailEndpoints] = []
     for ri, inst in enumerate(instruments):
         info = _build_rail_logical(
@@ -1270,29 +1368,28 @@ def build_multi_rail_decoder_logical(
                 active_drum_pitches[ri] if active_drum_pitches else None
             ),
             ticks_per_page=(ticks_per_page[ri] if ticks_per_page else TICKS_PER_PAGE),
+            rail_index=ri,
+            connectors=connectors,
         )
         rail_info.append(info)
 
     # ── Share one green clock bus across all rails ──────────────
-    # Each rail's page_port input (and mod input) green network must merge so
-    # the single "clock" port feeds every rail.
+    # Each rail's clock entry (conn input in split mode / page_port input in
+    # all-in-one mode) green network must merge so the single "clock" port
+    # feeds every rail.
+    entry_id = "conn" if connectors else "page_port"
     for ri in range(1, len(rail_info)):
-        lb.connect("green", Endpoint(f"r{ri}_page_port", "input"), Endpoint(f"r{ri-1}_page_port", "input"))
+        lb.connect("green", Endpoint(f"r{ri}_{entry_id}", "input"), Endpoint(f"r{ri-1}_{entry_id}", "input"))
 
     # ── Declare ports ────────────────────────────────────────────
+    # Split mode: data rides the conn CC's single circuit port ("input").
+    # All-in-one mode: data rides the page port's red output.
+    entry_side = "input" if connectors else "output"
     for net in lb.networks:
-        if net.color == "green" and Endpoint("r0_page_port", "input") in net.endpoints:
+        if net.color == "green" and Endpoint(f"r0_{entry_id}", "input") in net.endpoints:
             lb.set_input_port("clock", net.network_id)
         for ri, info in enumerate(rail_info):
-            if net.color == "red" and Endpoint(info.port_id, "output") in net.endpoints:
+            if net.color == "red" and Endpoint(info.port_id, entry_side) in net.endpoints:
                 lb.set_input_port(f"data_{ri}", net.network_id)
-
-    # ── Bottom-edge connectors (split mode): one per rail ────────
-    if connectors:
-        for ri, info in enumerate(rail_info):
-            _add_player_connector(
-                lb, f"r{ri}_", ri * RAIL_WIDTH, info.port_id,
-                _rail_marker_signal(ri), ri,
-            )
 
     return lb

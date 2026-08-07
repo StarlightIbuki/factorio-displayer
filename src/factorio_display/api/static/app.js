@@ -2220,6 +2220,11 @@ renderFormatSelectOptions();
 showView("home");
 initAuth();
 
+// Deep-link: ?bp=<blueprint string or http(s) URL to a raw blueprint string>
+// opens the blueprint viewer immediately.
+const _bpParam = new URLSearchParams(location.search).get("bp");
+if (_bpParam) openBlueprintInspector({ bpString: _bpParam, title: t("viewer.title") });
+
 // Show the terms-of-use / acknowledgement automatically on first visit.
 // (Skip in the OAuth popup — only the main window should show it.)
 if (!window.opener && !localStorage.getItem("fd_ack_seen")) {

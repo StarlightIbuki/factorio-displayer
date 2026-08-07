@@ -700,14 +700,25 @@ class TestLogicalBlueprintDecoder:
         assert len(lb.entities) == 14  # 3*(LUT+match+sel+spk) + port + mod
 
     def test_player_connector_wired_into_clock_and_data(self):
-        """Split-mode connector CC: at the bottom edge, wired into BOTH the
-        green clock (time) bus and the red data bus; label CC is isolated."""
+        """Split-mode connector block: the bottom-left block is ``CCA>``
+        (``conn`` + ``conn_label`` CCs + east-facing mod AC on the CONN_Y
+        row).  There is NO separate page port — ``conn`` rides BOTH the
+        green clock (time) bus and the red data bus; the ``conn_label``
+        marker CC is isolated (never wired)."""
         from factorio_display.logical_blueprint import Endpoint, to_draftsman
 
         lb = build_audio_decoder_logical(name="Conn", instrument="piano", connectors=True)
-        conn = next(e for e in lb.entities.values() if e.entity_id == "conn")
+        # No page_port — the block is conn (data/clock entry) + marker + mod.
+        ids = {e.entity_id for e in lb.entities.values()}
+        assert "page_port" not in ids
+        conn = lb.entities["conn"]
         assert conn.type == "constant-combinator"
-        assert conn.position == (12, 26)  # bottom edge, below the mod AC
+        assert conn.position == (0, 25)
+        assert lb.entities["conn_label"].position == (1, 25)
+        # The mod AC sits east-facing at (2, 25) in the same connector block.
+        mod = next(e for e in lb.entities.values() if e.entity_id == "mod")
+        assert mod.position == (2, 25)
+        assert mod.direction == 4  # east-facing pre-rotation
 
         green_ok = red_ok = False
         for net in lb.networks:
@@ -716,12 +727,10 @@ class TestLogicalBlueprintDecoder:
                 green_ok = True
             if net.color == "red" and has_conn:
                 red_ok = True
-        assert green_ok, "connector must join the green clock (time) bus"
-        assert red_ok, "connector must join the red data bus"
+        assert green_ok, "conn must join the green clock (time) bus"
+        assert red_ok, "conn must join the red data bus"
 
-        # Label CC must NOT be wired into any network.
-        label = lb.entities["conn_label"]
-        assert label.type == "constant-combinator"
+        # Marker CC must NOT be wired into any network.
         for net in lb.networks:
             assert Endpoint("conn_label", "input") not in net.endpoints
 

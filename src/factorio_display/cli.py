@@ -1688,6 +1688,58 @@ def _handle_server(args) -> None:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _build_split_timer(total_ticks: int) -> tuple[str, str]:
+    """Build a standalone timer piece for split output.
+
+    Returns ``(label, blueprint_string)``.  The timer is a raw clock AC plus
+    a modulo AC that wraps the clock at *total_ticks* (``clock % (N+1)`` so
+    the clock loops ``0..N`` and the memory/display repeats).  A single
+    connector CC is wired into the green (time) clock bus so the user can
+    wire this piece to the memory/display connector CCs in game.  The icon
+    is the "clock" item (set by the timer builder).
+    """
+    from .timer import build_raw_timer, build_mod_timer
+    from .composer import _connect_nets_by_color
+    from .logical_blueprint import Endpoint, LogicalEntity, to_draftsman
+
+    timer = build_raw_timer("Timer", with_kick=False)
+    timer.output_ports["raw"] = timer.output_ports.pop("out")
+
+    interval = max(1, total_ticks + 1)
+    mod = build_mod_timer(interval, name="SubTickGreen", output_color="green")
+    timer.merge(mod, entity_prefix="modg_", network_prefix="modg_")
+    timer.output_ports["clock"] = timer.output_ports.pop("out")
+
+    # Raw timer (red) → mod AC (red input): the mod AC wraps the raw clock
+    # at the piece length so the memory loops back to the start.
+    _connect_nets_by_color(
+        timer, "red",
+        entity_contains="_inc", port="output",
+        other_entity_contains="modg_sub", other_port="input",
+    )
+    del timer.output_ports["raw"]
+
+    # ── Compact vertical layout: raw AC, mod AC, connector ─────────
+    timer.entities["timer_inc"].position = (0, 0)
+    mod_id = next(eid for eid in timer.entities if eid.startswith("modg_"))
+    timer.entities[mod_id].position = (0, 2)
+    conn_id = "timer_conn"
+    timer.add_entity(LogicalEntity(
+        conn_id, "constant-combinator",
+        properties={
+            "signals": [{"name": "signal-clock", "value": 1}],
+            "enabled": False,
+        },
+        position=(0, 4),
+    ))
+    # Connector joins the green (time) clock bus so it merges with a memory /
+    # display connector when wired in game.
+    timer.connect("green", Endpoint(conn_id, "input"), Endpoint(mod_id, "output"))
+
+    bp = to_draftsman(timer)
+    return "timer", bp.to_string()
+
+
 def _build_combined_timer(total_ticks: int) -> LogicalBlueprint:
     """Build a timer for combined video+audio, exposing:
     - ``"clock"`` — modded (wrapping) clock on GREEN (unified time bus: video
@@ -1922,6 +1974,9 @@ def _encode_audio_split_pieces(args) -> list[tuple[str, str]]:
 
     pieces: list[tuple[str, str]] = [("player", result["player"])]
     pieces.extend(result["pieces"])
+    # A shared timer piece (modded by the total tick count) is emitted first
+    # so the user wires it to the memory/player connector CCs.
+    pieces.insert(0, _build_split_timer(int(result.get("total_ticks", 0))))
     return pieces
 
 
@@ -2013,6 +2068,7 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
         )
         pieces: list[tuple[str, str]] = [("display", split_result["display"])]
         pieces.extend(split_result["pieces"])
+        total_ticks = int(split_result.get("total_ticks", 0))
         # Video + sound: extract embedded/standalone audio → player + memory
         # pieces, so video-with-audio works without the all-in-one composer.
         if has_any_audio and not no_audio:
@@ -2022,6 +2078,10 @@ def _handle_encode(args) -> None:  # pylint: disable=too-many-locals,too-many-st
                 if getattr(args, "instruments", None):
                     rail_mode = args.instruments
                 pieces.extend(_build_audio_pieces_from_tick_data(audio_td, args, rail_mode))
+                total_ticks = max(total_ticks, len(audio_td) - 1)
+        # A shared timer piece (modded by the total tick count) is emitted
+        # first so the user wires it to the memory/display connector CCs.
+        pieces.insert(0, _build_split_timer(total_ticks))
 
         envelope = _write_split_output(pieces, args, book_label=args.name)
         if getattr(args, "json", False):

@@ -52,6 +52,12 @@ function netColor(idx) {
   return NET_COLORS[idx % NET_COLORS.length];
 }
 
+// Wire-colour palette — matches the wire line strokes. A single connection
+// point may carry BOTH a red and a green circuit; dots are coloured by wire
+// so red vs green is obvious at a glance (network identity is still shown on
+// hover / in the legend).
+const WIRE_COLORS = { red: "#ff5c5c", green: "#46d160" };
+
 // ── ASCII → pages ─────────────────────────────────────────────────────
 // Group the ASCII text into sections by their "=== Title ===" headers so
 // each map (entities / RED / GREEN…) becomes its own page.
@@ -75,25 +81,57 @@ function splitAsciiPages(text) {
 // ── SVG preview ───────────────────────────────────────────────────────
 const TILE = 26;
 const PAD = 22;
+const PORT_SPREAD = 6; // px offset between the red/green dots of a shared port
 
-// Port anchor in tile coordinates for an entity, per side.
+// Port anchor in tile coordinates for an entity, per side. Ports sit at the
+// centre of the box edge the combinator faces toward (output) / away from
+// (input), so they rotate together with the entity. Every anchor is an edge
+// midpoint (x.5/y.5) — never a tile corner, which would overlap the dots of
+// the neighbouring grid. A combinator's box is 1x2 (north/south) or 2x1
+// (east/west) with (x, y) as its top-left tile; 1x1 entities (constant
+// combinators, lamps, speakers) join at the tile centre.
 function portAnchor(ent, side) {
   const x = ent.x, y = ent.y;
   if (ent.kind === "combinator") {
     if (side === "output") {
-      if (ent.dir === 4) return [x + 1, y + 1];      // east → output right
-      if (ent.dir === 12) return [x, y + 1];         // west → output left
-      if (ent.dir === 0) return [x + 0.5, y];        // north → output top
-      return [x + 0.5, y + 2];                       // south → output bottom
+      if (ent.dir === 4) return [x + 2, y + 0.5];    // east  → right edge
+      if (ent.dir === 12) return [x, y + 0.5];       // west  → left edge
+      if (ent.dir === 0) return [x + 0.5, y];        // north → top edge
+      return [x + 0.5, y + 2];                       // south → bottom edge
     }
-    if (ent.dir === 4) return [x, y + 1];            // input left
-    if (ent.dir === 12) return [x + 1, y + 1];       // input right
-    if (ent.dir === 0) return [x + 0.5, y + 2];      // input bottom
-    return [x + 0.5, y];                             // input top
+    if (ent.dir === 4) return [x, y + 0.5];          // input left edge
+    if (ent.dir === 12) return [x + 2, y + 0.5];     // input right edge
+    if (ent.dir === 0) return [x + 0.5, y + 2];      // input bottom edge
+    return [x + 0.5, y];                             // input top edge
   }
-  if (ent.kind === "one") return side === "input" ? [x + 0.5, y + 1] : null; // lamp/speaker
-  if (ent.kind === "cc") return side === "output" ? [x + 0.5, y + 1] : null; // constant
+  if (ent.kind === "one") return side === "input" ? [x + 0.5, y + 0.5] : null; // lamp/speaker
+  if (ent.kind === "cc") return side === "output" ? [x + 0.5, y + 0.5] : null; // constant
   return null;
+}
+
+// Direction along which the red/green dots of a shared port are spread, so
+// both wires are visible instead of overlapping at one point.
+function portSpreadAxis(ent, side) {
+  // East/west combinators: wires run horizontally → spread vertically.
+  if (ent.kind === "combinator" && (ent.dir === 4 || ent.dir === 12)) return [0, 1];
+  // Everything else (north/south combinators, CC, lamps): wires run vertically.
+  return [1, 0];
+}
+
+// Pixel position of a port's dot for the given colour. When a port carries
+// both red AND green, the two dots are offset perpendicular to the wire.
+function portPos(ent, side, color, portsEntry) {
+  const at = portAnchor(ent, side);
+  if (!at) return null;
+  const other = color === "red" ? "green" : "red";
+  const shared = !!(portsEntry && portsEntry[other] && portsEntry[other][side] >= 0);
+  if (!shared) return at;
+  const axis = portSpreadAxis(ent, side);
+  const off = color === "red" ? -1 : 1;
+  // portPos returns tile coordinates (toX/toY multiply by TILE later), so
+  // convert the pixel spread into tile units.
+  const spread = PORT_SPREAD / TILE;
+  return [at[0] + axis[0] * spread * off, at[1] + axis[1] * spread * off];
 }
 
 function buildPreview(model, onSelect) {
@@ -109,7 +147,8 @@ function buildPreview(model, onSelect) {
   for (const [pa, pb] of model.wires || []) {
     const ea = model.entities[pa.entity], eb = model.entities[pb.entity];
     if (!ea || !eb) continue;
-    const a = portAnchor(ea, pa.side), b = portAnchor(eb, pb.side);
+    const a = portPos(ea, pa.side, pa.color, model.ports[pa.entity]);
+    const b = portPos(eb, pb.side, pb.color, model.ports[pb.entity]);
     if (!a || !b) continue;
     const netIdx = model.ports[pa.entity][pa.color][pa.side];
     svg.append(svgEl("line", {
@@ -149,6 +188,10 @@ function buildPreview(model, onSelect) {
     });
     letter.textContent = ent.letter;
     g.append(letter);
+    // Hover tooltip: localized full name (the single letter is cryptic).
+    const tip = svgEl("title");
+    tip.textContent = `${ent.letter} — ${entName(ent.name)}`;
+    g.append(tip);
 
     // Combinator facing: a small triangle ("angle in the shape") pointing the
     // way the combinator faces — inside the box, near the facing edge.
@@ -164,11 +207,12 @@ function buildPreview(model, onSelect) {
     for (const c of ["red", "green"]) for (const s of ["input", "output"]) {
       const n = p[c][s];
       if (n < 0) continue;
-      const anchor = portAnchor(ent, s);
-      if (!anchor) continue;
+      const at = portPos(ent, s, c, p);
+      if (!at) continue;
       g.append(svgEl("circle", {
-        class: "port", "data-net": n, cx: toX(anchor[0]), cy: toY(anchor[1]), r: 4,
-        fill: netColor(n), stroke: "#0b0e11", "stroke-width": 1,
+        class: "port", "data-net": n, "data-color": c, "data-side": s,
+        cx: toX(at[0]), cy: toY(at[1]), r: 4,
+        fill: WIRE_COLORS[c], stroke: "#0b0e11", "stroke-width": 1,
       }));
     }
     svg.append(g);
@@ -272,14 +316,31 @@ function svgView(model, doc) {
   }, { passive: false });
   applyZoom();
 
-  // legend
+  // legend — wire networks (localized colour) then entities (localized names;
+  // the single letters A/D/C/S/L are cryptic).
   const legend = el("div", { class: "preview-legend" });
+  legend.append(el("span", { class: "preview-legend-sep", text: t("preview.legendWires") }));
   (model.networks || []).forEach((net, idx) => {
+    const colorLabel = net.color === "red" ? t("preview.colorRed") : t("preview.colorGreen");
     legend.append(el("span", { class: "preview-legend-item" }, [
       el("span", { class: "swatch", style: `background:${netColor(idx)}` }),
-      el("span", { text: `${net.char} ${net.color} · ${net.endpoints.length} pt` }),
+      el("span", { text: `${net.char} ${colorLabel} · ${t("preview.points", { n: net.endpoints.length })}` }),
     ]));
   });
+  const entKinds = new Map(); // letter → first entity name using it
+  (model.entities || []).forEach((e) => {
+    if (e.kind === "other" || e.letter === ".") return;
+    if (!entKinds.has(e.letter)) entKinds.set(e.letter, e.name);
+  });
+  if (entKinds.size) {
+    legend.append(el("span", { class: "preview-legend-sep", text: t("preview.legendEntities") }));
+    [...entKinds.entries()].forEach(([letter, name]) => {
+      legend.append(el("span", { class: "preview-legend-item" }, [
+        el("span", { class: "ent-legend-letter", text: letter }),
+        el("span", { text: entName(name) }),
+      ]));
+    });
+  }
   wrap.append(legend);
 
   $("#preview-wires", wrap).addEventListener("change", (e) => {
@@ -339,6 +400,14 @@ const _ENTITY_LETTER = {
   "decider-combinator": "D", "arithmetic-combinator": "A", "selector-combinator": "S",
   "constant-combinator": "C", "programmable-speaker": "S", "small-lamp": "L",
 };
+
+// Localized display name for an entity; falls back to the raw name when no
+// translation exists (t() would otherwise return the key itself).
+function entName(name) {
+  const key = `ent.${name}`;
+  const localized = t(key);
+  return localized.startsWith("ent.") ? name : localized;
+}
 const _FACING_NAMES = { 0: "north", 2: "northeast", 4: "east", 6: "southeast", 8: "south", 10: "southwest", 12: "west", 14: "northwest" };
 const _FACING_ARROW = { 0: "↑", 4: "→", 8: "↓", 12: "←" };
 
@@ -361,7 +430,9 @@ function fmtPos(pos) {
 function facingOf(ent) {
   const d = ent.direction ?? 0;
   const name = _FACING_NAMES[d] || "north";
-  return _FACING_ARROW[d] ? `${name} ${_FACING_ARROW[d]}` : name;
+  const localized = t(`facing.${name}`);
+  const label = localized.startsWith("facing.") ? name : localized;
+  return _FACING_ARROW[d] ? `${label} ${_FACING_ARROW[d]}` : label;
 }
 
 // Circuit signal object → short name (each/anything/everything specials).
@@ -453,6 +524,24 @@ function conditionSections(ent) {
     });
   }
 
+  // Factorio 2.0 / draftsman 3.x stores constant-combinator signals as
+  // control_behavior.sections.sections[].filters[] — each filter carries
+  // { name, count, quality, comparator } instead of a `signal` object.
+  const ccSections = cb.sections && cb.sections.sections;
+  if (Array.isArray(ccSections)) {
+    ccSections.forEach((sec) => {
+      if (!Array.isArray(sec.filters)) return;
+      sec.filters.filter((f) => f && f.name).forEach((f) => {
+        outputs.push({ body: () => [
+          condRow(t("inspect.signal"), sigCtl({ name: f.name })),
+          condRow(t("inspect.count"), ctlInput(f.count != null ? f.count : 1)),
+          ...(f.quality ? [condRow(t("inspect.quality"), ctlInput(f.quality))] : []),
+          ...(f.comparator ? [condRow(t("inspect.comparator"), ctlInput(f.comparator))] : []),
+        ] });
+      });
+    });
+  }
+
   if (cb.circuit_condition) {
     const c = cb.circuit_condition;
     conditions.push({ body: () => [
@@ -520,7 +609,7 @@ function entityDetail(ent, idx) {
   const card = el("div", { class: "inspect-item" });
   const head = el("div", { class: "inspect-item-head" }, [
     el("span", { class: "inspect-item-badge", text: _ENTITY_LETTER[ent.name] || "." }),
-    el("span", { class: "inspect-item-name", text: `#${ent.entity_number ?? idx + 1} ${ent.name}` }),
+    el("span", { class: "inspect-item-name", text: `#${ent.entity_number ?? idx + 1} ${entName(ent.name)}` }),
   ]);
   const rows = el("div", { class: "inspect-item-rows" });
   const kv = (label, value) => el("div", { class: "inspect-item-row" }, [
@@ -568,6 +657,36 @@ async function loadBlueprint(bpString) {
     return;
   }
   renderTab("string");
+}
+
+// Load a blueprint string directly, or fetch it first when the input is a URL
+// (http/https) pointing at a raw blueprint string. A 15s timeout guards the
+// fetch so a dead link never hangs the viewer.
+async function submitBlueprintInput(input) {
+  const body = $("#inspect-body");
+  const content = $("#inspect-content");
+  body.classList.remove("hidden");
+  content.innerHTML = "";
+  content.append(el("p", { class: "hint", text: t("t.decoding") }));
+  try {
+    let text = String(input || "").trim();
+    if (/^https?:\/\//i.test(text)) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      try {
+        const res = await fetch(text, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        text = (await res.text()).trim();
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!text) throw new Error("empty response");
+    }
+    await loadBlueprint(text);
+  } catch (e) {
+    content.innerHTML = "";
+    content.append(el("p", { class: "hint", text: t("result.couldNotLoad", { fmt: "url", msg: e.message }) }));
+  }
 }
 
 async function renderTab(key) {
@@ -628,7 +747,7 @@ export function openBlueprintInspector(opts) {
   else if (bpString) {
     paste.classList.add("hidden");
     body.classList.remove("hidden");
-    loadBlueprint(bpString);
+    submitBlueprintInput(bpString);
   } else {
     body.classList.add("hidden");
     paste.classList.remove("hidden");
@@ -650,13 +769,12 @@ function wireModal() {
   $("#inspect-load").addEventListener("click", () => {
     const v = $("#inspect-input").value.trim();
     if (!v) return;
-    $("#inspect-body").classList.remove("hidden");
-    loadBlueprint(v);
+    submitBlueprintInput(v);
   });
   $("#inspect-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       const v = e.target.value.trim();
-      if (v) { $("#inspect-body").classList.remove("hidden"); loadBlueprint(v); }
+      if (v) submitBlueprintInput(v);
     }
   });
   $("#inspect-tabs").addEventListener("click", (e) => {

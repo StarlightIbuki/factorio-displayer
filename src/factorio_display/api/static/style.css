@@ -473,7 +473,9 @@ pre.ascii {
 .preview-svg .wire.hidden { display: none; }
 .preview-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; font-size: 11px; color: var(--muted); }
 .preview-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.preview-legend-sep { opacity: 0.55; font-weight: 600; margin-left: 2px; }
 .preview-legend .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.4); }
+.preview-legend .ent-legend-letter { display: inline-flex; width: 14px; height: 14px; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,.35); border-radius: 3px; font-family: var(--mono); font-size: 10px; color: var(--text); }
 .meta-strip { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 .meta-strip b { color: var(--text); }
 .artifacts { margin-top: 10px; }

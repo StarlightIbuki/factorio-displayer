@@ -42,6 +42,9 @@ def build_raw_timer(
         Reserved for future tick-gating; not actively used by the raw timer.
     """
     lb = LogicalBlueprint(label=name)
+    # No vanilla "clock" item exists, so use the clock virtual signal
+    # (shows a clock face in-game and round-trips through Draftsman).
+    lb.icon = "signal-clock"
 
     cc: LogicalEntity | None = None
     if with_kick:
@@ -132,6 +135,9 @@ def build_mod_timer(
         raise ValueError(f"output_color must be 'red' or 'green', got {output_color!r}")
 
     lb = LogicalBlueprint(label=name)
+    # No vanilla "clock" item exists, so use the clock virtual signal
+    # (shows a clock face in-game and round-trips through Draftsman).
+    lb.icon = "signal-clock"
 
     # ── Modulo AC ──────────────────────────────────────────────
     # Reads clock from red; writes the modded (looping) clock on the
@@ -199,6 +205,9 @@ def build_repeater(
         If set, apply ``output_signal % mod`` so the ramp repeats.
     """
     lb = LogicalBlueprint(label=name)
+    # No vanilla "clock" item exists, so use the clock virtual signal
+    # (shows a clock face in-game and round-trips through Draftsman).
+    lb.icon = "signal-clock"
     base_id = name.lower().replace(" ", "_")
 
     # ── Kick-start CC ──────────────────────────────────────────

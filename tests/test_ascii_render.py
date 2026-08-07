@@ -117,11 +117,13 @@ def test_wiring_red_and_green_on_separate_maps() -> None:
     #   CC '0'  |  DC '0'(in)+'1'(out)  |  AC '2'(out)  |  L '1'  |  S '2'
     # Wires render at the actual port tile: the east-facing DC's red OUTPUT
     # (net 1) sits one tile EAST of its INPUT (net 0), so the two chars are
-    # adjacent at x=2,3; the west-facing AC's red output sits one tile WEST.
-    assert "0 012   1 2" in text
+    # adjacent at x=2,3; the west-facing AC's red output sits on its OWN
+    # (leftmost) tile at x=5, right next to its input tile at x=6.
+    assert "0 01 2  1 2" in text
 
     # Green map grid row: DC and AC both ride green1 '0'; other entities '.'.
-    assert ". 0  0  . ." in text
+    # The AC's green input rides its EAST tile (x=6), one right of the DC.
+    assert ". 0   0 . ." in text
 
 
 def test_render_from_blueprint_string() -> None:

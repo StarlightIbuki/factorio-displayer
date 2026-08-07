@@ -231,6 +231,11 @@ class LogicalBlueprint:
     networks: list[Network] = field(default_factory=list)
     input_ports: dict[str, str] = field(default_factory=dict)
     output_ports: dict[str, str] = field(default_factory=dict)
+    # Blueprint icon.  Either a virtual signal name (e.g. ``"signal-0"``,
+    # the default) or an item name (e.g. ``"display-panel"``,
+    # ``"programmable-speaker"``, ``"constant-combinator"``, ``"clock"``)
+    # serialised as an item icon by :func:`to_draftsman`.
+    icon: str = "signal-0"
     # ── cached derived data ──────────────────────────────────────
     _network_bounds_cache: dict[str, tuple[int, int, int, int]] = field(
         default_factory=dict, repr=False, compare=False,
@@ -2048,6 +2053,26 @@ def to_draftsman(
         return _to_draftsman_impl(lb, bp, _validate=_validate)
 
 
+def _set_blueprint_icon(bp: Any, icon: str) -> None:
+    """Set the blueprint *bp*'s icon from *icon*.
+
+    ``icon`` is either a virtual signal name (e.g. ``"signal-0"``, the
+    project default) or an item name (e.g. ``"constant-combinator"``,
+    ``"display-panel"``, ``"programmable-speaker"``, ``"clock"``).  Item
+    icons are serialised as ``{"signal": {"type": "item", "name": ...}}`` so
+    each blueprint piece (display / player / memory / timer) shows its own
+    icon in the Factorio blueprint book.
+    """
+    from draftsman.signatures import Icon, SignalID  # pylint: disable=import-outside-toplevel
+
+    if not icon or icon.startswith("signal-"):
+        bp.icons = [icon or "signal-0"]
+        return
+    bp.icons = [
+        Icon(0, SignalID.converter({"type": "item", "name": icon})),
+    ]
+
+
 def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate: bool = True) -> Any:
     """Internal implementation — see :func:`to_draftsman`.
 
@@ -2064,7 +2089,7 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
         bp.label = lb.label
         # Factorio blueprints must carry at least one icon — FBE's schema
         # requires the `icons` array, otherwise it rejects the blueprint.
-        bp.icons = ["signal-0"]
+        _set_blueprint_icon(bp, lb.icon)
 
     # Pre-build the common circuit condition for speakers when skipping
     # validation (every speaker uses signal-no-entry = 0).
