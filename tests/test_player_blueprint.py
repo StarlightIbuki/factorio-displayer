@@ -699,6 +699,29 @@ class TestLogicalBlueprintDecoder:
         assert len(acs) == 4  # mod + 3 selectors
         assert len(lb.entities) == 14  # 3*(LUT+match+sel+spk) + port + mod
 
+    def test_compact_drum_rail_split_connectors_no_ch2_crash(self):
+        """Split-mode (``connectors=True``) compact drum rails with 1–2 used
+        drum types must materialise without a ``ch2_match`` KeyError.
+
+        Regression: the split-mode mod→sub-tick injection was hardcoded to
+        ``ch2_match``, which a kick-only (1 cell/tick) or kick+snare
+        (2 cells/tick) rail never creates — ``to_draftsman`` died with
+        ``KeyError: 'r0_ch2_match'`` (the default ``encode`` path for drum
+        content).  The injection must anchor on the last existing match DC.
+        """
+        from factorio_display.logical_blueprint import to_draftsman
+
+        for active in ({0}, {0, 2}):  # kick-only, kick+snare
+            lb = build_audio_decoder_logical(
+                name="Drum Split",
+                instrument="drum",
+                map_drums=True,
+                active_drum_pitches=active,
+                connectors=True,
+            )
+            bp = to_draftsman(lb)  # must not raise KeyError
+            assert bp is not None
+
     def test_player_connector_wired_into_clock_and_data(self):
         """Split-mode connector block: the bottom-left block is ``CCA>``
         (``conn`` + ``conn_label`` CCs + east-facing mod AC on the CONN_Y

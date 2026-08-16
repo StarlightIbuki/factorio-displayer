@@ -1214,13 +1214,17 @@ def _build_rail_logical(
     # pin that wire deterministically — without them ``_wire_horizontal_first``
     # would re-route the mod to ch0_match (a diagonal).  All-in-one mode
     # keeps the far-end injection as before.
+    #
+    # Compact drum rails have as few as one channel (kick-only), so ch2 does
+    # not exist there — fall back to the last existing match DC.
     if connectors:
-        lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch2_match", "input"))
+        anchor_ch = min(2, cells_per_tick - 1)
+        lb.connect("red", Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch{anchor_ch}_match", "input"))
         for net in lb.networks:
             if net.color != "red" or Endpoint(mod_id, "output") not in net.endpoints:
                 continue
             pairs: list[tuple[Endpoint, Endpoint]] = [
-                (Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch2_match", "input")),
+                (Endpoint(mod_id, "output"), Endpoint(f"{prefix}ch{anchor_ch}_match", "input")),
             ]
             for ch in range(cells_per_tick - 1, 0, -1):
                 pairs.append((
