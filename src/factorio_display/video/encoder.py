@@ -46,6 +46,11 @@ _PER_DC_EST_SECONDS = 0.015
 #: spawn + teardown alone costs ~1-2 s on Windows regardless of work size.
 _IN_PROCESS_THRESHOLD_S = 1.0
 
+#: Default worker-pool size cap.  Spawning/tearing down workers costs
+#: ~100-200 ms each on Windows, so the *default* is capped at 8 even on
+#: high-core machines; pass ``--chunk-workers N`` explicitly to raise it.
+_MAX_DEFAULT_WORKERS = 8
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -1575,7 +1580,10 @@ def encode_frames_chunked(
         # overhead (~1-2 s on Windows).
         est_s = sum(len(chunk_frames[ci]) for ci in pending_indices) * 0.0005
         use_pool = est_s >= _IN_PROCESS_THRESHOLD_S
-        workers = (chunk_workers or os.cpu_count() or 1) if use_pool else 1
+        workers = (
+            (chunk_workers or min(os.cpu_count() or 1, _MAX_DEFAULT_WORKERS))
+            if use_pool else 1
+        )
         sys.stderr.write(
             f"Building {len(pending_indices)} chunk(s) "
             f"{'with ' + str(workers) + ' worker(s)' if use_pool else 'in-process'} "
@@ -1911,7 +1919,7 @@ def encode_frames_split(
     use_pool = len(payloads) > 1 and est_worker_s >= _IN_PROCESS_THRESHOLD_S
 
     if use_pool:
-        workers = chunk_workers or os.cpu_count() or 1
+        workers = chunk_workers or min(os.cpu_count() or 1, _MAX_DEFAULT_WORKERS)
         workers = min(workers, len(payloads)) if payloads else 1
     else:
         workers = 1

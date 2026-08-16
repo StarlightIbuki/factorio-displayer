@@ -1254,8 +1254,9 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
                               "auto-split into more time fragments so every piece stays "
                               "near this size.")
     split_g.add_argument("--book", action="store_true",
-                         help="Always emit a single blueprint book containing all pieces "
-                              "(default: only when the total output is small, roughly <1 MB).")
+                         help="Assemble all pieces into a single blueprint book "
+                              "(book.txt) as the primary output. Off by default — "
+                              "the book pass re-parses and re-serialises every piece.")
     split_g.add_argument("--no-book", action="store_true",
                          help="Never emit a blueprint book (write individual piece files only).")
 
@@ -1803,12 +1804,6 @@ def _should_process_audio(
     return bool(videos)
 
 
-# Rough threshold for auto-book: if the total piecewise output is below this
-# many characters (~1 MB), a single blueprint book is emitted by default
-# (small enough to paste/copy at once).  Precision is intentionally loose.
-_BOOK_CHAR_THRESHOLD = 1_000_000
-
-
 def _assemble_book(pieces: list[tuple[str, str]], book_label: str) -> str | None:
     """Build a :class:`BlueprintBook` string from *pieces*, or ``None``."""
     from draftsman.blueprintable import Blueprint, BlueprintBook
@@ -1834,11 +1829,12 @@ def _write_split_output(pieces: list[tuple[str, str]], args, *, book_label: str)
     *pieces* is a list of ``(label, blueprint_string)``.
 
     Output strategy (default = piecewise):
-      * If the total output is small (or ``--book``), a single blueprint
-        book is written to ``book.txt`` and returned as the primary string.
-      * Otherwise individual piece files are written to ``args.output_dir``
-        and the first piece is the primary string (nothing else is usable as
-        one paste).
+      * With ``--book``, a single blueprint book is assembled (parses every
+        piece and re-serialises the combined book — a few seconds of extra
+        work) and written to ``book.txt`` as the primary string.
+      * By default individual piece files are written to ``args.output_dir``
+        and the first piece is the primary string; no book is assembled.
+      * ``--no-book`` forces individual pieces even when ``--book`` is given.
 
     The returned dict has the keys the JSON envelope needs:
     ``{"blueprint", "pieces", "book"}``.
@@ -1849,7 +1845,7 @@ def _write_split_output(pieces: list[tuple[str, str]], args, *, book_label: str)
     total_chars = sum(len(s) for _, s in pieces)
     force_book = bool(getattr(args, "book", False))
     no_book = bool(getattr(args, "no_book", False))
-    make_book = force_book or (not no_book and total_chars <= _BOOK_CHAR_THRESHOLD)
+    make_book = force_book and not no_book
 
     book_str: str | None = None
     if make_book:

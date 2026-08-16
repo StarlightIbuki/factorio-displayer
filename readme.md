@@ -80,7 +80,11 @@ factorio-display encode ./big.mp4 --width 70 --time-chunks 3 --output-dir out
 
 Pieces are built and materialised in **parallel worker processes**, so generation scales with the number of cores.
 
-**Small outputs → a blueprint book automatically.** When the total output is roughly under 1 MB, the pieces are also assembled into a single blueprint book (`out/book.txt`) that you can import at once; `--book` forces a book even for large outputs, `--no-book` never emits one.
+**Blueprint book — opt-in (`--book`).** The book pass re-parses every piece
+and re-serialises the combined book (a few seconds of extra work), so it is
+**off by default** for performance; pass `--book` to also assemble
+`out/book.txt` for a single import, or `--no-book` to force individual
+pieces.
 
 To assemble in game:
 1. Import the book (if generated), or each piece individually.
