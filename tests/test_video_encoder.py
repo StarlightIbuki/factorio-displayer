@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pickle
+import time
 from pathlib import Path
 
 import numpy as np
@@ -673,6 +675,42 @@ class TestChunkCache:
         parts = [p.lower() for p in cache_dir.parts]
         assert ".factorio_display_cache" in parts
         assert version_prefix().lower() in cache_dir.name.lower()
+
+    def test_deduplicate_cross_is_in_cache_key(self):
+        """A ``--deduplicate-cross`` run must not reuse plain-run chunk
+        caches (regression: ``deduplicate_cross`` was missing from the key,
+        so the cross-dedup run loaded stale chunk TOMLs built without it).
+        """
+        plain = _chunk_cache_dir(
+            "src", 2, 11, 26, 60.0, False, 0.01, False, deduplicate_cross=False,
+        )
+        cross = _chunk_cache_dir(
+            "src", 2, 11, 26, 60.0, False, 0.01, False, deduplicate_cross=True,
+        )
+        assert plain != cross
+
+    def test_source_identity_tracks_file_identity(self):
+        """Editing a source file in place (same path) must change source_id
+        so frame/chunk caches are invalidated (regression: source_id was
+        ``'{path}_{skip}'``, so a changed file reused stale resized frames).
+        """
+        import factorio_display.video.encoder as enc_mod
+
+        p = Path(".factorio_display_cache") / "_src_identity_probe.bin"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            p.write_bytes(b"AAA")
+            id_a = enc_mod._source_identity(p, 1)
+            assert enc_mod._source_identity(p, 1) == id_a  # stable for same file
+            assert enc_mod._source_identity(p, 2) != id_a  # fps_skip is part of the id
+
+            p.write_bytes(b"BBB")
+            os.utime(p, (time.time() + 5, time.time() + 5))
+            assert enc_mod._source_identity(p, 1) != id_a, (
+                "changed file at the same path must get a new source_id"
+            )
+        finally:
+            p.unlink(missing_ok=True)
 
     def test_cache_dir_created(self, sample_frames_12, small_mapping, tmp_path):
         frames, _ = sample_frames_12

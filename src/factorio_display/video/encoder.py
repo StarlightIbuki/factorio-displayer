@@ -759,14 +759,31 @@ def _encode_frames_logical(
 # Chunk-cache helpers
 # ══════════════════════════════════════════════════════════════════════�?
 
+def _source_identity(path: str | Path, fps_skip: int = 1) -> str:
+    """Stable identity for a media file: resolved path + mtime + size.
+
+    A bare ``"{path}_{fps_skip}"`` id reused stale resized frames when the
+    source file changed in place (same path, new content).  Stat-based
+    identity catches edits without hashing the whole (possibly huge) file.
+    """
+    try:
+        st = Path(path).stat()
+        return f"{Path(path).resolve()}|{st.st_mtime_ns}|{st.st_size}|skip{fps_skip}"
+    except OSError:
+        return f"{path}|skip{fps_skip}"
+
+
 def _chunk_cache_dir(source_id: str, time_chunks: int, total_w: int, total_h: int,
-                     fps: float, adaptive: bool, threshold: float, deduplicate: bool) -> Path:
+                     fps: float, adaptive: bool, threshold: float, deduplicate: bool,
+                     deduplicate_cross: bool = False) -> Path:
     """Return a unique cache directory for a chunked encode run."""
     key = f"{source_id}_{total_w}x{total_h}_fps{fps}"
     if adaptive:
         key += f"_adp{threshold:.3f}"
     if deduplicate:
         key += "_dedup"
+    if deduplicate_cross:
+        key += "_dedupx"
     key += f"_tc{time_chunks}"
     safe = hashlib.md5(key.encode()).hexdigest()[:12]
     return cache_dir("video_time_chunks", f"encode_chunks_{safe}")
@@ -844,11 +861,7 @@ def _build_vertical_chunk_worker(payload: bytes) -> tuple[int, bytes]:
 # Merge helpers
 # ══════════════════════════════════════════════════════════════════════�?
 
-def _nearest_endpoint_pair(
-    lb: "LogicalBlueprint",
-    net_id_a: str,
-    net_id_b: str,
-) -> tuple["Endpoint", "Endpoint"] | None:
+def _nearest_endpoint_pair(lb, net_id_a, net_id_b):
     """Return the closest endpoint pair across two networks (by Chebyshev
     distance on entity positions), so the bridge wire that merges them stays
     within Factorio's ~9-tile circuit reach.  ``None`` when either network
@@ -1047,7 +1060,7 @@ def encode_frames(
     # Phase 0 & 1: Parallel Resizing, Adaptive Dropping, and Caching
     # ==================================================================
 
-    hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}"
+    hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}_{deduplicate}"
     safe_name = hashlib.md5(hash_str.encode('utf-8')).hexdigest()[:8]
     frame_cache_file = make_cache_file("video_frames", f"encode_cache_{safe_name}", ".pkl")
     loaded_from_cache = False
@@ -1379,7 +1392,7 @@ def encode_frames_chunked(
 
     clock = CLOCK_SIGNAL
 
-    hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}"
+    hash_str = f"{source_id}_{output_name}_{total_w}_{total_h}_{fps}_{adaptive}_{threshold}_{deduplicate}_{deduplicate_cross}"
     safe_name = hashlib.md5(hash_str.encode('utf-8')).hexdigest()[:8]
     frame_cache_file = make_cache_file("video_frames", f"encode_cache_{safe_name}", ".pkl")
 
@@ -1542,6 +1555,7 @@ def encode_frames_chunked(
         cache_dir = _chunk_cache_dir(
             source_id, time_chunks, total_w, total_h,
             fps, adaptive, threshold, deduplicate,
+            deduplicate_cross=deduplicate_cross,
         )
         cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1980,7 +1994,7 @@ def encode_video(
                 break
 
     try:
-        source_id = f"{video_path}_{fps_skip}"
+        source_id = _source_identity(video_path, fps_skip)
         if split:
             return encode_frames_split(
                 _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
@@ -2074,7 +2088,7 @@ def encode_gif(
             except EOFError:
                 return
 
-    source_id = f"{gif_path}_{fps_skip}"
+    source_id = _source_identity(gif_path, fps_skip)
     if time_chunks > 1 or deduplicate_cross:
         result = encode_frames_chunked(
             _iter(), output_name, effective_fps, adaptive, threshold, deduplicate,
