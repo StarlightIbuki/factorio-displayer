@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>factorio-display</title>
+  <link rel="icon" href="./favicon.ico" sizes="16x16 32x32 48x48" />
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">⚙ factorio-display</div>
+    <div class="topbar-right">
+      <label class="dev-toggle" data-i18n-title="topbar.devTitle" title="Developer mode — show raw JSON results and artifacts"><input id="dev-toggle" type="checkbox" /> <span data-i18n="topbar.dev">dev</span></label>
+      <select id="locale-select" title="Language / 语言">
+        <option value="en">English</option>
+        <option value="zh-CN">中文</option>
+      </select>
+      <button id="btn-about" class="link" data-i18n="topbar.about">About</button>
+      <button id="btn-tools" class="link" data-i18n="topbar.tools">Blueprint viewer</button>      <button id="btn-login" class="link hidden" data-i18n="auth.login">Login with GitHub</button>
+      <span id="auth-user" class="auth-user hidden"></span>      <input id="token-input" type="password" placeholder="API token" autocomplete="off" data-i18n="topbar.token" data-i18n-attr="placeholder" data-i18n-title="topbar.tokenTitle" title="Only needed when the server runs with --api-token" />
+    </div>
+  </header>
+
+  <!-- Shown while the user is not signed in: anonymous uploads/blueprints are
+       stored in the shared public space. -->
+  <div id="anon-warning" class="anon-warning hidden" role="note"
+       data-i18n="auth.anonWarning">
+    ⚠️ You are not signed in — your uploaded media and generated blueprints are
+    public and may be visible to other users. Sign in to keep them private.
+  </div>
+
+  <main>
+    <!-- ═══════════ Home ═══════════ -->
+    <section id="view-home">
+      <div id="empty-state" class="empty">
+        <h2 data-i18n="home.title">Turn media into a Factorio blueprint</h2>
+        <p class="hint" data-i18n="home.hint">Upload a video, a sequence of images, or audio, and generate a blueprint you can paste straight into Factorio.</p>
+        <button id="btn-first" class="primary big" data-i18n="home.cta">Generate your first blueprint</button>
+      </div>
+      <div id="list-state" class="hidden">
+        <div class="row between">
+          <h2 data-i18n="home.listTitle">Your blueprints</h2>
+          <button id="btn-new" class="primary big" data-i18n="home.listCta">Generate a new one</button>
+        </div>
+        <div id="jobs-tabs" class="jobs-tabs" role="tablist">
+          <button class="jobs-tab active" data-status="" data-i18n="home.filterAll">All</button>
+          <button class="jobs-tab" data-status="queued" data-i18n="home.filterQueued">queued</button>
+          <button class="jobs-tab" data-status="running" data-i18n="home.filterRunning">running</button>
+          <button class="jobs-tab" data-status="succeeded" data-i18n="home.filterSucceeded">succeeded</button>
+          <button class="jobs-tab" data-status="failed" data-i18n="home.filterFailed">failed</button>
+          <button class="jobs-tab" data-status="cancelled" data-i18n="home.filterCancelled">cancelled</button>
+        </div>
+        <div id="jobs-list" class="jobs-list"></div>
+        <p id="jobs-empty-hint" class="hint hidden" data-i18n="home.filterEmpty">No jobs with this status yet.</p>
+      </div>
+    </section>
+
+    <!-- ═══════════ Create (wizard) ═══════════ -->
+    <section id="view-create" class="hidden">
+      <div class="row between">
+        <h2 data-i18n="wizard.new">New blueprint</h2>
+        <button id="btn-back" class="link" data-i18n="wizard.back">← Back</button>
+      </div>
+
+      <div id="wizard-steps" class="wizard-steps">
+        <div class="wstep active" data-step="1" data-i18n="wizard.step1">1 · Media</div>
+        <div class="wstep" data-step="2" data-i18n="wizard.step2">2 · Edit</div>
+        <div class="wstep" data-step="3" data-i18n="wizard.step3">3 · Generate</div>
+      </div>
+
+      <!-- ── Step 1 · Media ── -->
+      <section id="wstep-media" class="wstep-pane">
+        <fieldset class="panel">
+          <legend data-i18n="s1.add">Add media clips</legend>
+          <div id="dropzone" class="dropzone" tabindex="0">
+            <p id="dropzone-hint" data-i18n="s1.drop">Drop video / audio / image clips here, or click to browse</p>
+            <div id="playlist" class="upload-list"></div>
+          </div>
+          <input id="file-input" type="file" multiple hidden
+                 accept=".mp4,.avi,.mov,.mkv,.webm,.gif,.png,.jpg,.jpeg,.bmp,.tiff,.tif,.wav,.flac,.ogg,.mp3,.m4a,.aac,.mid,.midi" />
+          <p class="hint" data-i18n="s1.hint">Add one or more clips. Each is automatically downsampled into a working cache used for editing, previewing and the final render.</p>
+        </fieldset>
+        <div class="actions">
+          <button id="btn-next-media" class="primary" data-i18n="s1.continue">Continue →</button>
+        </div>
+      </section>
+
+      <!-- ── Step 2 · Edit (timeline) ── -->
+      <section id="wstep-timeline" class="wstep-pane hidden">
+        <fieldset class="panel">
+          <legend data-i18n="s2.preview">Preview</legend>
+          <div class="row">
+            <button id="btn-preview" class="primary" data-i18n="s2.refresh">Refresh preview</button>
+            <span id="preview-status" class="status"></span>
+          </div>
+          <video id="preview-player" controls class="preview-player hidden"></video>
+          <p class="hint" data-i18n="s2.hint">Click the preview (or press Refresh) to re-render the final result after an edit. Small edits refresh automatically.</p>
+        </fieldset>
+
+        <fieldset class="panel">
+          <legend data-i18n="s2.timeline">Timeline</legend>
+          <p class="hint" data-i18n="s2.timelineHint">Drag a block to align it, drag its edges to cut it, or click to edit precise start/end times below.</p>
+          <div class="timeline">
+            <div class="rail-row">
+              <div class="rail-label" data-i18n="s2.railVideo">Video</div>
+              <div id="rail-video" class="rail"></div>
+            </div>
+            <div class="rail-row">
+              <div class="rail-label" data-i18n="s2.railAudio">Audio</div>
+              <div id="rail-audio" class="rail"></div>
+            </div>
+            <div id="timeline-scale" class="rail-scale"></div>
+          </div>
+        </fieldset>
+
+        <fieldset class="panel hidden" id="clip-inspector">
+          <legend id="clip-inspector-title"></legend>
+          <div class="row clip-inspector-inputs">
+            <label data-i18n="s2.pos">Pos (s) <input id="insp-pos" type="number" min="0" step="0.1" /></label>
+            <label id="insp-in-wrap" data-i18n="s2.in">In (s) <input id="insp-in" type="number" min="0" step="0.1" /></label>
+            <label id="insp-out-wrap" data-i18n="s2.out">Out (s) <input id="insp-out" type="number" min="0" step="0.1" /></label>
+            <label id="insp-dur-wrap" class="hidden" data-i18n="s2.dur">Dur (s) <input id="insp-dur" type="number" min="0.1" step="0.1" /></label>
+            <label id="insp-mode-wrap" class="hidden" data-i18n="s2.mode">Mode
+              <select id="insp-mode">
+                <option value="cut" data-i18n="s2.modeCut">Cut</option>
+                <option value="fast" data-i18n="s2.modeFast">Fast play</option>
+                <option value="repeat" data-i18n="s2.modeRepeat">Repeat</option>
+                <option value="freeze" data-i18n="s2.modeFreeze">Freeze at end</option>
+                <option value="slow" data-i18n="s2.modeSlow">Slow play</option>
+              </select>
+            </label>
+            <button id="insp-edit" class="link" data-i18n="s2.edit">Edit…</button>
+          </div>
+        </fieldset>
+
+        <div class="actions">
+          <button id="btn-add-media" class="link" data-i18n="s2.addMedia">+ Add media</button>
+          <button id="btn-prev-timeline" class="link" data-i18n="s2.back">← Media</button>
+          <button id="btn-next-timeline" class="primary" data-i18n="s1.continue">Continue →</button>
+        </div>
+      </section>
+
+      <!-- ── Step 3 · Generate ── -->
+      <section id="wstep-generate" class="wstep-pane hidden">
+        <fieldset class="panel">
+          <legend data-i18n="s3.display">Display size</legend>
+          <p id="size-recommend" class="hint" data-i18n="s3.sizeHint">Upload a video or image to see the recommended size.</p>
+          <div class="grid">
+            <label class="row checkbox" data-i18n="s3.auto"><input id="opt-auto-size" type="checkbox" checked /> Auto (recommended)</label>
+            <label class="row checkbox" data-i18n="s3.keepAspect"><input id="opt-keep-aspect" type="checkbox" checked /> Keep aspect ratio</label>
+            <label data-i18n="s3.width">Width (tiles) <input id="opt-width" type="number" min="1" value="" data-i18n="s3.widthAuto" data-i18n-attr="placeholder" placeholder="auto" disabled /></label>
+            <label data-i18n="s3.height">Height (tiles) <input id="opt-height" type="number" min="1" value="" placeholder="auto" disabled /></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button id="btn-preview-size" class="primary" data-i18n="s3.previewFrame">Preview frame at display size</button>
+          </div>
+          <canvas id="final-preview" class="editor-preview" width="224" height="208"></canvas>
+        </fieldset>
+
+        <details class="panel">
+          <summary data-i18n="s3.options">Options</summary>
+
+          <div class="grid">
+            <label data-i18n="s3.quality">Quality preset
+              <select id="compress-quality">
+                <option value="high" data-i18n="s3.qualityHigh">High (~1.2 Mbps)</option>
+                <option value="medium" selected data-i18n="s3.qualityMedium">Medium (~700 kbps)</option>
+                <option value="low" data-i18n="s3.qualityLow">Low (~400 kbps)</option>
+              </select>
+            </label>
+          </div>
+          <p class="hint" data-i18n="s3.compressHint">Videos are always compressed to the display resolution before upload — the display is small, so extra source resolution would be discarded server-side anyway.</p>
+
+          <hr />
+          <div class="grid">
+            <label data-i18n="s3.bpName">Blueprint name
+              <input id="opt-name" type="text" value="Media Data" />
+            </label>
+            <label data-i18n="s3.resultFormat">Result format
+              <select id="opt-result-format">
+                <option value="blueprint" selected data-i18n="s3.formatBlueprint">blueprint</option>
+                <option value="yaml" data-i18n="s3.formatInspect">Inspect item (yaml)</option>
+              </select>
+            </label>
+            <label data-i18n="s3.output">Output media
+              <select id="opt-output-mode">
+                <option value="video-sound" data-i18n="s3.outVideoSound">Video with sound</option>
+                <option value="video-muted" selected data-i18n="s3.outVideoMuted">Video (muted)</option>
+                <option value="audio" data-i18n="s3.outAudio">Audio only</option>
+              </select>
+            </label>
+            <div class="hint" style="grid-column:1/-1;opacity:.8" data-i18n="s3.allInOneNote">Results are generated as independent pieces by default (assembled into a blueprint book when small). "Video with sound" encodes the audio as separate pieces — no single giant merged blueprint (the legacy all-in-one, not recommended).</div>
+            <label data-i18n="s3.power">Power
+              <select id="opt-power">
+                <option value="substation" selected data-i18n="s3.powerSubstation">substation</option>
+                <option value="small" data-i18n="s3.powerSmall">small</option>
+                <option value="medium" data-i18n="s3.powerMedium">medium</option>
+                <option value="none" data-i18n="s3.powerNone">none</option>
+              </select>
+            </label>
+            <label class="row checkbox" data-i18n="s3.attachPlayer"><input id="opt-attach-player" type="checkbox" checked /> Attach player</label>
+            <label class="row checkbox" data-i18n="s3.progressBar"><input id="opt-progress-bar" type="checkbox" /> Progress bar</label>
+          </div>
+
+          <details class="panel">
+            <summary data-i18n="s3.videoSection">Video</summary>
+            <div class="grid">
+              <label data-i18n="s3.fps">FPS (0 = auto) <input id="opt-fps" type="number" min="0" max="60" step="1" value="0" /></label>
+              <label data-i18n="s3.skip">Frame skip <input id="opt-skip" type="number" min="1" value="1" /></label>
+              <label data-i18n="s3.adaptive">Adaptive
+                <select id="opt-adaptive"><option value="false" data-i18n="s3.off">off</option><option value="true" selected data-i18n="s3.on">on</option></select>
+              </label>
+              <label data-i18n="s3.threshold">Threshold <input id="opt-threshold" type="number" min="0" step="0.005" value="0.005" /></label>
+              <label data-i18n="s3.deduplicate">Deduplicate
+                <select id="opt-deduplicate"><option value="false" data-i18n="s3.off">off</option><option value="true" data-i18n="s3.on">on</option></select>
+              </label>
+              <label data-i18n="s3.timeChunks">Time chunks <input id="opt-time-chunks" type="number" min="1" value="1" /></label>
+              <label data-i18n="s3.chunkWorkers">Chunk workers <input id="opt-chunk-workers" type="number" min="1" value="" data-i18n="s3.chunkWorkersAuto" data-i18n-attr="placeholder" placeholder="auto" /></label>
+              <label class="row checkbox" data-i18n="s3.dedupCross"><input id="opt-dedup-cross" type="checkbox" /> Deduplicate across chunks</label>
+            </div>
+          </details>
+
+          <details class="panel">
+            <summary data-i18n="s3.midiSection">MIDI / ADSR</summary>
+            <div class="grid">
+              <label data-i18n="s3.ticksPerBeat">Ticks per beat <input id="opt-ticks-per-beat" type="number" min="1" value="30" /></label>
+              <label data-i18n="s3.boostMelody">Boost melody <input id="opt-boost-melody" type="number" min="0" step="0.1" value="1.0" /></label>
+              <label data-i18n="s3.velocityScale">Velocity scale <input id="opt-velocity-scale" type="number" min="0" step="0.1" value="1.0" /></label>
+              <label data-i18n="s3.railMode">Rail mode <input id="opt-rail-mode" type="text" value="auto:0.05" /></label>
+              <label class="row checkbox" data-i18n="s3.mapDrums"><input id="opt-map-drums" type="checkbox" checked /> Map drums</label>
+              <label data-i18n="s3.drumGain">Drum gain <input id="opt-drum-gain" type="number" min="0" max="1" step="0.05" value="0.25" /></label>
+              <label class="row checkbox" data-i18n="s3.globalShift"><input id="opt-global-shift" type="checkbox" checked /> Global octave shift</label>
+              <label data-i18n="s3.attackTicks">Attack (ticks) <input id="opt-attack-ticks" type="number" min="0" value="10" /></label>
+              <label data-i18n="s3.decayTicks">Decay (ticks) <input id="opt-decay-ticks" type="number" min="0" value="10" /></label>
+              <label data-i18n="s3.sustainLevel">Sustain level <input id="opt-sustain-level" type="number" min="0" max="1" step="0.05" value="1.0" /></label>
+              <label data-i18n="s3.releaseTicks">Release (ticks) <input id="opt-release-ticks" type="number" min="0" value="10" /></label>
+              <label data-i18n="s3.attackCurve">Attack curve <input id="opt-attack-curve" type="number" step="0.1" value="1.0" /></label>
+              <label data-i18n="s3.decayCurve">Decay curve <input id="opt-decay-curve" type="number" step="0.1" value="1.0" /></label>
+              <label data-i18n="s3.releaseCurve">Release curve <input id="opt-release-curve" type="number" step="0.1" value="1.0" /></label>
+            </div>
+          </details>
+
+          <details class="panel">
+            <summary data-i18n="s3.audioSection">Audio file</summary>
+            <div class="grid">
+              <label class="row checkbox" data-i18n="s3.useBasicPitch"><input id="opt-basic-pitch" type="checkbox" checked /> Use AI transcription (Basic Pitch)</label>
+              <label data-i18n="s3.activationThreshold">Activation threshold <input id="opt-activation-threshold" type="number" step="0.01" value="0.0" /></label>
+              <label data-i18n="s3.midiThreshold">MIDI threshold <input id="opt-midi-threshold" type="number" step="0.01" value="0.05" /></label>
+              <label class="row checkbox" data-i18n="s3.condenseMidi"><input id="opt-condense" type="checkbox" checked /> Condense MIDI notes</label>
+              <label data-i18n="s3.maxPolyphony">Max polyphony (0 = unlimited) <input id="opt-max-polyphony" type="number" min="0" value="0" /></label>
+            </div>
+          </details>
+
+          <details class="panel">
+            <summary data-i18n="s3.advancedSection">Advanced</summary>
+            <div class="grid">
+              <label class="row checkbox" data-i18n="s3.useCache"><input id="opt-use-cache" type="checkbox" checked /> Use on-disk cache</label>
+              <label data-i18n="s3.callbackUrl">Callback URL (webhook) <input id="opt-callback-url" type="url" value="" data-i18n="s3.callbackPlaceholder" data-i18n-attr="placeholder" placeholder="https://example.com/hook" /></label>
+            </div>
+          </details>
+        </details>
+
+        <div class="actions">
+          <button id="btn-prev-generate" class="link" data-i18n="s3.back">← Edit</button>
+          <button id="btn-generate" class="primary" disabled data-i18n="s3.generate">Generate</button>
+          <span id="generate-status" class="status"></span>
+        </div>
+      </section>
+    </section>
+
+  </main>
+
+  <!-- ═══════════ Editor (modal) ═══════════ -->
+  <div id="editor-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="row between">
+        <h2 data-i18n="ed.title">Edit &amp; preview</h2>
+        <button id="editor-close" class="link">✕</button>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-stage-wrap">
+          <div id="editor-stage" class="editor-stage"></div>
+        </div>
+        <div class="editor-controls">
+          <fieldset class="panel">
+            <legend data-i18n="ed.trim">Trim / cut</legend>
+            <div class="grid">
+              <label data-i18n="ed.start">Start (s) <input id="editor-start" type="number" min="0" step="0.1" value="0" /></label>
+              <label data-i18n="ed.end">End (s) <input id="editor-end" type="number" min="0" step="0.1" value="0" /></label>
+            </div>
+            <button id="editor-play" class="primary" data-i18n="ed.play">Play selection</button>
+          </fieldset>
+          <fieldset class="panel">
+            <legend data-i18n="ed.crop">Crop</legend>
+            <label class="row checkbox" data-i18n="ed.enableCrop"><input id="editor-crop-enable" type="checkbox" /> Enable crop</label>
+            <button id="editor-crop-reset" data-i18n="ed.resetCrop">Reset crop</button>
+          </fieldset>
+          <fieldset class="panel" id="editor-audio-panel">
+            <legend data-i18n="ed.audio">Audio</legend>
+            <label data-i18n="ed.offset">Offset
+              <input id="editor-offset" type="range" min="-5" max="5" step="0.1" value="0" />
+              <span id="editor-offset-val">0s</span>
+            </label>
+            <label data-i18n="ed.startAt">Start at (s)
+              <input id="editor-start-at" type="number" min="0" step="0.1" value="0" />
+            </label>
+            <label class="row checkbox" data-i18n="ed.mute"><input id="editor-mute" type="checkbox" /> Mute</label>
+          </fieldset>
+          <fieldset class="panel">
+            <legend data-i18n="ed.resolution">Resolution preview</legend>
+            <button id="editor-preview-size" data-i18n="ed.previewSize">Preview at display size</button>
+            <canvas id="editor-preview" class="editor-preview" width="224" height="208"></canvas>
+          </fieldset>
+        </div>
+      </div>
+      <div class="row" style="gap:10px;margin-top:10px">
+        <button id="editor-export" class="primary big" data-i18n="ed.apply">Apply to this clip</button>
+        <span id="editor-status" class="status"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Blueprint inspector (modal) — unified viewer + job inspection ═══════════ -->
+  <div id="inspect-modal" class="modal hidden">
+    <div class="modal-box wide inspect-box">
+      <div class="row between">
+        <h2 id="inspect-title" data-i18n="viewer.title">Blueprint viewer</h2>
+        <button id="inspect-close" class="link">✕</button>
+      </div>
+      <div id="inspect-paste" class="hidden">
+        <textarea id="inspect-input" rows="4" placeholder="0eNq…  or  https://…" spellcheck="false"></textarea>
+        <p class="hint" style="margin-top:6px" data-i18n="viewer.urlHint">Paste a blueprint string, or a URL (http/https) pointing at a raw blueprint string.</p>
+        <div class="row" style="margin-top:8px;align-items:center;gap:8px">
+          <button id="inspect-load" class="primary" data-i18n="viewer.inspect">Inspect</button>
+          <span class="hint" data-i18n="inspect.loadHint">Ctrl/Cmd+Enter to load</span>
+        </div>
+      </div>
+      <div id="inspect-body" class="hidden">
+        <div id="inspect-tabs" class="result-tabs">
+          <button class="active" data-tab="string" data-i18n="s3.formatBlueprint">Blueprint</button>
+          <button data-tab="items" data-i18n="result.inspectItem">Inspect item</button>
+          <button data-tab="preview" data-i18n="result.preview">Preview</button>
+        </div>
+        <div id="inspect-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Report a bug (modal) ═══════════ -->
+  <div id="report-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="row between">
+        <h2 data-i18n="report.title">Report a bug</h2>
+        <button id="report-close" class="link">✕</button>
+      </div>
+      <fieldset class="panel">
+        <legend data-i18n="report.details">Issue details</legend>
+        <p class="hint" data-i18n="report.hint">Describe the problem — what you expected vs what happened, the media you used, etc. The job's blueprint and input files are saved with the report.</p>
+        <label for="report-comment" data-i18n="report.comment">Description</label>
+        <textarea id="report-comment" rows="5" spellcheck="false"></textarea>
+        <label for="report-contact" data-i18n="report.contact">Contact (optional)</label>
+        <input id="report-contact" type="text" />
+        <div class="row" style="margin-top:10px">
+          <button id="report-submit" class="primary" data-i18n="report.submit">Submit</button>
+          <button id="report-cancel" data-i18n="report.cancel">Cancel</button>
+        </div>
+      </fieldset>
+    </div>
+  </div>
+
+  <!-- ═══════════ About / Acknowledgements (modal) ═══════════ -->
+  <div id="about-modal" class="modal hidden">
+    <div class="modal-box wide">
+      <div class="row between">
+        <h2 data-i18n="about.title">About &amp; Acknowledgements</h2>
+      </div>
+      <pre id="about-body" class="logbox" style="max-height:45vh"></pre>
+      <!-- Backend API config is a developer affordance — hidden unless
+           Developer mode is on (toggled in app.js openAbout). -->
+      <div id="about-backend" class="about-backend hidden">
+        <h3 data-i18n="about.backendTitle">Backend API</h3>
+        <p class="hint" data-i18n="about.backendHint">Leave empty for automatic: use the local backend, falling back to the public server.</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <input id="backend-input" type="text" placeholder="https://…" spellcheck="false" autocomplete="off" style="flex:1;min-width:240px" />
+          <button id="backend-save" class="primary" data-i18n="about.backendSave">Save</button>
+          <button id="backend-reset" data-i18n="about.backendResetBtn">Use auto</button>
+        </div>
+        <p class="hint" id="backend-status"></p>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:12px">
+        <button id="about-ok" class="primary big" data-i18n="about.ok">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Login (modal) ═══════════ -->
+  <div id="login-modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="row between">
+        <h2 data-i18n="auth.loginTitle">Sign in</h2>
+        <button id="login-modal-close" class="link">✕</button>
+      </div>
+      <p class="hint" data-i18n="auth.loginHint">Sign in with GitHub to create and manage jobs.</p>
+      <p class="hint warning" data-i18n="auth.anonWarningModal">While signed out, your uploads and blueprints are public.</p>
+      <div class="row" style="gap:8px;margin-top:12px">
+        <button id="login-modal-btn" class="primary big" data-i18n="auth.login">Login with GitHub</button>
+        <button id="login-modal-dismiss" data-i18n="auth.cancel">Cancel</button>
+      </div>
+      <p class="hint hidden" id="login-modal-dev"></p>
+    </div>
+  </div>
+
+  <!-- ═══════════ Media preview (modal) — plays the FINAL media that was uploaded for a job ═══════════ -->
+  <div id="media-modal" class="modal hidden">
+    <div class="modal-box wide media-modal-box">
+      <div class="row between">
+        <h2 data-i18n="jobs.previewTitle">Final media preview</h2>
+        <button id="media-modal-close" class="link">✕</button>
+      </div>
+      <div id="media-modal-body" class="media-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
+
