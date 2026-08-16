@@ -232,36 +232,6 @@ def _fix_cc_control_behaviors(d: dict) -> None:
                 f.setdefault("quality", "normal")
 
 
-def _rotate_memory_piece(d: dict) -> None:
-    """Rotate a memory-piece blueprint dict 90 degrees counter-clockwise.
-
-    Memory banks are generated in the display's orientation (wide rows growing
-    downward, north-facing deciders).  The user places each memory piece next
-    to the display, so we bake the rotation in: every entity's position is
-    rotated ``(x, y) -> (y, -x)`` and every facing combinator's direction is
-    rotated one step counter-clockwise (north -> west, east -> north, ...) —
-    the SAME sense as the position rotation, so each entity's input/output
-    port sides stay consistent with its rotated footprint.  The
-    constant-combinator connectors are re-oriented to keep facing NORTH, so
-    they align with the display chunk's own (north-facing) connector CCs.
-    """
-    for entity in d.get("blueprint", {}).get("entities", []):
-        pos = entity.get("position") or {}
-        x, y = pos.get("x", 0.0), pos.get("y", 0.0)
-        pos["x"], pos["y"] = y, -x
-        if entity.get("name") == "constant-combinator":
-            entity["direction"] = 0  # keep facing north (aligns with display CCs)
-        elif entity.get("name") in (
-            "decider-combinator",
-            "arithmetic-combinator",
-            "selector-combinator",
-        ):
-            # Rotate the facing 90 degrees counter-clockwise (north -> west).
-            # Draftsman omits the default (north) direction from the dict, so
-            # always write it.
-            entity["direction"] = (int(entity.get("direction", 0)) + 12) % 16
-
-
 def _display_string(bp: Blueprint) -> str:
     """Serialise the display blueprint with ``compare_type`` + CC-signal fixes
     (no rotation — the display stays in world orientation)."""
@@ -273,17 +243,17 @@ def _display_string(bp: Blueprint) -> str:
 
 
 def _piece_string(bp: Blueprint) -> str:
-    """Serialise a split-output memory piece with all dict fixes applied.
+    """Serialise a split-output memory piece.
 
-    Fixes the decider ``compare_type`` fields, normalises constant-combinator
-    signal quality, and rotates the whole piece 270 degrees counter-clockwise
-    (DC facings rotated, CCs kept facing north).
+    The piece is generated in its final orientation — the memory-bank layout
+    bakes the 90° CCW rotation in (``_layout_and_prewire_memory_bank``
+    places the deciders west-facing at rotated tiles) — so serialisation only
+    applies the draftsman-output fixes below, with no entity rotation pass.
     """
     from draftsman.utils import JSON_to_string
     d = bp.to_dict()
     _fix_conditions_in_dict(d)
     _fix_cc_control_behaviors(d)
-    _rotate_memory_piece(d)
     return JSON_to_string(d)
 
 
@@ -343,26 +313,40 @@ def _layout_and_prewire_memory_bank(
     cols = _MEMORY_BANK_COLS
     rows = math.ceil(n / cols)
 
-    # Decider combinators are 1x2 (north-facing) in this project.
+    # Decider combinators are 1x2 (north-facing) in this project.  In
+    # split/connectors mode the whole bank is baked 90° CCW — matching the
+    # orientation the user places the piece in — so no post-hoc dict
+    # rotation pass is needed.  The transform must map each entity's
+    # FOOTPRINT, not just its anchor tile: a north 1x2 DC anchored at its
+    # TOP tile (col, row*2) has centre (col+0.5, row*2+1), which rotates to
+    # (row*2+1, -col-0.5); a west 2x1 DC is anchored at its LEFT tile and
+    # has centre (x+1, y+0.5), so the baked anchor is (row*2, -col-1).
     for idx, dc_id in enumerate(dc_ids):
         row = idx // cols
         col = idx % cols
         ent = lb.entities.get(dc_id)
         if ent is None:
             continue
-        ent.position = (col, row * 2)
+        if connectors:
+            ent.position = (row * 2, -col - 1)
+            ent.direction = 12  # west (90° CCW from north)
+        else:
+            ent.position = (col, row * 2)
 
     input_anchor = Endpoint(dc_ids[0], "input")
     output_anchor = Endpoint(dc_ids[0], "output")
 
     # ── Connector CCs (split mode) ──────────────────────────────────
     # The bank grows VERTICALLY, so the connector layout follows the growth
-    # axis: ONE bus connector at the TOP (right-aligned, ``(cols-1, -1)``),
-    # ONE isolated series MARKER at the TOP (right-aligned, ``(cols-2, -1)``)
-    # and ONE bus connector at the BOTTOM (right-aligned, ``(cols-1, rows*2)``).
+    # axis: ONE bus connector at the TOP (right-aligned), ONE isolated
+    # series MARKER at the TOP (right-aligned) and ONE bus connector at the
+    # BOTTOM (right-aligned).  Positions below are given in the baked 90° CCW
+    # orientation (the unrotated (cols-1, -1) / (cols-2, -1) / (cols-1,
+    # rows*2) transformed by (x, y) -> (y, -x)); the connectors stay
+    # north-facing so they align with the display chunk's connector CCs.
     # Both bus connectors join BOTH the green (time) bus and the red (data)
     # bus, so the user wires matching connector CCs in game to join pieces /
-    # display along the vertical growth direction; the marker is isolated.
+    # display along the growth direction; the marker is isolated.
     # All CCs carry their identifying signal at value 1 (so it shows on the
     # map) with the combinator "Output" toggle OFF (``enabled=False`` →
     # ``control_behavior.is_on=false``), so the signal is displayed but never
@@ -380,7 +364,8 @@ def _layout_and_prewire_memory_bank(
                 "signals": [{"name": connector_label, "value": 1}],
                 "enabled": False,
             },
-            position=(cols - 1, -1),
+            position=(-1, -cols),
+            direction=0,
         ))
         if fragment_index is not None:
             lb.add_entity(LogicalEntity(
@@ -389,7 +374,8 @@ def _layout_and_prewire_memory_bank(
                     "signals": [{"name": "signal-info", "value": fragment_index + 1}],
                     "enabled": False,
                 },
-                position=(cols - 2, -1),
+                position=(-1, 1 - cols),
+                direction=0,
             ))
         lb.add_entity(LogicalEntity(
             bottom_conn, "constant-combinator",
@@ -397,7 +383,8 @@ def _layout_and_prewire_memory_bank(
                 "signals": [{"name": connector_label, "value": 1}],
                 "enabled": False,
             },
-            position=(cols - 1, rows * 2),
+            position=(rows * 2, -cols),
+            direction=0,
         ))
         # Wiring anchors nearest to each connector (keeps every wire within
         # Factorio's 9-tile circuit-wire reach): the top connector joins via

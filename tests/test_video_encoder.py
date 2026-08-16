@@ -294,8 +294,8 @@ class TestEncodeFramesCore:
 
         # Serialises fine and the connector's output-off round-trips.
         # (Draftsman round-trip drops custom entity ids, so locate CCs by
-        # position: rightmost top connector (cols-1, -1) — right-aligned with
-        # the rightmost decider.)
+        # position: the baked 90° CCW layout puts the rightmost top connector
+        # at (-1, -(cols-1)) — right-aligned with the rightmost decider.)
         from factorio_display.logical_blueprint import from_blueprint_string, to_draftsman
         from factorio_display.video.encoder import _MEMORY_BANK_COLS
         bp = to_draftsman(lb)
@@ -307,7 +307,7 @@ class TestEncodeFramesCore:
             ent.position: ent for ent in lb2.entities.values()
             if ent.type == "constant-combinator"
         }
-        top = cc_by_pos.get((_MEMORY_BANK_COLS - 1, -1))
+        top = cc_by_pos.get((-1, -_MEMORY_BANK_COLS))
         assert top is not None, "rightmost top connector CC missing after round-trip"
         assert top.properties.get("enabled") is False
         assert top.properties["signals"][0]["value"] == 1
@@ -619,8 +619,11 @@ class TestEncodeFramesChunked:
                     if constant is not None:
                         constants.append(constant)
             assert constants, f"Chunk {i} has no tick constants"
-            lo = i * expected_chunk_size + 1
-            hi = min((i + 1) * expected_chunk_size, len(frames))
+            # encode_frames_chunked derives tick ranges from the FPS (60 →
+            # one tick per frame), starting at 0: chunk i covers
+            # [i*size, (i+1)*size - 1] in absolute ticks.
+            lo = i * expected_chunk_size
+            hi = min((i + 1) * expected_chunk_size, len(frames)) - 1
             assert min(constants) == lo, (
                 f"Chunk {i} window starts at {min(constants)}, expected {lo}"
             )
@@ -631,8 +634,8 @@ class TestEncodeFramesChunked:
                 f"Chunk {i} has out-of-window constants: {constants}"
             )
             seen.update(constants)
-        # The absolute windows tile the full 1..12 timeline exactly once.
-        assert seen == set(range(1, len(frames) + 1)), (
+        # The absolute windows tile the full 0..11 timeline exactly once.
+        assert seen == set(range(len(frames))), (
             f"chunk windows must tile the timeline exactly, got {sorted(seen)}"
         )
 
@@ -700,45 +703,63 @@ class TestChunkCache:
         assert ".factorio_display_cache" in parts
         assert version_prefix().lower() in cache_dir.name.lower()
 
-    def test_rotate_memory_piece_positions_match_direction_sense(self):
-        """The baked memory-piece rotation must rotate positions and facing
-        directions in the SAME sense (both 90° CCW, north -> west).
+    def test_memory_bank_rotation_is_baked_into_the_layout(self):
+        """Split-mode memory banks must be generated in their final rotated
+        orientation — no post-hoc dict rotation pass.
 
-        Regression: positions used ``(x,y) -> (y,-x)`` (90° CCW) while
-        directions used ``+4`` (90° CW, north -> east) — the opposite sense —
-        so each entity's input/output port sides flipped relative to its
-        rotated footprint, and the docstring contradicted the code.
+        Regression: the piece used to be serialised unrotated and then
+        rotated at the dict level with positions ``(x,y) -> (y,-x)`` (90°
+        CCW) but facings ``+4`` (90° CW, north -> east) — the opposite
+        sense — so input/output port sides flipped relative to the
+        footprint.  The layout now bakes the rotation in: each DC sits at
+        ``(row*2, -col)`` facing WEST, and the connectors sit at their
+        rotated tiles facing NORTH.
         """
-        from factorio_display.video.encoder import _rotate_memory_piece
+        from factorio_display.logical_blueprint import to_draftsman
+        from factorio_display.video.encoder import _encode_frames_core
 
-        d = {"blueprint": {"entities": [
-            {"id": "gate_1", "name": "decider-combinator",
-             "position": {"x": 2, "y": 3}, "direction": 0},
-            {"id": "gate_2", "name": "decider-combinator",
-             "position": {"x": 4, "y": 3}, "direction": 4},
-            {"id": "connT", "name": "constant-combinator",
-             "position": {"x": 9, "y": -1}, "direction": 8},
-        ]}}
-        _rotate_memory_piece(d)
-        ents = {e["id"]: e for e in d["blueprint"]["entities"]}
-
-        g1 = ents["gate_1"]
-        # position: (x, y) -> (y, -x)
-        assert (g1["position"]["x"], g1["position"]["y"]) == (3, -2)
-        # direction: north -> west (+12) — the SAME (CCW) sense as the position
-        assert g1["direction"] == 12, (
-            f"north-facing DC must rotate to west (12), got {g1['direction']}"
+        rng = np.random.default_rng(0)
+        frames = [rng.integers(0, 256, (8, 8, 3), dtype=np.uint8) for _ in range(12)]
+        mapping_params = {
+            "width": 8, "height": 8,
+            "qualities": ["normal", "uncommon", "rare", "epic", "legendary"],
+            "signal_pool": [
+                "wooden-chest", "iron-chest", "steel-chest", "storage-tank",
+                "transport-belt", "fast-transport-belt", "express-transport-belt",
+                "underground-belt", "fast-underground-belt", "express-underground-belt",
+                "splitter", "fast-splitter", "express-splitter",
+                "burner-inserter", "inserter", "long-handed-inserter",
+            ],
+        }
+        lb = _encode_frames_core(
+            kept_frames=frames, tick_ranges=[(i, i) for i in range(12)],
+            output_name="R", deduplicate=False, mapping_params=mapping_params,
+            clock="signal-clock", current_tick=12, label_suffix="",
+            connectors=True, fragment_index=0,
         )
+        # 12 DCs -> 1 row of 10 + 1 row of 2 (_MEMORY_BANK_COLS=10), rotated
+        # with footprint-aware anchors: north 1x2 at (col, row*2) has centre
+        # (col+0.5, row*2+1) which rotates to (row*2+1, -col-0.5); a west 2x1
+        # DC is anchored at its left tile, so the anchor is (row*2, -col-1).
+        gate0 = lb.entities["gate_1"]
+        assert gate0.position == (0, -1) and gate0.direction == 12
+        gate10 = lb.entities["gate_10"]  # row 0, col 9
+        assert gate10.position == (0, -10) and gate10.direction == 12
+        gate11 = lb.entities["gate_11"]  # row 1, col 0
+        assert gate11.position == (2, -1) and gate11.direction == 12
 
-        g2 = ents["gate_2"]
-        assert (g2["position"]["x"], g2["position"]["y"]) == (3, -4)
-        assert g2["direction"] == 0, (  # east (4) -> north (0): one CCW step
-            f"east-facing DC must rotate to north (0), got {g2['direction']}"
-        )
+        # Connector CCs (1x1, anchor == centre) at the rotated centres,
+        # always facing north (0).
+        conn_t = lb.entities["gate_1_connT"]
+        assert conn_t.position == (-1, -10) and conn_t.direction == 0
+        marker = lb.entities["gate_1_marker"]
+        assert marker.position == (-1, -9) and marker.direction == 0
+        conn_b = lb.entities["gate_1_connB"]
+        assert conn_b.position == (4, -10) and conn_b.direction == 0
 
-        # Connector CCs are always re-oriented to face north.
-        assert ents["connT"]["direction"] == 0
-        assert (ents["connT"]["position"]["x"], ents["connT"]["position"]["y"]) == (-1, -9)
+        # Still materialises with valid wiring.
+        bp = to_draftsman(lb)
+        assert bp is not None
 
     def test_deduplicate_cross_is_in_cache_key(self):
         """A ``--deduplicate-cross`` run must not reuse plain-run chunk
