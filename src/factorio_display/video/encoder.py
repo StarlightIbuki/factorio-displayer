@@ -257,16 +257,6 @@ def _piece_string(bp: Blueprint) -> str:
     return JSON_to_string(d)
 
 
-def _fix_blueprint_conditions(bp: Blueprint) -> Blueprint:
-    """Convenience wrapper that returns a *new* Blueprint with fixed conditions.
-    Prefer :func:`_to_fixed_string` for serialization to avoid re-serializing
-    from objects (which would lose the fix).
-    """
-    d = bp.to_dict()
-    _fix_conditions_in_dict(d)
-    return Blueprint.from_dict(d)
-
-
 # ══════════════════════════════════════════════════════════════════════
 # Core blueprint builder (extracted for reuse by chunked encoder)
 # ══════════════════════════════════════════════════════════════════════
