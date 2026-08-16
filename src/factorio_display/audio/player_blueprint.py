@@ -302,6 +302,7 @@ def _build_rail(
     map_drums: bool = False,
     ticks_per_page: int = TICKS_PER_PAGE,
     speaker_count: int | None = None,
+    active_drum_pitches: set[int] | None = None,
 ) -> _RailEndpoints:
     """Build one rail's decoder pipeline at the given X offset.
 
@@ -309,6 +310,12 @@ def _build_rail(
     0..speaker_count-1) in a 12-column grid of octave rows.  Most melodic
     instruments have a 3-octave real range (36 notes) so they only get 36
     speakers; piano (F3-E7, 4 octaves) gets the full 48.
+
+    *active_drum_pitches* — when given for a drum-kit rail, a COMPACT drum
+    rail is built: one decoder channel per used drum TYPE (mirroring
+    :func:`_build_rail_logical`), matching the compact memory cells written
+    by the all-in-one combined path.  Without it the full 48-grid is built
+    (standalone exports have no audio data to know which drums are used).
 
     Returns endpoint IDs for cross-rail wiring.
     """
@@ -318,6 +325,27 @@ def _build_rail(
         instrument.lower().replace("programmable-speaker-instrument-", ""),
         instrument,
     )
+
+    # ── Cell layout ────────────────────────────────────────────────
+    # A rail is a row of *cells_per_tick* decoder channels; each channel
+    # unpacks one packed cell (up to 4 lane loudnesses) into up to 4
+    # speakers.  The generic rail uses 12 cells/tick (one per semitone,
+    # lanes = octaves).  A compact drum rail uses one cell per used drum
+    # TYPE — a kick-only song is a single channel.
+    is_compact_drum = (
+        instrument_proto == "drum-kit"
+        and active_drum_pitches is not None
+    )
+    if is_compact_drum:
+        grouping = drum_grouping(active_drum_pitches)
+        cells_per_tick = len(grouping)
+        ch_lanes: list[list[tuple[int, int]]] = [
+            [(lane, p) for lane, p in enumerate(cell) if p is not None]
+            for cell in grouping
+        ]
+    else:
+        cells_per_tick = 12
+        ch_lanes = []  # unused for the melodic grid
 
     n_speakers = (
         speaker_count if speaker_count is not None
@@ -332,41 +360,73 @@ def _build_rail(
 
     # ── Page input port ────────────────────────────────────────────
     port_id = f"{prefix}page_port"
+    # Compact rails are narrow: keep the port (and the mod, placed by the
+    # caller at the same column) beside the last channel so the port→sel
+    # and mod→match wires stay within Factorio's ~9-tile reach.
+    port_x = rail_x + (PORT_X if not is_compact_drum else cells_per_tick)
     port = new_entity("constant-combinator", id=port_id,
-                      tile_position=(rail_x + PORT_X, PORT_Y))
+                      tile_position=(port_x, PORT_Y))
     blueprint.entities.append(port)
     ep.port_id = port_id
 
     # ── Speakers ───────────────────────────────────────────────────
-    for pitch_idx, sig in iter_speaker_signals():
-        if pitch_idx >= n_speakers:
-            break  # only the instrument's real-range speakers are placed
-        col = rail_x + (pitch_idx % 12)
-        row = SPK_Y + (3 - pitch_idx // 12)
-        spk_id = f"{prefix}spk_{pitch_idx}"
-        spk = new_entity("programmable-speaker", id=spk_id,
-                         tile_position=(col, row))
-        spk.instrument_name = instrument_proto
-        is_drum = instrument_proto == "drum-kit" and map_drums
-        if is_drum:
-            if pitch_idx < len(DRUM_KIT_NOTES):
-                spk.note_name = DRUM_KIT_NOTES[pitch_idx]
+    if is_compact_drum:
+        # One speaker per used drum type, stacked directly below its
+        # channel's selector (no dead 48-grid rows).
+        for c, lanes_here in enumerate(ch_lanes):
+            for lane, pitch in sorted(lanes_here):
+                col = rail_x + c
+                row = SEL_Y - 1 - lane
+                spk_id = f"{prefix}spk_{pitch}"
+                spk = new_entity("programmable-speaker", id=spk_id,
+                                 tile_position=(col, row))
+                spk.instrument_name = instrument_proto
+                spk.note_name = (
+                    DRUM_KIT_NOTES[pitch]
+                    if pitch < len(DRUM_KIT_NOTES)
+                    else DRUM_KIT_NOTES[0]
+                )
+                sig = pitch_index_to_signal(pitch)
+                spk.volume_signal = {"name": sig["name"], "quality": sig["quality"]}
+                spk.volume_controlled_by_signal = True
+                spk.allow_polyphony = True
+                spk.circuit_enabled = True
+                spk.set_circuit_condition(
+                    first_operand="signal-no-entry", comparator="=", second_operand=0,
+                )
+                blueprint.entities.append(spk)
+                ep.speaker_ids[(col, row)] = spk_id
+                ep.col_speakers.setdefault(c, []).append(spk_id)
+    else:
+        for pitch_idx, sig in iter_speaker_signals():
+            if pitch_idx >= n_speakers:
+                break  # only the instrument's real-range speakers are placed
+            col = rail_x + (pitch_idx % 12)
+            row = SPK_Y + (3 - pitch_idx // 12)
+            spk_id = f"{prefix}spk_{pitch_idx}"
+            spk = new_entity("programmable-speaker", id=spk_id,
+                             tile_position=(col, row))
+            spk.instrument_name = instrument_proto
+            is_drum = instrument_proto == "drum-kit" and map_drums
+            if is_drum:
+                if pitch_idx < len(DRUM_KIT_NOTES):
+                    spk.note_name = DRUM_KIT_NOTES[pitch_idx]
+                else:
+                    spk.note_name = DRUM_KIT_NOTES[0]  # placeholder (never played)
             else:
-                spk.note_name = DRUM_KIT_NOTES[0]  # placeholder (never played)
-        else:
-            spk.note_name = _pitch_index_to_factorio_note(pitch_idx, midi_base=midi_base)
-        spk.volume_signal = {"name": sig["name"], "quality": sig["quality"]}
-        spk.volume_controlled_by_signal = True
-        spk.allow_polyphony = True
-        spk.circuit_enabled = True
-        spk.set_circuit_condition(
-            first_operand="signal-no-entry", comparator="=", second_operand=0,
-        )
-        blueprint.entities.append(spk)
-        ep.speaker_ids[(col, row)] = spk_id
-        if (pitch_idx % 12) not in ep.col_speakers:
-            ep.col_speakers[pitch_idx % 12] = []
-        ep.col_speakers[pitch_idx % 12].append(spk_id)
+                spk.note_name = _pitch_index_to_factorio_note(pitch_idx, midi_base=midi_base)
+            spk.volume_signal = {"name": sig["name"], "quality": sig["quality"]}
+            spk.volume_controlled_by_signal = True
+            spk.allow_polyphony = True
+            spk.circuit_enabled = True
+            spk.set_circuit_condition(
+                first_operand="signal-no-entry", comparator="=", second_operand=0,
+            )
+            blueprint.entities.append(spk)
+            ep.speaker_ids[(col, row)] = spk_id
+            if (pitch_idx % 12) not in ep.col_speakers:
+                ep.col_speakers[pitch_idx % 12] = []
+            ep.col_speakers[pitch_idx % 12].append(spk_id)
 
     # ── Debug lamps (optional) ─────────────────────────────────────
     dbg_lamp_ids: dict[tuple[int, int], str] = {}
@@ -388,16 +448,35 @@ def _build_rail(
             dbg_lamp_ids[(col, lamp_row)] = dbg_id
 
     # ── Per-channel pipeline ───────────────────────────────────────
-    for ch in range(12):
-        base_id = f"{prefix}ch{ch}"
-        col = rail_x + ch
+    # Upper spare port per column (lane-0 unpacker output, or the selector
+    # output for raw single-lane drum cells) — used by the odd-gap merge
+    # bridges below.
+    col_upper_spare: dict[int, str] = {}
+    for c in range(cells_per_tick):
+        base_id = f"{prefix}ch{c}"
+        col = rail_x + c
+
+        # Lane signals for this channel.  Melodic: one per octave present.
+        # Compact drums: one per lane of the packed cell (a raw single-lane
+        # cell drives its speaker directly — no unpacker).
+        if is_compact_drum:
+            ch_lanes_here = ch_lanes[c]
+            spk_sigs = [
+                pitch_index_to_signal(pitch)
+                for _lane, pitch in sorted(ch_lanes_here)
+            ]
+            raw_cell = len(ch_lanes_here) == 1
+        else:
+            spk_sigs = [pitch_index_to_signal(c + oct * 12) for oct in range(lanes)]
+            raw_cell = False
+        lanes_here = len(spk_sigs)
 
         # -- Lookup CC --
         cc = new_entity("constant-combinator", id=f"{base_id}_lut",
                         tile_position=(col, LUT_Y))
         slot = 0
         for t in range(ticks_per_page):
-            cell_offset = t * 12 + ch
+            cell_offset = t * cells_per_tick + c
             sig_idx = cell_offset // num_qual
             qual_idx = cell_offset % num_qual
             # Sub-tick 0 silent: stored value = page size (out of range).
@@ -424,13 +503,17 @@ def _build_rail(
         blueprint.add_circuit_connection("green", f"{base_id}_lut", f"{base_id}_match")
 
         # -- Selector AC --
+        # Raw drum cells: the whole cell IS the tick→volume of one drum, so
+        # the selector emits that drum's own signal (each(red)*each(green) →
+        # drum signal) and the speaker reads it directly.  Packed cells go
+        # through the bell/unpacker chain as usual.
         ac_sel = new_entity("arithmetic-combinator", id=f"{base_id}_sel",
                             tile_position=(col, SEL_Y))
         ac_sel.set_arithmetic_condition(
             first_operand="signal-each", first_operand_wires={"red"},
             operation="*",
             second_operand="signal-each", second_operand_wires={"green"},
-            output_signal=BELL_SIG,
+            output_signal=spk_sigs[0] if raw_cell else BELL_SIG,
         )
         blueprint.entities.append(ac_sel)
 
@@ -440,9 +523,23 @@ def _build_rail(
             side_1="output", side_2="input",
         )
 
-        # -- Unpacker chain (up to 6 ACs — one per octave lane present) --
-        spk_sigs = [pitch_index_to_signal(ch + oct * 12) for oct in range(lanes)]
+        col_spks = ep.col_speakers.get(c, [])
+        if raw_cell:
+            # Selector → speaker: the volume flows straight through (red).
+            if col_spks:
+                blueprint.add_circuit_connection(
+                    "red", f"{base_id}_sel", col_spks[0],
+                    side_1="output", side_2="input",
+                )
+                for i in range(len(col_spks) - 1):
+                    blueprint.add_circuit_connection(
+                        "red", col_spks[i], col_spks[i + 1],
+                        side_1="input", side_2="input",
+                    )
+            col_upper_spare[c] = f"{base_id}_sel"
+            continue
 
+        # -- Unpacker chain (up to 6 ACs — one per lane present) --
         def _ac(uid, y, first_op, op, second_op, out, *, _bid=base_id):
             ac = new_entity("arithmetic-combinator", id=f"{_bid}_{uid}",
                             tile_position=(col, y))
@@ -459,9 +556,10 @@ def _build_rail(
         uid_s3 = _ac("s3", UNP_S3_Y, BELL_SIG, ">>", 7, "signal-6")
         uid_l3 = _ac("l3", UNP_L3_Y, "signal-6", "AND", 127, spk_sigs[2])
         out_order = [uid_l1, uid_l2, uid_l3]
-        if lanes >= 4:
+        if lanes_here >= 4:
             uid_l4 = _ac("l4", UNP_L4_Y, BELL_SIG, "AND", 127, spk_sigs[3])
             out_order.append(uid_l4)
+        col_upper_spare[c] = uid_l1
 
         # Green wiring
         blueprint.add_circuit_connection(
@@ -476,7 +574,7 @@ def _build_rail(
             "green", uid_s2, uid_s3,
             side_1="input", side_2="input",
         )
-        if lanes >= 4:
+        if lanes_here >= 4:
             blueprint.add_circuit_connection(
                 "green", uid_s3, uid_l4,
                 side_1="input", side_2="input",
@@ -500,23 +598,24 @@ def _build_rail(
                 "red", out_order[i], out_order[i + 1],
                 side_1="output", side_2="output",
             )
-        col_spks = ep.col_speakers[ch]  # ascending pitch: y=3,2,1,0
-        blueprint.add_circuit_connection(
-            "red", out_order[-1], col_spks[0],
-            side_1="output", side_2="input",
-        )
-        for i in range(len(col_spks) - 1):
+        if col_spks:
             blueprint.add_circuit_connection(
-                "red", col_spks[i], col_spks[i + 1],
-                side_1="input", side_2="input",
+                "red", out_order[-1], col_spks[0],
+                side_1="output", side_2="input",
             )
+            for i in range(len(col_spks) - 1):
+                blueprint.add_circuit_connection(
+                    "red", col_spks[i], col_spks[i + 1],
+                    side_1="input", side_2="input",
+                )
 
     # ── Per-rail internal wiring ───────────────────────────────────
     # NOTE: no cross-column speaker grid — each column's four speakers are
     # chained to its unpacker outputs above.
 
-    # Debug lamp grid wiring
-    if debug_lamps:
+    # Debug lamp grid wiring (melodic rails only — compact drum rails never
+    # request debug lamps and their speakers aren't on the SPK_Y grid).
+    if debug_lamps and not is_compact_drum:
         for row_off in range(4):
             lamp_row = DEBUG_Y + row_off
             for c in range(rail_x, rail_x + 11):
@@ -538,20 +637,21 @@ def _build_rail(
                 blueprint.add_circuit_connection("red", spk_bottom, dbg_bottom)
         ep.first_dbg_id = dbg_lamp_ids.get((rail_x, DEBUG_Y + 3), "")
 
-    # ── Merge the 12 per-column speaker networks into ONE red network ──
+    # ── Merge the per-column speaker networks into ONE red network ──
     # Each column's unpackers+speakers are their own red network; joining
     # them into a single network per rail (instrument) cuts the network
     # count and gives one probe point that shows the whole instrument's
     # activity while debugging.  Bridges use an alternating tree — even gaps
-    # join the bottom (last) speakers, odd gaps join the lane-0 unpacker
-    # outputs — so no port ever exceeds Factorio's 2-wire-per-colour limit
+    # join the bottom (last) speakers, odd gaps join an upper spare port
+    # (the lane-0 unpacker output, or the selector output for raw drum
+    # cells) — so no port ever exceeds Factorio's 2-wire-per-colour limit
     # and every bridge spans just one tile.  Different rails (instruments)
     # are deliberately left on separate networks.
     # (With debug_lamps the lamp grid below already ties every speaker
     # column into one network, so no extra bridges are needed — and the
     # bottom speakers are already at their 2-wire limit for the lamp wires.)
     if not debug_lamps:
-        for c in range(0, 12, 2):
+        for c in range(0, cells_per_tick - 1, 2):
             a = ep.col_speakers.get(c)
             b = ep.col_speakers.get(c + 1)
             if a and b:
@@ -559,40 +659,39 @@ def _build_rail(
                     "red", a[-1], b[-1],
                     side_1="input", side_2="input",
                 )
-        for c in range(1, 12, 2):
-            if c + 1 < 12:
+        for c in range(1, cells_per_tick - 1, 2):
+            upper_a = col_upper_spare.get(c)
+            upper_b = col_upper_spare.get(c + 1)
+            if upper_a and upper_b:
                 blueprint.add_circuit_connection(
-                    "red", f"{prefix}ch{c}_l1", f"{prefix}ch{c+1}_l1",
+                    "red", upper_a, upper_b,
                     side_1="output", side_2="output",
                 )
 
-    # Sub-tick on RED within this rail: ch11_match → … → ch0_match
+    # Sub-tick on RED within this rail: ch{C-1}_match → … → ch0_match
     # (wired outside this function — only the first/last IDs are needed)
-    blueprint.add_circuit_connection(
-        "red", f"{prefix}ch11_match", f"{prefix}ch10_match",
-        side_1="input", side_2="input",
-    )
-    for ch in range(10, 0, -1):
+    for ch in range(cells_per_tick - 1, 0, -1):
         blueprint.add_circuit_connection(
             "red", f"{prefix}ch{ch}_match", f"{prefix}ch{ch-1}_match",
             side_1="input", side_2="input",
         )
 
-    # Page data within this rail (red): port → ch11_sel → … → ch0_sel
+    # Page data within this rail (red): port → ch{C-1}_sel → … → ch0_sel
     blueprint.add_circuit_connection(
-        "red", port_id, f"{prefix}ch11_sel",
+        "red", port_id, f"{prefix}ch{cells_per_tick - 1}_sel",
     )
-    for ch in range(11, 0, -1):
+    for ch in range(cells_per_tick - 1, 0, -1):
         blueprint.add_circuit_connection(
             "red", f"{prefix}ch{ch}_sel", f"{prefix}ch{ch-1}_sel",
             side_1="input", side_2="input",
         )
 
     # Record endpoints
-    ep.first_match_id = f"{prefix}ch11_match"
-    ep.first_sel_id = f"{prefix}ch11_sel"
+    ep.first_match_id = f"{prefix}ch{cells_per_tick - 1}_match"
+    ep.first_sel_id = f"{prefix}ch{cells_per_tick - 1}_sel"
     ep.last_sel_id = f"{prefix}ch0_sel"
-    ep.last_speaker_id = ep.speaker_ids.get((rail_x + 11, SPK_Y + 0), "")
+    last_spk = ep.col_speakers.get(cells_per_tick - 1)
+    ep.last_speaker_id = last_spk[0] if last_spk else ""
 
     return ep
 

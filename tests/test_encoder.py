@@ -453,3 +453,98 @@ class TestEncodeAudioCache:
         r2 = encode_audio_auto(str(tiny_midi), attach_player=False,
                                ticks_per_beat=60)
         assert r1 and r2
+
+
+class TestAllInOneAudioCombined:
+    """The legacy ``--all-in-one`` combined audio path (player + memory)."""
+
+    @staticmethod
+    def _make_midi(events, name):
+        import mido
+        from pathlib import Path
+
+        mid = mido.MidiFile(ticks_per_beat=480)
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
+        track.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))
+        prev = 0
+        for abs_tick, msg in sorted(events, key=lambda e: (e[0], e[1].type)):
+            msg.time = abs_tick - prev
+            prev = abs_tick
+            track.append(msg)
+        p = Path(".factorio_display_cache") / f"_allinone_{name}.mid"
+        mid.save(str(p))
+        return p
+
+    @staticmethod
+    def _notes(pitches, ch):
+        import mido
+
+        events = []
+        tick = 0
+        for p in pitches:
+            events.append((tick, mido.Message("note_on", note=p, velocity=100, channel=ch)))
+            events.append((tick + 240, mido.Message("note_off", note=p, velocity=0, channel=ch)))
+            tick += 240
+        return events
+
+    def _long_wires(self, bp_str):
+        import math
+        from draftsman.blueprintable import Blueprint
+
+        bp = Blueprint.from_string(bp_str)
+        long_wires = []
+        for w in getattr(bp, "wires", []):
+            assoc1, _c1, assoc2, _c2 = w
+            e1 = assoc1() if callable(assoc1) else assoc1
+            e2 = assoc2() if callable(assoc2) else assoc2
+            p1 = getattr(e1, "tile_position", None)
+            p2 = getattr(e2, "tile_position", None)
+            if p1 is None or p2 is None:
+                continue
+            d = math.dist((p1.x, p1.y), (p2.x, p2.y))
+            if d > 9.0:
+                long_wires.append((e1.name, e2.name, round(d, 1)))
+        return long_wires
+
+    def test_compact_drum_rail_in_all_in_one(self):
+        """A drum track in the legacy combined path must build a compact rail
+        (regression: the draftsman LUT hardcoded 12 cells/tick → IndexError)
+        with every wire within Factorio's ~9-tile reach."""
+        from factorio_display.audio.encoder import _encode_midi
+
+        p = self._make_midi(self._notes([36, 38, 42], 9), "drums")
+        try:
+            s = _encode_midi(str(p), attach_player=True, map_drums=True, rail_mode="auto")
+            assert s.startswith("0eN")
+            assert self._long_wires(s) == []
+        finally:
+            p.unlink(missing_ok=True)
+
+    def test_piano_and_drum_multi_rail_wires_within_reach(self):
+        """Piano + drum multi-rail combined: wires must stay within reach —
+        narrow 1-page memories used to leave the memory→player clock/data
+        wires spanning 13-14 tiles (the game silently drops them)."""
+        from factorio_display.audio.encoder import _encode_midi
+
+        events = self._notes([36], 9) + self._notes([60, 64], 0)
+        p = self._make_midi(events, "piano_drum")
+        try:
+            s = _encode_midi(str(p), attach_player=True, map_drums=True, rail_mode="all")
+            assert s.startswith("0eN")
+            assert self._long_wires(s) == []
+        finally:
+            p.unlink(missing_ok=True)
+
+    def test_piano_only_one_page_wires_within_reach(self):
+        """A 1-page piano memory (single column) must be right-aligned above
+        the player so the memory→player wires stay within reach."""
+        from factorio_display.audio.encoder import _encode_midi
+
+        p = self._make_midi(self._notes([60, 64, 67], 0), "piano")
+        try:
+            s = _encode_midi(str(p), attach_player=True, map_drums=False, rail_mode="auto")
+            assert s.startswith("0eN")
+            assert self._long_wires(s) == []
+        finally:
+            p.unlink(missing_ok=True)

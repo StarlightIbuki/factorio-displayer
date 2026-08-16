@@ -1011,6 +1011,16 @@ def _encode_midi(
         ap = active_drum_pitches[ri]
         return drum_grouping(ap) if ap is not None else None
 
+    def _rail_cells_per_tick(ri: int) -> int:
+        """Decoder channels per tick for rail *ri*: 1-5 for a compact drum
+        rail (one cell per used drum type), 12 for melodic rails."""
+        ap = active_drum_pitches[ri]
+        if ap is not None:
+            grp = drum_grouping(ap)
+            if grp:
+                return len(grp)
+        return 12
+
     def _rail_ticks_per_page(ri: int) -> int:
         """Per-rail page size — drums use large pages (fewer DCs)."""
         if "drum" in instruments[ri].lower():
@@ -1043,7 +1053,7 @@ def _encode_midi(
     from draftsman.blueprintable import Blueprint
     from draftsman.entity import new_entity
     from .player_blueprint import (
-        RAIL_WIDTH, MOD_Y, SUB_TICK_SIG,
+        RAIL_WIDTH, MOD_Y, PORT_X, SUB_TICK_SIG,
         INSTRUMENT_MIDI_BASES, _build_rail, _RailEndpoints,
     )
 
@@ -1064,8 +1074,10 @@ def _encode_midi(
             midi_base = INSTRUMENT_MIDI_BASES.get(
                 inst.lower().replace("programmable-speaker-instrument-", ""), 53,
             )
+            ap = active_drum_pitches[ri]
+            is_compact_drum = "drum" in inst.lower() and ap is not None
 
-            # Build player rail
+            # Build player rail (compact drum rails for drum tracks)
             ep = _build_rail(
                 combined, ri, rail_x,
                 inst, signal_pool, qualities,
@@ -1073,6 +1085,7 @@ def _encode_midi(
                 midi_base=midi_base,
                 map_drums=map_drums,
                 ticks_per_page=_rail_ticks_per_page(ri),
+                active_drum_pitches=ap,
             )
             endpoints.append(ep)
 
@@ -1088,8 +1101,20 @@ def _encode_midi(
                 except (TypeError, ValueError, IndexError):
                     pass
 
-            MEM_GAP = 4
-            memory_y = int(rail_max_y) + MEM_GAP
+            # Compact drum rails put their port and mod at column
+            # ``cells_per_tick`` (beside the channels); their memory must
+            # start above the mod row (MOD_Y..MOD_Y+1) to avoid overlap.
+            cpt = _rail_cells_per_tick(ri)
+            port_x = rail_x + PORT_X if not is_compact_drum else rail_x + cpt
+            memory_y = int(rail_max_y) + (3 if is_compact_drum else 2)
+
+            # Melodic memories are RIGHT-ALIGNED above the player's port
+            # column (12): a short song builds fewer than 12 memory columns,
+            # and a left-aligned narrow bank would leave the memory→player
+            # clock/data wires spanning 13+ tiles (dropped in game).  Compact
+            # drum rails are LEFT-aligned beside their narrow player instead.
+            _mem_cols = min(12, max(1, math.ceil(len(int_data_list[ri]) / max(1, _rail_ticks_per_page(ri)))))
+            mem_x = rail_x if is_compact_drum else rail_x + (12 - _mem_cols)
 
             # Build memory pages above this rail's player (same X offset)
             last_id = encode_audio_memory(
@@ -1100,26 +1125,51 @@ def _encode_midi(
                 clock_signal=CLOCK_SIGNAL,
                 blueprint=combined,
                 y_offset=memory_y,
-                x_offset=rail_x,
+                x_offset=mem_x,
                 id_prefix=f"r{ri}_",
                 grouping=_drum_grouping(ri),
                 ticks_per_page=_rail_ticks_per_page(ri),
             )
             if isinstance(last_id, str) and last_id:
                 mem_last_ids.append(last_id)
-                # Wire memory → this rail's player (same X, short vertical hop)
-                # Each rail is independent — no cross-rail page data sharing.
-                import warnings as _w2
-                with _w2.catch_warnings():
-                    _w2.simplefilter("ignore")
-                    combined.add_circuit_connection(
-                        "green", last_id, ep.port_id,
-                        side_1="input", side_2="input",
-                    )
-                    combined.add_circuit_connection(
-                        "red", last_id, f"r{ri}_ch11_sel",
-                        side_1="output", side_2="input",
-                    )
+                # Wire memory → player with REACH-AWARE anchors.  The memory
+                # bus is one chained red/green network, so the connection can
+                # join at whichever memory DC is nearest each target — the
+                # wires must stay within Factorio's ~9-tile circuit reach.
+                # (Previously the snake-last DC — the memory's bottom — made
+                # the clock/data wires span 18-20 tiles and the game dropped
+                # them, leaving the player unpowered.)
+                def _nearest_memory_dc(target_x: float) -> str | None:
+                    best_id, best_d = None, None
+                    for e in combined.entities:
+                        eid = getattr(e, "id", "") or ""
+                        if not eid.startswith(f"r{ri}_ap"):
+                            continue
+                        try:
+                            x = float(e.tile_position[0])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                        d = abs(x - target_x)
+                        if best_d is None or d < best_d:
+                            best_d, best_id = d, eid
+                    return best_id
+
+                sel_col = 11 if not is_compact_drum else cpt - 1
+                clk_dc = _nearest_memory_dc(port_x)
+                dat_dc = _nearest_memory_dc(rail_x + sel_col)
+                if clk_dc and dat_dc:
+                    # Each rail is independent — no cross-rail page data sharing.
+                    import warnings as _w2
+                    with _w2.catch_warnings():
+                        _w2.simplefilter("ignore")
+                        combined.add_circuit_connection(
+                            "green", clk_dc, ep.port_id,
+                            side_1="input", side_2="input",
+                        )
+                        combined.add_circuit_connection(
+                            "red", dat_dc, f"r{ri}_ch{sel_col}_sel",
+                            side_1="output", side_2="input",
+                        )
 
         # ── Per-rail modulo ACs ────────────────────────────────────
         # Each rail's page size may differ (drums use large pages), so every
@@ -1129,7 +1179,13 @@ def _encode_midi(
         with _w3.catch_warnings():
             _w3.simplefilter("ignore")
             for ri in range(num_rails):
-                mod_x = ri * RAIL_WIDTH + RAIL_WIDTH - 1
+                # Compact drum rails keep their mod beside the channels so the
+                # mod→match wire stays within reach; melodic rails use the
+                # classic right-hand column.
+                if "drum" in instruments[ri].lower() and active_drum_pitches[ri] is not None:
+                    mod_x = ri * RAIL_WIDTH + _rail_cells_per_tick(ri)
+                else:
+                    mod_x = ri * RAIL_WIDTH + RAIL_WIDTH - 1
                 mod_id = f"mod_{ri}"
                 ac_mod = new_entity("arithmetic-combinator", id=mod_id,
                                     tile_position=(mod_x, MOD_Y))
