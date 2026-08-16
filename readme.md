@@ -91,10 +91,11 @@ The legacy single-blueprint composition (timer + power poles + everything merged
 
 ### 4. Encode Audio (MIDI)
 
-Dedicated subcommand for encoding `.mid` files with full control over translation parameters.
+MIDI files are auto-detected by `encode` (see step 3) — there is no separate
+`encode-audio` subcommand. Pass the translation options directly:
 
 ```bash
-factorio-display encode-audio ./song.mid \
+factorio-display encode ./song.mid \
     --ticks-per-beat 30 \
     --boost-melody 1.5 \
     --attack-ticks 10 --decay-ticks 10 --sustain-level 0.8 --release-ticks 10 \
@@ -113,14 +114,18 @@ factorio-display encode-audio ./song.mid \
 | `--attack-curve` | `1.0` | ADSR attack power-curve exponent (>1=gentle start, <1=snappy, 1=linear) |
 | `--decay-curve` | `1.0` | ADSR decay power-curve exponent (>1=gentle, <1=snappy, 1=linear) |
 | `--release-curve` | `1.0` | ADSR release power-curve exponent (>1=gentle, <1=snappy, 1=linear) |
+| `--rearticulation-ticks` | `2` | Re-attack same-pitch notes re-triggering within this many ticks of the previous note's end |
 | `--no-global-shift` | — | Disable optimal global octave shift; use only per-note folding |
-| `--rail-mode` | `piano` | Multi-rail mode: `piano`, `all`, `auto[:threshold]`, or comma-separated instruments |
-| `--map-drums` | (on) | Map GM drum notes (CH9, notes 24–81) to Factorio drum-kit sounds |
+| `--rail-mode` | `auto:0.05` | Multi-rail mode: `piano`, `all`, `auto[:threshold]`, or comma-separated instruments |
+| `--map-drums` | (off) | Route below-range low notes to a kick drum instead of covering them with the bass instrument |
+| `--drum-gain` | `0.25` | Volume scale for the drum rail (0–1; drums sit low in the mix) |
 | `--no-attach-player` | — | Output audio memory pages only, without the player decoder blueprint |
+| `--drums` | (off) | Detect kick/snare/hat hits from raw audio (non-MIDI) and add a drum rail (`auto`/`off`) |
 | `--instruments` | — | Deprecated alias for `--rail-mode` |
 | `--debug-json` | — | Dump raw tick_data as JSON for inspection |
 | `--processed-midi` | — | Save octave-folded MIDI for preview in any player |
 | `-o`, `--output` | — | Write blueprint to file instead of stdout |
+
 
 ### ADSR Envelope
 
@@ -232,8 +237,8 @@ factorio-display export-logical --instrument piano --name "My Decoder"
 # Export via the existing export-audio command
 factorio-display export-audio --instrument piano --format logical
 
-# Encode a MIDI file to logical format
-factorio-display encode-audio song.mid --format logical
+# Dump a MIDI encode's intermediate logical blueprints as TOML
+factorio-display encode song.mid --debug-toml out/
 
 # Convert blueprint string text to logical YAML
 factorio-display blueprint-to-yaml blueprint.txt -o blueprint.yaml
