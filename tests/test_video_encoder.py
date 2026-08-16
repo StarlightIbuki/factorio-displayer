@@ -676,6 +676,46 @@ class TestChunkCache:
         assert ".factorio_display_cache" in parts
         assert version_prefix().lower() in cache_dir.name.lower()
 
+    def test_rotate_memory_piece_positions_match_direction_sense(self):
+        """The baked memory-piece rotation must rotate positions and facing
+        directions in the SAME sense (both 90° CCW, north -> west).
+
+        Regression: positions used ``(x,y) -> (y,-x)`` (90° CCW) while
+        directions used ``+4`` (90° CW, north -> east) — the opposite sense —
+        so each entity's input/output port sides flipped relative to its
+        rotated footprint, and the docstring contradicted the code.
+        """
+        from factorio_display.video.encoder import _rotate_memory_piece
+
+        d = {"blueprint": {"entities": [
+            {"id": "gate_1", "name": "decider-combinator",
+             "position": {"x": 2, "y": 3}, "direction": 0},
+            {"id": "gate_2", "name": "decider-combinator",
+             "position": {"x": 4, "y": 3}, "direction": 4},
+            {"id": "connT", "name": "constant-combinator",
+             "position": {"x": 9, "y": -1}, "direction": 8},
+        ]}}
+        _rotate_memory_piece(d)
+        ents = {e["id"]: e for e in d["blueprint"]["entities"]}
+
+        g1 = ents["gate_1"]
+        # position: (x, y) -> (y, -x)
+        assert (g1["position"]["x"], g1["position"]["y"]) == (3, -2)
+        # direction: north -> west (+12) — the SAME (CCW) sense as the position
+        assert g1["direction"] == 12, (
+            f"north-facing DC must rotate to west (12), got {g1['direction']}"
+        )
+
+        g2 = ents["gate_2"]
+        assert (g2["position"]["x"], g2["position"]["y"]) == (3, -4)
+        assert g2["direction"] == 0, (  # east (4) -> north (0): one CCW step
+            f"east-facing DC must rotate to north (0), got {g2['direction']}"
+        )
+
+        # Connector CCs are always re-oriented to face north.
+        assert ents["connT"]["direction"] == 0
+        assert (ents["connT"]["position"]["x"], ents["connT"]["position"]["y"]) == (-1, -9)
+
     def test_deduplicate_cross_is_in_cache_key(self):
         """A ``--deduplicate-cross`` run must not reuse plain-run chunk
         caches (regression: ``deduplicate_cross`` was missing from the key,

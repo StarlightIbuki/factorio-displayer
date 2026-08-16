@@ -223,17 +223,17 @@ def _fix_cc_control_behaviors(d: dict) -> None:
 
 
 def _rotate_memory_piece(d: dict) -> None:
-    """Rotate a memory-piece blueprint dict 270 degrees counter-clockwise.
+    """Rotate a memory-piece blueprint dict 90 degrees counter-clockwise.
 
     Memory banks are generated in the display's orientation (wide rows growing
     downward, north-facing deciders).  The user places each memory piece next
-    to the display after a 90-degree counter-clockwise rotation followed by a
-    further 180 degrees (i.e. 270 degrees counter-clockwise total), so we bake
-    that rotation in: every entity's position is rotated ``(x, y) -> (y, -x)``
-    and every facing combinator's direction is rotated three steps
-    counter-clockwise (north -> east, etc.).  The constant-combinator
-    connectors are re-oriented to keep facing NORTH, so they align with the
-    display chunk's own (north-facing) connector CCs.
+    to the display, so we bake the rotation in: every entity's position is
+    rotated ``(x, y) -> (y, -x)`` and every facing combinator's direction is
+    rotated one step counter-clockwise (north -> west, east -> north, ...) —
+    the SAME sense as the position rotation, so each entity's input/output
+    port sides stay consistent with its rotated footprint.  The
+    constant-combinator connectors are re-oriented to keep facing NORTH, so
+    they align with the display chunk's own (north-facing) connector CCs.
     """
     for entity in d.get("blueprint", {}).get("entities", []):
         pos = entity.get("position") or {}
@@ -246,10 +246,10 @@ def _rotate_memory_piece(d: dict) -> None:
             "arithmetic-combinator",
             "selector-combinator",
         ):
-            # Rotate the facing 270 degrees counter-clockwise.  Draftsman
-            # omits the default (north) direction from the dict, so always
-            # write it.
-            entity["direction"] = (int(entity.get("direction", 0)) + 4) % 16
+            # Rotate the facing 90 degrees counter-clockwise (north -> west).
+            # Draftsman omits the default (north) direction from the dict, so
+            # always write it.
+            entity["direction"] = (int(entity.get("direction", 0)) + 12) % 16
 
 
 def _display_string(bp: Blueprint) -> str:
