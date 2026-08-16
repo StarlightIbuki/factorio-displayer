@@ -365,6 +365,30 @@ class TestEncodeFramesSplit:
             ]
             assert len(wired_cc) >= 2, f"{label}: missing connector CCs"
 
+    def test_split_small_output_built_in_process(self):
+        """Tiny outputs must be built IN-PROCESS, not via a worker pool.
+
+        Spawning + tearing down a ProcessPoolExecutor costs ~1-2 s on
+        Windows regardless of the work size, so a few frames' worth of
+        pieces should be built serially in the main process.  This test
+        would fail under the sandbox's no-named-pipe restriction if the
+        pool were used.
+        """
+        from factorio_display.video.encoder import encode_frames_split
+
+        frames = [
+            np.full((4, 4, 3), (i * 60, i * 30, 0), dtype=np.uint8) for i in range(5)
+        ]
+        res = encode_frames_split(
+            iter(frames), "Tiny", fps=60.0, adaptive=False,
+            total_width=4, total_height=4, expected_frames=5, source_id="tiny_inproc",
+        )
+        assert res["display"].startswith("0eN")
+        assert res["pieces"], "expected at least one memory piece"
+        for label, s in res["pieces"]:
+            assert s.startswith("0eN"), f"{label}: invalid piece"
+        assert res["total_ticks"] >= 4
+
     def test_split_pieces_have_distinct_tick_windows(self):
         from factorio_display.video.encoder import encode_frames_split
         from factorio_display.logical_blueprint import from_blueprint_string

@@ -36,6 +36,16 @@ from .. import (
 from ..logical_blueprint import assert_wire_topology
 from ..cache_paths import cache_dir, cache_file as make_cache_file
 
+#: Estimated single-threaded cost per memory DC (one kept frame × one
+#: vertical chunk): core build + to_draftsman + serialisation.  Measured
+#: ~13-17 ms with ValidationMode.DISABLED — conservative 15 ms.
+_PER_DC_EST_SECONDS = 0.015
+
+#: Below this estimated single-threaded worker cost (seconds), pieces are
+#: built in-process instead of spawning a ProcessPoolExecutor — the pool's
+#: spawn + teardown alone costs ~1-2 s on Windows regardless of work size.
+_IN_PROCESS_THRESHOLD_S = 1.0
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -1581,10 +1591,18 @@ def encode_frames_chunked(
         pending_indices.append(ci)
 
     if pending_indices:
-        workers = chunk_workers or os.cpu_count() or 1
+        # The chunk worker only builds the LogicalBlueprint + TOML (no
+        # draftsman materialisation — that happens in the main-process
+        # merge), so per-frame cost is ~0.1 ms.  The pool only pays off once
+        # the estimated single-threaded work clears the spawn/teardown
+        # overhead (~1-2 s on Windows).
+        est_s = sum(len(chunk_frames[ci]) for ci in pending_indices) * 0.0005
+        use_pool = est_s >= _IN_PROCESS_THRESHOLD_S
+        workers = (chunk_workers or os.cpu_count() or 1) if use_pool else 1
         sys.stderr.write(
             f"Building {len(pending_indices)} chunk(s) "
-            f"with {workers} worker(s)…\n"
+            f"{'with ' + str(workers) + ' worker(s)' if use_pool else 'in-process'} "
+            f"(est {est_s:.2f}s)…\n"
         )
 
         payloads: list[bytes] = []
@@ -1618,19 +1636,27 @@ def encode_frames_chunked(
             }
             payloads.append(pickle.dumps(data))
 
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_build_chunk_worker, p) for p in payloads]
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures), desc="Building chunks", unit="chunk",
-            ):
-                ci, lb_toml = future.result()
-                lb = from_toml(lb_toml)
-                chunk_results[ci] = lb
-                if use_cache and cache_dir is not None:
-                    cpath = cache_dir / f"chunk_{ci:04d}.toml"
-                    _write_toml_cache_async(lb, cpath)
-                    sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached.\n")
+        def _collect(ci: int, lb_toml: str) -> None:
+            lb = from_toml(lb_toml)
+            chunk_results[ci] = lb
+            if use_cache and cache_dir is not None:
+                cpath = cache_dir / f"chunk_{ci:04d}.toml"
+                _write_toml_cache_async(lb, cpath)
+                sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached.\n")
+
+        if use_pool:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_build_chunk_worker, p) for p in payloads]
+                for future in tqdm(
+                    concurrent.futures.as_completed(futures),
+                    total=len(futures), desc="Building chunks", unit="chunk",
+                ):
+                    ci, lb_toml = future.result()
+                    _collect(ci, lb_toml)
+        else:
+            for p in tqdm(payloads, desc="Building chunks", unit="chunk"):
+                ci, lb_toml = _build_chunk_worker(p)
+                _collect(ci, lb_toml)
 
     # ── Assemble ordered chunk list ───────────────────────────────────
     chunk_lbs = [chunk_results[ci] for ci in range(time_chunks)]
@@ -1866,6 +1892,16 @@ def encode_frames_split(
         )
     effective_time_chunks = len(frag_ranges)
 
+    # Estimated single-threaded worker cost, used to decide whether the
+    # worker pool pays for itself.  Each kept frame becomes one decider
+    # combinator per vertical chunk, and the measured per-DC cost (core
+    # build + to_draftsman + serialisation, ValidationMode.DISABLED) is
+    # ~13-17 ms — use a slightly conservative 15 ms.
+    total_piece_frames = 0
+    for _ci in range(num_chunks):
+        for (_s, _e) in frag_ranges:
+            total_piece_frames += _e - _s
+
     payloads: list[bytes] = []
     for ci in range(num_chunks):
         y0 = ci * chunk_height
@@ -1894,23 +1930,34 @@ def encode_frames_split(
                 "fragment_index": f,
             }))
 
-    workers = chunk_workers or os.cpu_count() or 1
-    workers = min(workers, len(payloads)) if payloads else 1
+    est_worker_s = total_piece_frames * _PER_DC_EST_SECONDS
+    use_pool = len(payloads) > 1 and est_worker_s >= _IN_PROCESS_THRESHOLD_S
+
+    if use_pool:
+        workers = chunk_workers or os.cpu_count() or 1
+        workers = min(workers, len(payloads)) if payloads else 1
+    else:
+        workers = 1
     sys.stderr.write(
         f"Splitting into {num_chunks} vertical chunk(s) × {effective_time_chunks} time "
-        f"fragment(s) = {len(payloads)} memory piece(s), built with "
-        f"{workers} worker(s)...\n"
+        f"fragment(s) = {len(payloads)} memory piece(s), built "
+        f"{'with ' + str(workers) + ' worker(s)' if use_pool else 'in-process'} "
+        f"(est {est_worker_s:.2f}s)...\n"
     )
 
     pieces: list[tuple[str, str]] = []
     if payloads:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_build_split_piece_worker, p) for p in payloads]
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures), desc="Building memory pieces", unit="piece",
-            ):
-                pieces.append(future.result())
+        if use_pool:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_build_split_piece_worker, p) for p in payloads]
+                for future in tqdm(
+                    concurrent.futures.as_completed(futures),
+                    total=len(futures), desc="Building memory pieces", unit="piece",
+                ):
+                    pieces.append(future.result())
+        else:
+            for p in tqdm(payloads, desc="Building memory pieces", unit="piece"):
+                pieces.append(_build_split_piece_worker(p))
 
     # Keep deterministic order (label-sorted).
     pieces.sort(key=lambda kv: kv[0])
