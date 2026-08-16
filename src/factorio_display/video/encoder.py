@@ -38,8 +38,10 @@ from ..cache_paths import cache_dir, cache_file as make_cache_file
 
 #: Estimated single-threaded cost per memory DC (one kept frame × one
 #: vertical chunk): core build + to_draftsman + serialisation.  Measured
-#: ~13-17 ms with ValidationMode.DISABLED — conservative 15 ms.
-_PER_DC_EST_SECONDS = 0.015
+#: ~5.3 ms/DC with ValidationMode.DISABLED after the fast-path wins
+#: (no deepcopy on entity insert, unused Output/Condition networks pinned
+#: to None) — conservative 6 ms.
+_PER_DC_EST_SECONDS = 0.006
 
 #: Below this estimated single-threaded worker cost (seconds), pieces are
 #: built in-process instead of spawning a ProcessPoolExecutor — the pool's
