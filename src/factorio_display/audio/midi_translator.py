@@ -868,6 +868,12 @@ def midi_to_multi_rail_tick_data(
     melody_channel: dict[int, int] = {}  # inst_idx → channel
     if boost_melody != 1.0:
         inst_pitches: dict[int, list[tuple[int, float]]] = {ri: [] for ri in range(num_rails)}
+        # channel → (pitch sum, note count) so the melody line can be picked
+        # by the highest AVERAGE pitch.  Channel numbers are arbitrary (drum
+        # channels often sit highest), so ``max(channel)`` boosted a random
+        # channel instead of the melody — mirroring the single-rail path,
+        # which already uses the highest-average-pitch track.
+        ch_pitch_stats: dict[int, tuple[int, int]] = {}
         for track in mid.tracks:
             abs_tick = 0
             for msg in track:
@@ -876,13 +882,20 @@ def midi_to_multi_rail_tick_data(
                 if msg.type == 'note_on' and msg.velocity > 0 and ch in channel_rail:
                     ri = channel_rail[ch]
                     inst_pitches[ri].append(msg.note)
+                    total, count = ch_pitch_stats.get(ch, (0, 0))
+                    ch_pitch_stats[ch] = (total + msg.note, count + 1)
+
+        def _avg_pitch(ch: int) -> float:
+            total, count = ch_pitch_stats.get(ch, (0, 1))
+            return total / max(1, count)
+
         for ri, pitches in inst_pitches.items():
             if pitches:
-                # Find the channel with highest avg pitch for this instrument
-                # (simplified: just mark it for boost)
+                # Highest average pitch = the melody line; tie-break on the
+                # channel number for determinism.
                 melody_channel[ri] = max(
-                    set(ch for ch, cr in channel_rail.items() if cr == ri),
-                    key=lambda c: c,
+                    (ch for ch, cr in channel_rail.items() if cr == ri),
+                    key=lambda c: (_avg_pitch(c), c),
                 )
 
     # (A per-rail global octave shift is no longer applied: notes are routed to

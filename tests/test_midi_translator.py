@@ -729,6 +729,53 @@ class TestMultiRailMidi:
         assert len(instruments) == 2
         assert set(instruments) == {"piano", "bass"}
 
+    def test_melody_boost_picks_highest_average_pitch_channel(self):
+        """Multi-rail melody detection must boost the channel with the highest
+        AVERAGE pitch, not the highest channel number.
+
+        Regression: ``max(..., key=lambda c: c)`` chose the highest channel
+        id — but channel numbers are arbitrary (drum channels often sit
+        highest), so ``--boost-melody`` boosted a random channel while the
+        actual melody stayed at unity.
+        """
+        mid = mido.MidiFile(ticks_per_beat=480)
+        # Same piano rail on two channels: channel 0 plays HIGH notes (the
+        # melody), the HIGHER-numbered channel 5 plays LOW accompaniment.
+        # Both notes stay inside the piano range (F3–E7) so neither
+        # re-routes to another instrument rail.
+        t0 = mido.MidiTrack()
+        t0.append(mido.Message("program_change", program=0, channel=0, time=0))
+        t0.append(mido.Message("note_on", note=84, velocity=100, channel=0, time=0))
+        t0.append(mido.Message("note_off", note=84, velocity=0, channel=0, time=480))
+        t1 = mido.MidiTrack()
+        t1.append(mido.Message("program_change", program=0, channel=5, time=0))
+        t1.append(mido.Message("note_on", note=60, velocity=100, channel=5, time=0))
+        t1.append(mido.Message("note_off", note=60, velocity=0, channel=5, time=480))
+        mid.tracks.extend([t0, t1])
+
+        _, no_boost = midi_to_multi_rail_tick_data(mid, ticks_per_beat=30, boost_melody=1.0)
+        _, boosted = midi_to_multi_rail_tick_data(mid, ticks_per_beat=30, boost_melody=2.0)
+
+        # Both channels are piano → exactly one rail.
+        assert len(no_boost) == 1 and len(boosted) == 1
+        p_high = midi_to_pitch_index(84)
+        p_low = midi_to_pitch_index(60)
+        assert p_high is not None and p_low is not None
+
+        high_no = max(t[p_high] for t in no_boost[0])
+        high_boost = max(t[p_high] for t in boosted[0])
+        low_no = max(t[p_low] for t in no_boost[0])
+        low_boost = max(t[p_low] for t in boosted[0])
+
+        # The high-pitch channel (channel 0) is the melody → boosted.
+        assert high_boost > high_no, (
+            f"melody (high avg pitch) should be boosted: {high_no} → {high_boost}"
+        )
+        # The low channel (higher channel NUMBER) is not the melody → untouched.
+        assert abs(low_boost - low_no) < 0.5, (
+            f"non-melody channel must stay at unity: {low_no} vs {low_boost}"
+        )
+
     def test_many_instruments_become_separate_tracks(self):
         """Piano, bass, organ, flute, synth lead and vibraphone → 6 rails."""
         mid = mido.MidiFile(ticks_per_beat=480)
