@@ -7,11 +7,49 @@ service layer stays dependency-free, and the API converts Pydantic models to
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 from pathlib import PurePosixPath
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def is_safe_webhook_url(url: str) -> bool:
+    """True when *url* is an http(s) URL that resolves only to public
+    addresses.
+
+    Blocks the job-webhook SSRF: the callback_url is POSTed server-side,
+    so a caller must not be able to point it at internal services or cloud
+    metadata (169.254.169.254).  Called both at submission (422) and again
+    at post time (guards DNS rebinding).
+    """
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = parts.hostname
+    if not host:
+        return False
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, port or 80, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not ip.is_global:
+            return False
+    return True
 
 
 class EncodeOptions(BaseModel):
@@ -98,6 +136,17 @@ class JobCreate(BaseModel):
     inputs: list[str] = Field(default_factory=list, description="Upload ids to encode")
     options: EncodeOptions = Field(default_factory=EncodeOptions)
     callback_url: str | None = None
+
+    @field_validator("callback_url")
+    @classmethod
+    def _callback_url_must_be_safe(cls, v: str | None) -> str | None:
+        """The server POSTs callback_url on completion; it must not be able
+        to reach internal services or cloud metadata (SSRF)."""
+        if v is None:
+            return v
+        if not is_safe_webhook_url(v):
+            raise ValueError("callback_url must be a public http(s) URL")
+        return v
 
 
 class DisplayRequest(BaseModel):

@@ -14,8 +14,53 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from factorio_display.api.server import create_app
+from factorio_display.api.schemas import is_safe_webhook_url
 from factorio_display.api.settings import Settings
 from factorio_display.api.store import Store
+
+
+def test_is_safe_webhook_url() -> None:
+    """SSRF guard: only public http(s) URLs may be used as job callbacks.
+
+    Public cases use IP literals so the test is hermetic (no DNS needed).
+    """
+    assert is_safe_webhook_url("http://8.8.8.8/cb") is True
+    assert is_safe_webhook_url("https://8.8.8.8/cb") is True
+    # loopback / private / link-local / cloud metadata → rejected
+    assert is_safe_webhook_url("http://127.0.0.1:8000/x") is False
+    assert is_safe_webhook_url("http://localhost/x") is False
+    assert is_safe_webhook_url("http://10.0.0.1/x") is False
+    assert is_safe_webhook_url("http://172.16.0.1/x") is False
+    assert is_safe_webhook_url("http://192.168.1.1/x") is False
+    assert is_safe_webhook_url("http://169.254.169.254/latest/meta-data") is False
+    assert is_safe_webhook_url("http://[::1]/x") is False
+    assert is_safe_webhook_url("http://[fd00::1]/x") is False
+    # wrong scheme / malformed
+    assert is_safe_webhook_url("ftp://8.8.8.8/x") is False
+    assert is_safe_webhook_url("file:///etc/passwd") is False
+    assert is_safe_webhook_url("not a url") is False
+
+
+def test_callback_url_must_be_public(client: TestClient) -> None:
+    """Jobs with an internal callback_url are rejected at submission."""
+    r = client.post(
+        "/api/v1/jobs",
+        json={"type": "encode", "inputs": [], "callback_url": "http://127.0.0.1:8000/hook"},
+    )
+    assert r.status_code == 422
+
+    r = client.post(
+        "/api/v1/jobs",
+        json={"type": "encode", "inputs": [], "callback_url": "http://169.254.169.254/latest"},
+    )
+    assert r.status_code == 422
+
+    # A public URL is accepted.
+    r = client.post(
+        "/api/v1/jobs",
+        json={"type": "encode", "inputs": [], "callback_url": "http://8.8.8.8/hook"},
+    )
+    assert r.status_code == 202
 
 
 def _tiny_png_bytes(size: tuple[int, int] = (4, 4), color: tuple[int, int, int] = (180, 60, 40)) -> bytes:

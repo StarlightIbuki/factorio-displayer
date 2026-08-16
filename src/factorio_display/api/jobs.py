@@ -338,6 +338,13 @@ class JobRunner:
 
         def _post() -> None:
             try:
+                # Re-validate at post time: submission-time checks only prove
+                # the hostname was public then — re-resolving guards DNS
+                # rebinding (the callback may fire long after submission).
+                from .schemas import is_safe_webhook_url  # pylint: disable=import-outside-toplevel
+
+                if not is_safe_webhook_url(url):
+                    return
                 import httpx  # pylint: disable=import-outside-toplevel
                 httpx.post(
                     url,
