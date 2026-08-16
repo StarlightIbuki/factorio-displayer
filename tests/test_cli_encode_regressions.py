@@ -196,6 +196,33 @@ def test_json_envelope_carries_split_pieces_and_book() -> None:
     assert result["book"] == "0eB"
 
 
+def test_json_envelope_on_error_is_structured(monkeypatch, capsys) -> None:
+    """``--json`` must emit a JSON error envelope (never a raw traceback)
+    when a subcommand raises — the web API's subprocess runner parses this."""
+    import json
+    import sys
+
+    import pytest
+
+    from factorio_display import cli
+
+    # On Windows main() re-reads the real command line via GetCommandLineW,
+    # which would clobber the monkeypatched argv — neutralise it.
+    monkeypatch.setattr(cli, "_fix_argv_encoding", lambda: None)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["factorio-display", "blueprint-to-yaml", "--json", "not-a-blueprint"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["result"]["blueprint"] == ""
+    # The error text lands in the envelope's logs instead of a traceback.
+    assert envelope["result"]["logs"]
+
+
 def test_audio_pieces_from_combined_tick_data() -> None:
     """Video+sound piecewise: combined tick data → player + memory pieces."""
     from types import SimpleNamespace

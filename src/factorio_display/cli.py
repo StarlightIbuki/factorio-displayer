@@ -1503,6 +1503,11 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         except SystemExit as exc:
             code = exc.code
             exit_code = int(code) if isinstance(code, int) else (1 if code else 0)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # Emit a structured error envelope instead of a raw traceback so
+            # --json consumers always get parseable output.
+            exit_code = 1
+            err_buf.write(f"{type(exc).__name__}: {exc}\n")
         envelope = _json_envelope(args, out_buf.getvalue(), err_buf.getvalue(), exit_code)
         sys.stdout.write(_json.dumps(envelope, ensure_ascii=False))
         if exit_code:
