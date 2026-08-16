@@ -109,9 +109,13 @@ def transcribe_audio(audio_path: str, *, cache: bool = True) -> str | None:
     _ckey = _cache_key(audio_path)
     cached = _cache_get(_ckey)
     if cached is not None:
-        if Path(cached).exists():
+        if Path(cached).exists() and _midi_parses(cached):
             sys.stderr.write(f"Using cached Basic Pitch MIDI: {cached}\n")
             return cached
+        # The cached MIDI is missing or corrupt (e.g. a 4-byte "MThd" stub
+        # written by an interrupted transcription).  Discard it so the
+        # re-encode re-transcribes instead of raising mido.EOFError.
+        sys.stderr.write(f"Discarding invalid cached Basic Pitch MIDI: {cached}\n")
         _cache_del(_ckey)
 
     try:
@@ -156,6 +160,22 @@ def transcribe_audio(audio_path: str, *, cache: bool = True) -> str | None:
 
     sys.stderr.write(f"Basic Pitch transcribed: {midi_path}\n")
     return midi_path
+
+
+def _midi_parses(path: str) -> bool:
+    """True when *path* is a readable MIDI file with at least one track.
+
+    Guards the cache: ``Path.exists()`` alone accepted broken stubs (a
+    4-byte ``MThd`` header from an interrupted transcription) that later
+    crashed ``mido`` with ``EOFError`` on re-encode.
+    """
+    try:
+        import mido  # pylint: disable=import-outside-toplevel
+
+        mid = mido.MidiFile(filename=path)
+        return len(mid.tracks) >= 1
+    except Exception:  # pylint: disable=broad-exception-caught — any parse failure is a bad cache
+        return False
 
 
 # ── tiny cache helpers (audio-cache namespace) ─────────────────────────
