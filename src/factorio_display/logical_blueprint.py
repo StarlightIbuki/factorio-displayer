@@ -2503,7 +2503,7 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
             # Power poles have no combinator settings; quality is set at construction
             pass
 
-        bp.entities.append(de)
+        bp.entities.append(de, copy=False)
 
     # ── 2. Materialise networks → pairwise connections ─────────────
     # Map entity id → Draftsman entity once so non-dual entities (constant
