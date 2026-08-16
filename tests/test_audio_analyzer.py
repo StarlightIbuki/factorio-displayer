@@ -198,6 +198,33 @@ class TestAudioToLoudness:
         max_loudness = max(max(t) for t in result)
         assert max_loudness > 0.0
 
+    def test_activation_threshold_zeroes_quiet_notes_not_everything(self):
+        """``activation_threshold`` is a fraction of the per-tick peak applied
+        to the NORMALISED magnitudes: it must silence quiet bins while the
+        loud tone survives.
+
+        Regression: the code compared normalised (≤1) values against
+        ``frame_max * threshold`` — a raw-magnitude scale ≫1 — so any
+        threshold > 0 zeroed every note and silenced all audio
+        (57 active ticks → 0 at threshold 0.05 on a 440 Hz tone).
+        """
+        samples = make_tone(440.0, duration_s=0.5, sample_rate=44100, amplitude=1.0)
+        result = audio_to_loudness(samples, sample_rate=44100, activation_threshold=0.05)
+
+        active = [t for t in result if any(v > 0 for v in t)]
+        assert len(active) > 0, "threshold must not silence a loud tone"
+
+        # The peak (≈ MIDI 69, A4) still dominates after thresholding.
+        avg_per_note = [0.0] * 128
+        for tick in result:
+            for note, loudness in enumerate(tick):
+                avg_per_note[note] += loudness
+        max_note = max(range(128), key=lambda n: avg_per_note[n])
+        assert abs(max_note - 69) <= 1, f"Expected peak near 69, got {max_note}"
+
+        # A louder-than-average tone with a low threshold keeps most ticks.
+        assert len(active) >= 20, f"expected most ticks active, got {len(active)}"
+
 
 # ── 4-octave folding ────────────────────────────────────────────────────
 

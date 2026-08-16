@@ -217,10 +217,14 @@ def audio_to_loudness(
         if frame_max > 0:
             note_magnitudes /= frame_max
 
-        # Apply activation threshold
+        # Apply activation threshold.  ``activation_threshold`` is a fraction
+        # of the per-tick peak, and ``note_magnitudes`` is already normalised
+        # to [0, 1] — so compare against the threshold directly.  (Previously
+        # the code compared normalised values against ``frame_max * threshold``,
+        # a raw-magnitude scale ≫1, which zeroed EVERY note whenever the
+        # threshold was > 0 — silencing all audio.)
         if activation_threshold > 0:
-            threshold_value = frame_max * activation_threshold
-            note_magnitudes[note_magnitudes < threshold_value] = 0.0
+            note_magnitudes[note_magnitudes < activation_threshold] = 0.0
 
         loudness_frames.append([float(v) for v in note_magnitudes])
 
