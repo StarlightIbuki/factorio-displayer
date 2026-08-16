@@ -38,6 +38,7 @@ from __future__ import annotations
 import itertools
 import math
 import os
+import sys
 import tomllib
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -1351,6 +1352,12 @@ def _from_draftsman_impl(bp: Any) -> LogicalBlueprint:
 
     lb = LogicalBlueprint(label=getattr(bp, "label", ""))
 
+    # Entities whose type is outside the DSL's supported subset (and wires
+    # that reference them) are skipped so decoding arbitrary blueprints does
+    # not crash — see the entity loop below.
+    unsupported_ids: set[str] = set()
+    _warned_types: set[str] = set()
+
     # ── 1. Convert entities ───────────────────────────────────────
     # Build entity→surrogate_id map for entities with None id (parsed blueprints).
     # Use Python id() to map entity objects consistently between entity creation
@@ -1375,6 +1382,21 @@ def _from_draftsman_impl(bp: Any) -> LogicalBlueprint:
             else None
         )
         direction: int | None = getattr(ent, "direction", None)
+
+        if etype not in _VALID_ENTITY_TYPES:
+            # The DSL models a fixed subset of entity types.  Decoding
+            # (blueprint-to-yaml, the API decode builder) must not crash on
+            # ordinary Factorio blueprints that contain assemblers, inserters,
+            # belts, etc. — skip them (and any wires touching them) with a
+            # once-per-type warning instead.
+            unsupported_ids.add(eid)
+            if etype not in _warned_types:
+                _warned_types.add(etype)
+                sys.stderr.write(
+                    f"warning: skipping {etype!r} entity {eid!r} — not "
+                    f"representable in the Logical Blueprint DSL\n"
+                )
+            continue
 
         props: dict[str, Any] = {}
 
@@ -1509,6 +1531,8 @@ def _from_draftsman_impl(bp: Any) -> LogicalBlueprint:
 
     # ── 2. Convert circuit connections → networks ─────────────────
     for conn in _iter_connections(bp, _ent_map):
+        if conn["id1"] in unsupported_ids or conn["id2"] in unsupported_ids:
+            continue  # wire touches a skipped (unsupported) entity
         color = conn["color"]
         port_a = _normalise_side(conn["side_1"])
         port_b = _normalise_side(conn["side_2"])

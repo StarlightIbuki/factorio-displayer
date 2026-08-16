@@ -502,6 +502,62 @@ class TestDraftsmanRoundTrip:
         vresult = validate_logical_connectivity(lb)
         assert vresult["errors"] == [], f"Connectivity errors: {vresult['errors']}"
 
+    def test_unsupported_entity_types_are_skipped_not_crashed(self, capsys):
+        """Decoding an ordinary Factorio blueprint (assemblers, inserters,
+        …) must not crash: entities outside the DSL's supported subset are
+        skipped with a warning, and wires touching them are dropped instead
+        of leaving dangling endpoints.
+
+        Regression: ``blueprint-to-yaml`` / the API decode builder raised a
+        raw ValueError on any blueprint containing a non-DSL entity type.
+        """
+        from draftsman.blueprintable import Blueprint
+        from draftsman.entity import new_entity
+
+        from factorio_display.logical_blueprint import (
+            blueprint_string_to_yaml,
+            from_draftsman,
+        )
+
+        bp = Blueprint(label="Ordinary Base")
+        asm = new_entity("assembling-machine-2", id="asm", tile_position=(0, 0))
+        bp.entities.append(asm)
+        ac = new_entity("arithmetic-combinator", id="mod", tile_position=(4, 0))
+        ac.set_arithmetic_condition(
+            first_operand="signal-A", operation="+",
+            second_operand=1, output_signal="signal-A",
+        )
+        bp.entities.append(ac)
+        # One wire between the assembler and the AC, one between AC and itself
+        # is not allowed — wire the AC to a small lamp instead.
+        lamp = new_entity("small-lamp", id="lamp", tile_position=(8, 0))
+        bp.entities.append(lamp)
+        bp.add_circuit_connection("red", "asm", "mod", side_1="input", side_2="input")
+        bp.add_circuit_connection("red", "mod", "lamp", side_1="output", side_2="input")
+
+        lb = from_draftsman(bp)
+        # The assembler is skipped; supported entities survive.
+        assert "asm" not in lb.entities
+        assert "mod" in lb.entities and lb.entities["mod"].type == "arithmetic-combinator"
+        assert "lamp" in lb.entities
+
+        # No dangling endpoints: the mod↔lamp wire survived, the assembler
+        # wire was dropped.
+        for net in lb.networks:
+            for ep in net.endpoints:
+                assert ep.entity_id in lb.entities, (
+                    f"dangling endpoint {ep.entity_id} in {net.network_id}"
+                )
+        assert any("mod" in ep.entity_id for net in lb.networks for ep in net.endpoints)
+
+        # The documented CLI feature works on ordinary blueprints now.
+        yaml_text = blueprint_string_to_yaml(bp.to_string())
+        assert "assembling-machine-2" not in yaml_text
+        assert "arithmetic-combinator" in yaml_text
+
+        # A warning is emitted (once per type).
+        assert "assembling-machine-2" in capsys.readouterr().err
+
     def test_simple_dc_roundtrip(self):
         from draftsman.blueprintable import Blueprint
         from draftsman.entity import new_entity
