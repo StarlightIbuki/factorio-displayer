@@ -1575,11 +1575,16 @@ def encode_frames_chunked(
 
         payloads: list[bytes] = []
         for ci in pending_indices:
-            local_tick_ranges = _rebase_chunk_tick_ranges(chunk_tick_ranges[ci])
-            if local_tick_ranges:
-                # local_tick_ranges[ci] may be list[tuple] or list[list[tuple]]
+            # Local duration — used only for the per-chunk progress log.  The
+            # chunks themselves keep their ABSOLUTE tick ranges: the merged
+            # output drives every chunk from ONE shared clock bus, so a
+            # per-chunk rebase made chunks 1..N all gate on local ticks 0..N
+            # (everything fired during the first window, then nothing played).
+            local_duration = _rebase_chunk_tick_ranges(chunk_tick_ranges[ci])
+            if local_duration:
+                # local_duration[ci] may be list[tuple] or list[list[tuple]]
                 # after cross-dedup.  Access the last range's end tick safely.
-                last_item = local_tick_ranges[-1]
+                last_item = local_duration[-1]
                 if isinstance(last_item, list):
                     chunk_cur_tick = last_item[-1][1] + 1
                 else:
@@ -1589,7 +1594,7 @@ def encode_frames_chunked(
             data = {
                 "chunk_idx": ci,
                 "kept_frames": chunk_frames[ci],
-                "tick_ranges": local_tick_ranges,
+                "tick_ranges": chunk_tick_ranges[ci],
                 "output_name": output_name,
                 "deduplicate": deduplicate,
                 "mapping_params": mapping_params,

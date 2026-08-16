@@ -569,14 +569,20 @@ class TestEncodeFramesChunked:
     def test_tick_ranges_preserved_across_chunks(
         self, sample_frames_12, small_mapping
     ):
-        """Each chunk should use a local tick window, not a cumulative one."""
-        frames, expected_ranges = sample_frames_12
+        """Each chunk keeps its ABSOLUTE tick window.
+
+        The merged output drives every chunk from ONE shared clock bus, so
+        per-chunk rebasing to local windows made chunks 1..N all fire
+        simultaneously during the first window and then nothing played.
+        """
+        frames, _ = sample_frames_12
         result = encode_frames_chunked(
             self._make_frame_iter(frames), "Test", fps=60,
             mapping=small_mapping, total_width=4, total_height=4,
             source_id="test_ticks", time_chunks=3, deduplicate=False,
         )
         expected_chunk_size = math.ceil(len(frames) / 3)
+        seen: set[int] = set()
         for i, chunk_bp in enumerate(result["chunks"]):
             dcs = [e for e in chunk_bp.entities if "decider-combinator" in e.name]
             assert len(dcs) > 0, f"Chunk {i} has no DCs"
@@ -587,10 +593,22 @@ class TestEncodeFramesChunked:
                     if constant is not None:
                         constants.append(constant)
             assert constants, f"Chunk {i} has no tick constants"
-            assert min(constants) == 0, f"Chunk {i} tick range is not local: {constants}"
-            assert max(constants) <= expected_chunk_size - 1, (
-                f"Chunk {i} tick range looks cumulative: {constants}"
+            lo = i * expected_chunk_size + 1
+            hi = min((i + 1) * expected_chunk_size, len(frames))
+            assert min(constants) == lo, (
+                f"Chunk {i} window starts at {min(constants)}, expected {lo}"
             )
+            assert max(constants) == hi, (
+                f"Chunk {i} window ends at {max(constants)}, expected {hi}"
+            )
+            assert all(lo <= c <= hi for c in constants), (
+                f"Chunk {i} has out-of-window constants: {constants}"
+            )
+            seen.update(constants)
+        # The absolute windows tile the full 1..12 timeline exactly once.
+        assert seen == set(range(1, len(frames) + 1)), (
+            f"chunk windows must tile the timeline exactly, got {sorted(seen)}"
+        )
 
     def test_merge_bridges_stay_within_wire_reach(self, small_mapping_params):
         """Bridging time chunks whose banks are ≥10 DCs wide must not emit
