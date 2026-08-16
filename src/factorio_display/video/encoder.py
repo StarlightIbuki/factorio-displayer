@@ -844,6 +844,35 @@ def _build_vertical_chunk_worker(payload: bytes) -> tuple[int, bytes]:
 # Merge helpers
 # ══════════════════════════════════════════════════════════════════════�?
 
+def _nearest_endpoint_pair(
+    lb: "LogicalBlueprint",
+    net_id_a: str,
+    net_id_b: str,
+) -> tuple["Endpoint", "Endpoint"] | None:
+    """Return the closest endpoint pair across two networks (by Chebyshev
+    distance on entity positions), so the bridge wire that merges them stays
+    within Factorio's ~9-tile circuit reach.  ``None`` when either network
+    is missing or has no endpoints — callers fall back to the sorted-first
+    endpoint.
+    """
+    from ..logical_blueprint import _chebyshev, _endpoint_position, Endpoint
+
+    net_a = next((n for n in lb.networks if n.network_id == net_id_a), None)
+    net_b = next((n for n in lb.networks if n.network_id == net_id_b), None)
+    if net_a is None or net_b is None or not net_a.endpoints or not net_b.endpoints:
+        return None
+    best: tuple[Endpoint, Endpoint] | None = None
+    best_d = -1
+    for ep_a in net_a.endpoints:
+        pos_a = _endpoint_position(ep_a, lb)
+        for ep_b in net_b.endpoints:
+            d = _chebyshev(pos_a, _endpoint_position(ep_b, lb))
+            if best is None or d < best_d:
+                best_d = d
+                best = (ep_a, ep_b)
+    return best
+
+
 def _merge_chunk_blueprints(
     chunk_lbs: list["LogicalBlueprint"],
     output_name: str,
@@ -899,6 +928,12 @@ def _merge_chunk_blueprints(
         if old_clock is not None:
             clock_net_ids.append(prefix + old_clock)
 
+    def _sorted_first(net_id: str) -> "Endpoint | None":
+        net = next((n for n in merged.networks if n.network_id == net_id), None)
+        if net is None or not net.endpoints:
+            return None
+        return sorted(net.endpoints, key=lambda ep: (ep.entity_id, ep.port))[0]
+
     if len(clock_net_ids) >= 2:
         shared_clock_net_id = clock_net_ids[0]
         shared_clock_net = next(
@@ -906,18 +941,17 @@ def _merge_chunk_blueprints(
             None,
         )
         if shared_clock_net is not None and shared_clock_net.endpoints:
-            shared_clock_ep = sorted(
-                shared_clock_net.endpoints,
-                key=lambda ep: (ep.entity_id, ep.port),
-            )[0]
             for net_id in clock_net_ids[1:]:
                 other_net = next((n for n in merged.networks if n.network_id == net_id), None)
                 if other_net is None or not other_net.endpoints:
                     continue
-                other_ep = sorted(
-                    other_net.endpoints,
-                    key=lambda ep: (ep.entity_id, ep.port),
-                )[0]
+                # Bridge via the closest endpoint pair: the banks sit 12
+                # tiles apart (10-wide rows + 2-tile gap), so bridging the
+                # sorted-first endpoint (gate_1 at x=0 of each bank) emitted
+                # a 12-tile wire the game silently drops.
+                pair = _nearest_endpoint_pair(merged, shared_clock_net_id, net_id)
+                shared_clock_ep = pair[0] if pair else _sorted_first(shared_clock_net_id)
+                other_ep = pair[1] if pair else _sorted_first(net_id)
                 merged.connect(shared_clock_net.color, shared_clock_ep, other_ep)
             merged.input_ports["clock"] = shared_clock_net_id
     elif clock_net_ids:
@@ -930,18 +964,13 @@ def _merge_chunk_blueprints(
             None,
         )
         if shared_data_net is not None and shared_data_net.endpoints:
-            shared_data_ep = sorted(
-                shared_data_net.endpoints,
-                key=lambda ep: (ep.entity_id, ep.port),
-            )[0]
             for net_id in data_net_ids[1:]:
                 other_net = next((n for n in merged.networks if n.network_id == net_id), None)
                 if other_net is None or not other_net.endpoints:
                     continue
-                other_ep = sorted(
-                    other_net.endpoints,
-                    key=lambda ep: (ep.entity_id, ep.port),
-                )[0]
+                pair = _nearest_endpoint_pair(merged, shared_data_net_id, net_id)
+                shared_data_ep = pair[0] if pair else _sorted_first(shared_data_net_id)
+                other_ep = pair[1] if pair else _sorted_first(net_id)
                 merged.connect(shared_data_net.color, shared_data_ep, other_ep)
             merged.output_ports["data"] = shared_data_net_id
     elif data_net_ids:

@@ -24,7 +24,7 @@ from factorio_display.video.encoder import (
     resolve_dimensions,
 )
 from factorio_display.integer2signal.mapping import SignalMapping
-from factorio_display.logical_blueprint import assert_wire_topology, from_draftsman
+from factorio_display.logical_blueprint import assert_wire_topology, from_draftsman, to_draftsman
 from factorio_display.cache_paths import version_prefix
 
 
@@ -590,6 +590,48 @@ class TestEncodeFramesChunked:
             assert min(constants) == 0, f"Chunk {i} tick range is not local: {constants}"
             assert max(constants) <= expected_chunk_size - 1, (
                 f"Chunk {i} tick range looks cumulative: {constants}"
+            )
+
+    def test_merge_bridges_stay_within_wire_reach(self, small_mapping_params):
+        """Bridging time chunks whose banks are ≥10 DCs wide must not emit
+        >9-tile clock/data wires (Factorio silently drops those, so later
+        chunks go dark).
+
+        Regression: the merge bridged the sorted-first endpoint of each
+        bank (``tc0_gate_1`` at x=0) while the next chunk sat 12 tiles away
+        (10-column rows + 2-tile gap), producing 12-tile bridges.  The
+        bridge must use the closest endpoint pair across the two networks.
+        """
+        frames = [np.full((4, 4, 3), (255, 0, 0), dtype=np.uint8) for _ in range(10)]
+        lb0 = _encode_frames_core(
+            kept_frames=list(frames), tick_ranges=[(i, i) for i in range(10)],
+            output_name="A", deduplicate=False, mapping_params=small_mapping_params,
+            clock="signal-clock", current_tick=10,
+        )
+        lb1 = _encode_frames_core(
+            kept_frames=list(frames), tick_ranges=[(i, i) for i in range(10, 20)],
+            output_name="B", deduplicate=False, mapping_params=small_mapping_params,
+            clock="signal-clock", current_tick=20,
+        )
+        merged = _merge_chunk_blueprints([lb0, lb1], "Test")
+        bp = to_draftsman(merged)
+        _check_bp(bp, label="merged-chunks", lb_logical=merged)
+
+        def _cheb(p, q) -> int:
+            return max(abs(int(p[0]) - int(q[0])), abs(int(p[1]) - int(q[1])))
+
+        for w in getattr(bp, "wires", []):
+            assoc1, _conn1, assoc2, _conn2 = w
+            e1 = assoc1() if callable(assoc1) else assoc1
+            e2 = assoc2() if callable(assoc2) else assoc2
+            p1 = getattr(e1, "tile_position", None)
+            p2 = getattr(e2, "tile_position", None)
+            if p1 is None or p2 is None:
+                continue
+            d = _cheb(p1, p2)
+            assert d <= 9, (
+                f"wire {getattr(e1, 'id', '?')}↔{getattr(e2, 'id', '?')} "
+                f"spans {d} tiles (>9)"
             )
 
 
