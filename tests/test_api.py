@@ -369,6 +369,32 @@ def test_encode_job_end_to_end(client: TestClient) -> None:
     assert body["entity_count"] is not None
 
 
+def test_output_dir_must_be_relative(client: TestClient) -> None:
+    """``output_dir`` flows into the encode subprocess as ``--output-dir``;
+    an absolute or ``..`` path would write blueprint files to arbitrary
+    server paths (the subprocess cwd is the caller's job workspace).
+    """
+    for bad in ("/etc", "C:/Windows", "C:\\Windows", "..", "pieces/../../etc"):
+        r = client.post(
+            "/api/v1/jobs",
+            json={
+                "type": "encode",
+                "inputs": [],
+                "options": {"output_dir": bad},
+            },
+        )
+        assert r.status_code == 422, (
+            f"output_dir {bad!r} must be rejected (got {r.status_code})"
+        )
+
+    # A relative directory is fine — it stays inside the job workspace.
+    r = client.post(
+        "/api/v1/jobs",
+        json={"type": "encode", "inputs": [], "options": {"output_dir": "pieces"}},
+    )
+    assert r.status_code == 202
+
+
 def test_job_result_while_running_is_409(tmp_path) -> None:
     # Seed a "running" job AFTER app creation (startup recovery would mark it failed).
     settings = Settings(data_dir=tmp_path / "data", max_workers=1)

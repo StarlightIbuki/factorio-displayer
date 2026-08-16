@@ -7,9 +7,11 @@ service layer stays dependency-free, and the API converts Pydantic models to
 
 from __future__ import annotations
 
+import re
+from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class EncodeOptions(BaseModel):
@@ -64,6 +66,24 @@ class EncodeOptions(BaseModel):
     no_book: bool = False
     output_dir: str | None = None
     max_piece_mb: float = Field(2.0, gt=0.0)
+
+    @field_validator("output_dir")
+    @classmethod
+    def _output_dir_must_be_relative(cls, v: str | None) -> str | None:
+        """The encode subprocess runs with cwd = the caller's job workspace;
+        an absolute or ``..``-containing output_dir would let an anonymous
+        caller write blueprint files to arbitrary server paths.
+        """
+        if v is None:
+            return v
+        if re.match(r"^[A-Za-z]:", v):
+            raise ValueError("output_dir must be relative to the job workspace")
+        p = PurePosixPath(v.replace("\\", "/"))
+        if p.is_absolute():
+            raise ValueError("output_dir must be relative to the job workspace")
+        if any(part == ".." for part in p.parts):
+            raise ValueError("output_dir must not contain '..'")
+        return v
 
     def to_config_dict(self) -> dict:
         d = self.model_dump()
