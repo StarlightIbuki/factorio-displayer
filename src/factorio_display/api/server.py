@@ -141,7 +141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def capabilities() -> CapabilitiesOut:
         return CapabilitiesOut(
             version=__version__,
-            display={"default_width": 28, "default_height": 26},
+            display={"default_width": 35, "default_height": 26},
             input_extensions={
                 "video": sorted(_cli._VIDEO_EXTENSIONS),
                 "audio": sorted(_cli._AUDIO_EXTENSIONS),
