@@ -59,8 +59,8 @@ class EncodeOptions(BaseModel):
     # video
     skip: int = Field(1, ge=1)
     fps: float = Field(0.0, ge=0.0)
-    adaptive: bool = False
-    threshold: float = 0.01
+    adaptive: bool = True
+    threshold: float = 0.005
     deduplicate: bool = False
     width: int | None = Field(None, ge=1)
     height: int | None = Field(None, ge=1)
@@ -80,7 +80,7 @@ class EncodeOptions(BaseModel):
     release_curve: float = 1.0
     rearticulation_ticks: int = Field(2, ge=0)
     rail_mode: str = "auto:0.05"
-    map_drums: bool = True
+    map_drums: bool = False
     drum_gain: float = Field(0.25, ge=0.0, le=1.0)
     use_global_shift: bool = True
     # audio file (non-MIDI)

@@ -105,8 +105,8 @@ class MediaConfig:
     # video
     skip: int = 1
     fps: float = 0.0
-    adaptive: bool = False
-    threshold: float = 0.01
+    adaptive: bool = True
+    threshold: float = 0.005
     deduplicate: bool = False
     width: int | None = None
     height: int | None = None
@@ -128,7 +128,7 @@ class MediaConfig:
     release_curve: float = 1.0
     rearticulation_ticks: int = 2
     rail_mode: str = "auto:0.05"
-    map_drums: bool = True
+    map_drums: bool = False
     drum_gain: float = 0.25
     use_global_shift: bool = True
 
@@ -171,6 +171,11 @@ class MediaConfig:
         a += ["--fps", str(self.fps)]
         if self.adaptive:
             a.append("--adaptive")
+        else:
+            # The CLI defaults to adaptive ON — an explicit negative is
+            # required to actually disable it (previously adaptive=False was
+            # silently ignored and every API job ran adaptive anyway).
+            a.append("--no-adaptive")
         a += ["--threshold", str(self.threshold)]
         if self.deduplicate:
             a.append("--deduplicate")
