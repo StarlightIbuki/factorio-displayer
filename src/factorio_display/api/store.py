@@ -110,6 +110,11 @@ class Store:
         d = self.uploads_dir(principal) / upload_id
         d.mkdir(parents=True, exist_ok=True)
         safe_name = Path(filename or "upload.bin").name or "upload.bin"
+        if safe_name == "meta.json":
+            # The upload record for this dir is written to meta.json — a
+            # user file with that name would be silently overwritten by the
+            # metadata write (and rec.path would point at the JSON).
+            raise ValueError("filename 'meta.json' is reserved for upload metadata")
         (d / safe_name).write_bytes(data)
         rec = UploadRecord(
             upload_id=upload_id,

@@ -212,6 +212,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> list[UploadOut]:
         out: list[UploadOut] = []
         for file in files:
+            filename = file.filename or "upload.bin"
+            if Path(filename).name == "meta.json":
+                raise HTTPException(
+                    status_code=422,
+                    detail=_err(
+                        "reserved_filename",
+                        "filename 'meta.json' is reserved for upload metadata",
+                    ),
+                )
             data = await file.read()
             if len(data) > settings.max_upload_bytes:
                 raise HTTPException(
@@ -222,7 +231,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         f"(max {settings.max_upload_bytes} bytes)",
                     ),
                 )
-            rec = store.save_upload(principal, file.filename or "upload.bin", data)
+            rec = store.save_upload(principal, filename, data)
             out.append(UploadOut(**rec.to_dict()))
         return out
 

@@ -375,6 +375,24 @@ def test_upload_roundtrip(client: TestClient) -> None:
     assert client.get(f"/api/v1/uploads/{up['upload_id']}").status_code == 404
 
 
+def test_upload_named_meta_json_rejected(client: TestClient) -> None:
+    """``meta.json`` is the per-upload metadata filename; accepting a user
+    file with that name would let the metadata write silently overwrite the
+    upload (and rec.path would point at the JSON record)."""
+    r = client.post(
+        "/api/v1/uploads",
+        files=[("files", ("meta.json", b"attack surface", "application/octet-stream"))],
+    )
+    assert r.status_code == 422
+
+    # A similar-but-distinct name is fine.
+    r = client.post(
+        "/api/v1/uploads",
+        files=[("files", ("meta.json.gz", b"data", "application/octet-stream"))],
+    )
+    assert r.status_code == 201
+
+
 def test_encode_job_end_to_end(client: TestClient) -> None:
     """Upload a tiny PNG and encode it through the async subprocess job path."""
     r = client.post("/api/v1/uploads", files=[("files", ("tiny.png", _tiny_png_bytes(), "image/png"))])
