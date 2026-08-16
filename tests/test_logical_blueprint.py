@@ -430,6 +430,68 @@ class TestTomlRoundTrip:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Draftsman validation mode (FACTORIO_DISPLAY_DEBUG_VALIDATE gate)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestDraftsmanValidationMode:
+    """The production build path runs draftsman with ValidationMode.DISABLED
+    (its per-attribute validators dominate materialisation/serialisation);
+    the debug gate re-enables STRICT mode."""
+
+    def test_mode_follows_debug_gate(self, monkeypatch):
+        from draftsman import validators
+        from draftsman.constants import ValidationMode
+
+        from factorio_display.logical_blueprint import _apply_validation_mode
+
+        monkeypatch.setenv("FACTORIO_DISPLAY_DEBUG_VALIDATE", "1")
+        _apply_validation_mode()
+        assert validators.get_mode() is ValidationMode.STRICT
+
+        monkeypatch.delenv("FACTORIO_DISPLAY_DEBUG_VALIDATE")
+        _apply_validation_mode()
+        assert validators.get_mode() is ValidationMode.DISABLED
+
+        # Restore STRICT for the rest of the suite.
+        monkeypatch.setenv("FACTORIO_DISPLAY_DEBUG_VALIDATE", "1")
+        _apply_validation_mode()
+        assert validators.get_mode() is ValidationMode.STRICT
+
+    def test_disabled_mode_output_is_identical(self, monkeypatch):
+        """Serialising under ValidationMode.DISABLED must produce the same
+        blueprint string as STRICT — disabling validators only skips checks,
+        it never changes the output."""
+        from draftsman import validators
+        from draftsman.constants import ValidationMode
+
+        from factorio_display.logical_blueprint import to_draftsman
+        from factorio_display.video.encoder import _encode_frames_core, _piece_string
+        from factorio_display.integer2signal.mapping import SignalMapping
+        from factorio_display import QUALITIES, SIGNAL_POOL, CLOCK_SIGNAL
+
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        frames = [rng.integers(0, 256, (20, 24, 3), dtype=np.uint8) for _ in range(40)]
+        m = SignalMapping(24, 20, QUALITIES, SIGNAL_POOL)
+        mp = {"width": m.width, "height": m.height,
+              "qualities": m.qualities, "signal_pool": m.base_signals}
+        lb = _encode_frames_core(
+            kept_frames=frames, tick_ranges=[(i * 2, i * 2 + 1) for i in range(40)],
+            output_name="S", deduplicate=False, mapping_params=mp, clock=CLOCK_SIGNAL,
+            current_tick=80, label_suffix="", connectors=True, fragment_index=0,
+        )
+        try:
+            validators.set_mode(ValidationMode.STRICT)
+            s1 = _piece_string(to_draftsman(lb))
+            validators.set_mode(ValidationMode.DISABLED)
+            s2 = _piece_string(to_draftsman(lb))
+            assert s1 == s2
+        finally:
+            validators.set_mode(ValidationMode.STRICT)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Draftsman ↔ LogicalBlueprint round-trip
 # ═══════════════════════════════════════════════════════════════════════
 

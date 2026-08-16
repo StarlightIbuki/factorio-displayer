@@ -100,6 +100,36 @@ def _validations_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _apply_validation_mode() -> None:
+    """Align draftsman's validation mode with the project's debug gate.
+
+    When the project's own validations are OFF (the default build path),
+    also switch draftsman to ``ValidationMode.DISABLED`` so its
+    per-attribute validators are no-ops.  Those validators run on every
+    entity property set AND during ``to_dict`` serialisation — 100k+
+    calls for a modest piece — and dominate blueprint materialisation and
+    serialisation.  Draftsman's ``attr_validator`` reads the global mode
+    at call time, so ``set_mode`` short-circuits every already-decorated
+    validator without monkey-patching.
+
+    The test suite sets ``FACTORIO_DISPLAY_DEBUG_VALIDATE=1`` (conftest),
+    which keeps draftsman STRICT there so the validated paths stay
+    covered.
+    """
+    try:
+        from draftsman import validators  # pylint: disable=import-outside-toplevel
+        from draftsman.constants import ValidationMode  # pylint: disable=import-outside-toplevel
+
+        validators.set_mode(
+            ValidationMode.STRICT if _validations_enabled() else ValidationMode.DISABLED
+        )
+    except Exception:  # pylint: disable=broad-exception-caught — draftsman is optional here
+        pass
+
+
+_apply_validation_mode()
+
+
 @dataclass
 class Endpoint:
     """A specific connection point on a logical entity.
