@@ -2313,6 +2313,18 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                         object.__setattr__(cond, "constant", c["constant"])
                     if "compare_type" in c:
                         object.__setattr__(cond, "compare_type", c["compare_type"])
+                    # The Condition's *_signal_networks attrs default to a fresh
+                    # CircuitNetworkSelection (factory) — Draftsman's generated
+                    # to_dict unstructurer constructs another default and
+                    # compares it for *every* condition.  Neither our
+                    # serialisation nor the wiring path ever sets these (the
+                    # signal source network is the DC's wired side, expressed
+                    # via add_circuit_connection), so pin them to None to
+                    # short-circuit the branch — output is byte-identical
+                    # (the key is omitted either way) while skipping the
+                    # per-condition default construction + comparison.
+                    object.__setattr__(cond, "first_signal_networks", None)
+                    object.__setattr__(cond, "second_signal_networks", None)
                     conds.append(cond)
                 object.__setattr__(de, "conditions", conds)
 
@@ -2333,6 +2345,15 @@ def _to_draftsman_impl(lb: LogicalBlueprint, bp: Any | None = None, *, _validate
                         o.get("copy_count", False),
                     )
                     object.__setattr__(out_obj, "constant", o.get("constant", 0))
+                    # Same trick as the Condition networks above: Draftsman's
+                    # Output.networks factory-defaults to a fresh
+                    # CircuitNetworkSelection and the generated unstructurer
+                    # builds another default per output just to compare it
+                    # (~260k constructions for a large piece).  Our outputs
+                    # never set networks (wiring goes through
+                    # add_circuit_connection), so None short-circuits the
+                    # branch with byte-identical serialisation.
+                    object.__setattr__(out_obj, "networks", None)
                     outs.append(out_obj)
                 object.__setattr__(de, "outputs", outs)
 
