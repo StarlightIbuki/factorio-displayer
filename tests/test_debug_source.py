@@ -34,8 +34,16 @@ from factorio_display.logical_blueprint import (
 
 @pytest.fixture(autouse=True)
 def restore_trace_enabled():
-    """Restore the global TRACE_ENABLED flag after each test."""
+    """Force trace capture ON for capture-expecting tests and restore the
+    global TRACE_ENABLED flag afterwards.
+
+    The production default is OFF (debug metadata is a development aid);
+    these tests verify the capture paths, so they opt in explicitly.
+    ``TestTraceEnabledToggle`` shadows this fixture to exercise the raw
+    default/toggle instead.
+    """
     original = is_trace_enabled()
+    set_trace_enabled(True)
     yield
     set_trace_enabled(original)
 
@@ -253,10 +261,23 @@ class TestTopologySourceInErrors:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestTraceEnabledToggle:
-    def test_trace_enabled_defaults_to_true(self):
-        assert is_trace_enabled() is True
+    @pytest.fixture(autouse=True)
+    def restore_trace_enabled(self):
+        """Shadow the module fixture: the toggle tests exercise the raw
+        default and explicit toggles — do not force tracing on."""
+        yield
+
+    def test_trace_defaults_to_disabled(self):
+        """Debug source/trace metadata must be OFF by default: shipping it
+        bloats every blueprint (~200 B of internal file-path tags per
+        entity) and leaks project paths.  (Regression: the default was
+        enabled.)
+        """
+        from factorio_display.debug_source import _load_trace_enabled_from_env
+        assert _load_trace_enabled_from_env() is False
 
     def test_set_trace_enabled_returns_previous_value(self):
+        set_trace_enabled(True)
         previous = set_trace_enabled(False)
         assert previous is True
         assert is_trace_enabled() is False

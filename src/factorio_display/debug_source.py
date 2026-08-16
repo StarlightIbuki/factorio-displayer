@@ -25,16 +25,18 @@ def _load_trace_enabled_from_env() -> bool:
 
     * ``FACTORIO_DISPLAY_DEBUG_TRACE=1`` enables trace capture.
     * ``FACTORIO_DISPLAY_DEBUG_TRACE=0`` disables trace capture.
-    * An unset/empty variable defaults to enabled so existing behaviour is
-      preserved.
+    * An unset/empty variable defaults to DISABLED — source/trace metadata
+      is a development aid: shipping it bloats every blueprint (~200 B per
+      entity) and leaks internal file paths.  Enable it explicitly when
+      debugging.
     """
-    value = os.environ.get(_TRACE_ENABLED_ENV_VAR, "1").strip()
+    value = os.environ.get(_TRACE_ENABLED_ENV_VAR, "0").strip()
     return value != "" and value.lower() not in {"0", "false", "no", "off"}
 
 
 #: Global switch controlling whether debug source/trace metadata is captured.
-#: Disable this at runtime (or via ``FACTORIO_DISPLAY_DEBUG_TRACE=0``) to
-#: reduce blueprint size and memory overhead when traceability is not needed.
+#: OFF by default; enable at runtime via :func:`set_trace_enabled` or
+#: ``FACTORIO_DISPLAY_DEBUG_TRACE=1`` when traceability is needed.
 TRACE_ENABLED: bool = _load_trace_enabled_from_env()
 
 
