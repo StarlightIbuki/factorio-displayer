@@ -336,7 +336,9 @@ Together, these strategies ensure maximum note fidelity: the global shift aligns
 
 ## Roadmap
 
-1. **All-in-one blueprint** — generate a single, fully-wired blueprint that includes the display/audio decoder, memory banks, and clock combinator, ready to place with zero manual wiring.
-2. **Blueprint book output** — pack chunked memory blueprints into a Factorio blueprint book, with separated player blueprints for easy in-game organization.
-3. **More instruments & 5-octave support** — extend beyond the current 4-octave (F3–E7) range to a full 5-octave speaker matrix, and add support for more Factorio instrument prototypes.
-4. **Better display layout** — move power poles to the edges of the display grid (both sides) instead of placing them in the middle, for cleaner tiling when building large multi-unit screens.
+Planned work is tracked in [`docs/roadmap.md`](docs/roadmap.md). The former
+readme roadmap items (all-in-one blueprint, blueprint-book output, more
+instruments / 5-octave support, display power layout) are all implemented or
+superseded: piecewise chunked output is the default, small outputs are packed
+into a book automatically, the instrument family now spreads across F2–E9,
+and the display ships without power poles (the player places power in-game).

@@ -53,7 +53,7 @@ class MediaConfig:            # == encode subcommand options
     chunk_workers: int | None = None
     output_chunks_dir: str | None = None
     deduplicate_cross: bool = False
-    max_piece_mb: float = 1.0  # target max memory-piece size (MB; auto-split)
+    max_piece_mb: float = 2.0  # target max memory-piece size (MB; auto-split)
     # audio / midi
     ticks_per_beat: int = 30
     boost_melody: float = 1.0
@@ -276,7 +276,7 @@ Errors: unsupported type → `422` with detected type.
   // video options
   "skip": 1, "fps": 30, "adaptive": true, "threshold": 0.01,
   "deduplicate": false, "width": null, "height": null,
-  "time_chunks": 1, "chunk_workers": null, "max_piece_mb": 1.0,
+  "time_chunks": 1, "chunk_workers": null, "max_piece_mb": 2.0,
   // audio / midi options
   "ticks_per_beat": 30, "boost_melody": 1.5, "velocity_scale": 1.0,
   "attack_ticks": 10, "decay_ticks": 10, "sustain_level": 0.8, "release_ticks": 10,
@@ -358,7 +358,7 @@ queued → running → succeeded
 ```
 
 - A bounded **worker pool**; the cap is **configurable** via server settings:
-  - `--max-workers` — global concurrency (default = CPU count),
+  - `--max-workers` — global concurrency (default 2),
   - `--max-jobs-per-user` — per-user cap (default e.g. 2) to prevent one account from flooding the queue. In the unauthenticated core phase the "user" is the anonymous bucket; per-user caps become meaningful once auth lands (GitHub OAuth).
 - The **anonymous bucket** (`anonymous` — callers without their own token) is
   rate-limited separately and strictly, so anonymous traffic can't monopolize

@@ -16,9 +16,17 @@ speaker window (48 speakers cover `base .. base+47`):
 |------------|-----------|---------|---------------------------|
 | piano      | 53        | F3–E7   | matches instrument range  |
 | bass       | 41        | F2–E6   | covers bass F2–E5         |
-| celesta    | 65        | F4–E7   | overlaps celesta F5–E8    |
+| lead       | 41        | F2–E6   | synth lead, low           |
+| saw        | 41        | F2–E6   | synth saw, low            |
+| square     | 41        | F2–E6   | synth square, low         |
+| steel-drum | 53        | F3–E7   | low-mid                   |
+| celesta    | 77        | F5–E9   | high, covers celesta F5–E8 |
+| vibraphone | 77        | F5–E9   | high, above piano         |
 | plucked    | 65        | F4–E7   | matches plucked range     |
 | drum       | 53        | F3–E7   | covers drum F3–E6         |
+
+The melodic family deliberately spreads across octaves (F2..E9) so a
+multi-track song covers far more than piano's F3–E7.
 
 **GM drum map** (`GM_DRUM_MAP`) — maps standard GM percussion MIDI notes
 (24–81) to Factorio's 17 drum-kit sound names (kick-1, snare-1, hat-1, …).
@@ -120,24 +128,25 @@ Convenience wrapper around `build_multi_rail_decoder(instruments=[instrument])`.
 
 | Y      | Entity           | Purpose                        |
 |--------|------------------|--------------------------------|
-| 22     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
-| 22     | Lookup CCs       | sub-tick entries (t=0→60)      |
+| 24     | Mod AC (col 12)  | `clock % 60 → signal-M`        |
+| 23     | Lookup CCs       | sub-tick entries (t=0→60)      |
 | 20     | Match DCs        | `each==signal-M → signal=1`    |
-| 16     | Selector ACs     | `each(red)*each(green)→bell`   |
-| 16     | Page port (col12)| Constant combinator input      |
-| 14     | l1 AC            | `bell >> 21`                   |
-| 12     | s2 AC            | `bell >> 14`                   |
-| 10     | l2 AC            | `s2 & 127`                     |
-| 8      | s3 AC            | `bell >> 7`                    |
-| 6      | l3 AC            | `s3 & 127`                     |
-| 4      | l4 AC            | `bell & 127`                   |
-| 0–3    | Speakers (12×4)  | 48 programmable speakers       |
-| −4–−1  | Debug lamps (opt)| Blue glow = volume level       |
+| 18     | Selector ACs     | `each(red)*each(green)→bell`   |
+| 18     | Page port (col12)| Constant combinator input      |
+| 16     | l1 AC            | `bell >> 21`                   |
+| 14     | s2 AC            | `bell >> 14`                   |
+| 12     | l2 AC            | `s2 & 127`                     |
+| 10     | s3 AC            | `bell >> 7`                    |
+| 8      | l3 AC            | `s3 & 127`                     |
+| 6      | l4 AC            | `bell & 127`                   |
+| 2–5    | Speakers (12×4)  | 48 programmable speakers       |
+| −2–1   | Debug lamps (opt)| Blue glow = volume level       |
 
 Single-rail: 48 spk + 85 AC + 12 DC + 13 CC = **158** entities (206 with debug lamps).
 
-Match0 DCs handle sub_tick=0 (value-0 signals are dropped by Factorio).
-CC t=0 entry uses value 60 (never 0); other entries use t (1..59).
+Tick 0 of each page is silent by design: the LUT stores `ticks_per_page`
+(never 0) at the t=0 slot, so it can never match the `clock % tpp` output,
+and every other slot is non-zero (Factorio drops 0-value signals).
 
 Speaker wiring: each column's unpacker outputs + speakers form one red
 network, and the 12 columns of a rail are bridged into a **single** red
@@ -547,7 +556,7 @@ blueprint.
             ┌─────▼──────┐
             │  Display   │
             │ Lamp Grid  │
-            │  28×26     │
+            │  35×26     │
             └────────────┘
 ```
 
@@ -612,7 +621,7 @@ The display is a W×H grid of small-lamps (RGB), each assigned a unique
 - Every pixel (0..W-1, 0..H-1) is a lamp.
 - Red-wire chaining across rows + rightmost column for circuit connectivity.
 - Always generates dynamically — no pre-computed blueprint is used.
-- Default display size is **28×26** (W×H).
+- Default display size is **35×26** (W×H).
 
 ### encoder.py (video)
 `encode_frames(...)` — converts an iterable of RGB frames into a combinator
@@ -625,8 +634,12 @@ blueprint.
   - **Conditions**: clock-based tick-gating (`clock >= start AND clock <= end`).
   - **Outputs**: one per pixel — `signal = color_int` (RGB packed as `R<<16|G<<8|B`),
     only for non-black pixels.
-- DCs are laid out in a **snake-grid** (cols = `isqrt(2*count-1)+1`, max 26),
-  wired on a single **red** unified signal bus (both input and output sides).
+- DCs are laid out in a **fixed-width 10-column vertical-growth grid**
+  (`_MEMORY_BANK_COLS = 10`): rows grow downward as frames are added, with
+  the last row possibly partial, and the memory is wired on a single **red**
+  unified data bus plus a **green** time/clock bus.  (The old square
+  `isqrt(2*count-1)+1` snake packing was replaced by the fixed-width
+  vertical layout.)
 - **Deduplication**: identical frames share one DC with merged tick ranges.
 - **Adaptive mode**: near-duplicate frames are dropped, extending the previous
   frame's tick range.
