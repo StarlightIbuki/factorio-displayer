@@ -79,11 +79,29 @@ export async function compressVideo(file, { quality = "medium", maxDim = 256, on
   ctx.fillRect(0, 0, w, h); // prime the canvas before captureStream
 
   const stream = canvas.captureStream(30);
+  // Canvas capture is video-only: carry the SOURCE's audio tracks into the
+  // recorder's stream so a "video with sound" upload keeps its soundtrack
+  // (previously the compressed upload was always silent).
+  if (typeof video.captureStream === "function") {
+    const srcStream = video.captureStream();
+    for (const t of srcStream.getAudioTracks()) stream.addTrack(t);
+  }
   const mimeType = pickMime();
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: q.bitrate });
   const chunks = [];
   recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-  const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+  const stopped = new Promise((resolve, reject) => {
+    recorder.onstop = resolve;
+    recorder.onerror = () => reject(new Error("MediaRecorder failed while compressing the video"));
+  });
+  // Hang guard: if the video never ends (autoplay blocked, codec issue,
+  // seek error), stop the recorder after duration + 15 s so the caller's
+  // await settles instead of blocking the whole cache queue forever.
+  const hangTimer = setTimeout(() => {
+    if (recorder.state !== "inactive") {
+      try { recorder.stop(); } catch (_e) { /* already stopped */ }
+    }
+  }, ((video.duration || 60) * 1000) + 15000);
 
   recorder.start(500);
 
@@ -108,9 +126,15 @@ export async function compressVideo(file, { quality = "medium", maxDim = 256, on
 
   await video.play().catch(() => { /* muted autoplay is generally allowed */ });
   await stopped;
+  clearTimeout(hangTimer);
   URL.revokeObjectURL(url);
 
   const blob = new Blob(chunks, { type: "video/webm" });
+  if (!blob.size) {
+    // Nothing was recorded (e.g. the video never played and the hang guard
+    // stopped an empty recording) — let the caller keep the original file.
+    throw new Error("Video compression produced no data");
+  }
   blob.name = file.name.replace(/\.[^.]+$/i, "") + ".webm";
   return blob;
 }
