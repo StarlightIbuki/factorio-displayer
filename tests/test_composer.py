@@ -800,6 +800,60 @@ class TestLayoutOrdering:
             f"Connected A-B should remain compactly placed: AB={dist_ab}"
         )
 
+    def test_east_west_combinator_footprint_no_overlap(self):
+        """Auto-layout must never place an entity inside another entity's
+        TRUE footprint — including east/west combinators' 2×1 rects.
+
+        Regression: ``_entity_footprint`` tested ``direction in (2, 6)``
+        (the NE/SE diagonals) instead of ``(4, 12)`` for east/west, so a
+        2×1 combinator was reserved as 1×2 and the placer could drop a
+        neighbour onto its real footprint.
+        """
+        from factorio_display.logical_blueprint import LogicalBlueprint, LogicalEntity
+
+        def _true_footprint(ent) -> tuple[int, int]:
+            if ent.type in ("arithmetic-combinator", "decider-combinator"):
+                if ent.direction in (4, 12):  # east/west → 2×1
+                    return 2, 1
+                return 1, 2
+            return 1, 1
+
+        merged = LogicalBlueprint(label="Footprint")
+        # Pre-positioned east-facing AC at (0,0): true footprint (0,0)+(1,0).
+        merged.add_entity(LogicalEntity(
+            "pre", "arithmetic-combinator",
+            properties={
+                "first_operand": "signal-A", "operation": "+",
+                "second_operand": 1, "output_signal": "signal-A",
+            },
+            direction=4, position=(0, 0),
+        ))
+        # Enough unpositioned combinators that some must land near the anchor;
+        # with the buggy 1×2 reservation one of them lands on (1,0).
+        for i in range(6):
+            merged.add_entity(LogicalEntity(
+                f"other{i}", "arithmetic-combinator",
+                properties={
+                    "first_operand": "signal-A", "operation": "+",
+                    "second_operand": 1, "output_signal": "signal-A",
+                },
+                direction=12 if i % 2 else 0,
+            ))
+        _layout_components(merged, prefixes={"Footprint": ""})
+
+        occupied: dict[tuple[int, int], str] = {}
+        for eid, ent in merged.entities.items():
+            assert ent.position is not None, f"{eid} was not positioned"
+            w, h = _true_footprint(ent)
+            for dx in range(w):
+                for dy in range(h):
+                    tile = (ent.position[0] + dx, ent.position[1] + dy)
+                    assert tile not in occupied, (
+                        f"true-footprint overlap at {tile}: "
+                        f"{eid} vs {occupied[tile]}"
+                    )
+                    occupied[tile] = eid
+
     def test_unpositioned_components_are_auto_placed(self):
         """Layout should assign positions even when components have none."""
         from factorio_display.composer import PortConnection

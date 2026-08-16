@@ -380,7 +380,9 @@ def _layout_components(
         """Return a coarse tile footprint used for collision-free placement."""
         if ent.type in ("arithmetic-combinator", "decider-combinator"):
             # East/West combinators occupy 2x1, North/South occupy 1x2.
-            if ent.direction in (2, 6):
+            # Draftsman Directions: 4=east, 12=west (2/6 are the NE/SE
+            # diagonals, which combinators never use).
+            if ent.direction in (4, 12):
                 return 2, 1
             return 1, 2
         if ent.type == "substation":
