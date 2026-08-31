@@ -80,6 +80,17 @@ except ImportError:
             return self
         def __exit__(self, *args):
             pass
+        @staticmethod
+        def write(s="", file=None, end="\n", nolock=False):
+            f = file if file is not None else sys.stderr
+            f.write(s)
+            if end:
+                f.write(end)
+
+
+def _log(msg: str) -> None:
+    """Write *msg* to stderr, respecting any active tqdm progress bar."""
+    tqdm.write(msg, file=sys.stderr, end="")
 
 
 # ── UTF-8 path helpers for OpenCV on Windows ─────────────────────────────
@@ -532,7 +543,7 @@ def _encode_frames_core(
 
     total_input = len(kept_frames)
     if total_input == 0:
-        sys.stderr.write("No frames to encode.\n")
+        _log("No frames to encode.\n")
         return LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
 
     # Normalise tick_ranges: accept either flat list[tuple] or
@@ -547,10 +558,10 @@ def _encode_frames_core(
     frame_entries = [(f, ranges) for f, ranges in zip(kept_frames, ranges_per_frame)]
 
     if deduplicate:
-        seen: dict[int, tuple[np.ndarray, list[tuple[int, int]]]] = {}
-        order: list[int] = []
+        seen: dict[bytes, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[bytes] = []
         for resized, ranges in frame_entries:
-            h = hash(resized.tobytes())
+            h = hashlib.md5(resized.tobytes()).digest()
             if h not in seen:
                 seen[h] = (resized, [])
                 order.append(h)
@@ -661,13 +672,13 @@ def _encode_frames_core(
     total_ticks = current_tick - 1
     total_combinators = len(unique_frames)
     if deduplicate and total_combinators < total_input:
-        sys.stderr.write(
+        _log(
             f"\nEncoded {total_combinators} combinators for {total_input} frames "
             f"({total_input - total_combinators} deduplicated) "
             f"over {total_ticks} ticks.\n"
         )
     else:
-        sys.stderr.write(
+        _log(
             f"\nEncoded {total_input} frames over {total_ticks} ticks "
             f"(~{total_ticks / max(1, total_input):.1f} tick(s)/frame).\n"
         )
@@ -696,7 +707,7 @@ def _encode_frames_logical(
 
     total_input = len(kept_frames)
     if total_input == 0:
-        sys.stderr.write("No frames to encode.\n")
+        _log("No frames to encode.\n")
         return LogicalBlueprint(label=f"Video Memory: {output_name}{label_suffix}")
 
     # Normalise tick_ranges (same as _encode_frames_core)
@@ -709,10 +720,10 @@ def _encode_frames_logical(
     frame_entries = [(f, ranges) for f, ranges in zip(kept_frames, ranges_per_frame)]
 
     if deduplicate:
-        seen: dict[int, tuple[np.ndarray, list[tuple[int, int]]]] = {}
-        order: list[int] = []
+        seen: dict[bytes, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[bytes] = []
         for resized, ranges in frame_entries:
-            h = hash(resized.tobytes())
+            h = hashlib.md5(resized.tobytes()).digest()
             if h not in seen:
                 seen[h] = (resized, [])
                 order.append(h)
@@ -807,13 +818,13 @@ def _encode_frames_logical(
     total_ticks = current_tick - 1
     total_combinators = len(unique_frames)
     if deduplicate and total_combinators < total_input:
-        sys.stderr.write(
+        _log(
             f"\nEncoded {total_combinators} combinators for {total_input} frames "
             f"({total_input - total_combinators} deduplicated) "
             f"over {total_ticks} ticks.\n"
         )
     else:
-        sys.stderr.write(
+        _log(
             f"\nEncoded {total_input} frames over {total_ticks} ticks "
             f"(~{total_ticks / max(1, total_input):.1f} tick(s)/frame).\n"
         )
@@ -1054,7 +1065,7 @@ def _merge_chunk_blueprints(
     elif data_net_ids:
         merged.output_ports["data"] = data_net_ids[0]
 
-    sys.stderr.write(
+    _log(
         f"Merged {len(chunk_lbs)} time chunks "
         f"-> {len(merged.entities)} entities.\n"
     )
@@ -1099,7 +1110,7 @@ def encode_frames(
 
     # ── Power supply warning for large displays ───────────────────────
     if total_w > 28 and total_h > 28:
-        sys.stderr.write(
+        _log(
             f"Warning: Display is {total_w}×{total_h} — large lamp grids "
             f"may need multiple substations. Plan your power layout in-game.\n"
         )
@@ -1135,7 +1146,7 @@ def encode_frames(
     current_tick = 0
 
     if use_cache and frame_cache_file.exists():
-        sys.stderr.write(f"Found cache {frame_cache_file}, loading intermediate results...\n")
+        _log(f"Found cache {frame_cache_file}, loading intermediate results...\n")
         try:
             with open(frame_cache_file, "rb") as f:
                 cache_data = pickle.load(f)
@@ -1144,10 +1155,10 @@ def encode_frames(
                 current_tick = cache_data.get("current_tick", 0)
             loaded_from_cache = True
         except Exception as e:
-            sys.stderr.write(f"Failed to load cache: {e}\n")
+            _log(f"Failed to load cache: {e}\n")
 
     if not loaded_from_cache:
-        sys.stderr.write("Decoding, resizing, and processing frames...\n")
+        _log("Decoding, resizing, and processing frames...\n")
 
         def _resize_task(rgb):
             resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
@@ -1196,10 +1207,10 @@ def encode_frames(
                         "current_tick": current_tick,
                     }, f)
             except Exception as e:
-                sys.stderr.write(f"Failed to write cache: {e}\n")
+                _log(f"Failed to write cache: {e}\n")
 
     if not kept_frames:
-        sys.stderr.write("No frames to encode.\n")
+        _log("No frames to encode.\n")
         bp = Blueprint()
         bp.label = f"Video Memory: {output_name}"
         from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
@@ -1236,7 +1247,7 @@ def encode_frames(
             _toml_cache_file = make_cache_file("video_core", f"encode_core_{_core_cache_hash}", ".toml")
 
             if _toml_cache_file.exists():
-                sys.stderr.write(
+                _log(
                     f"Found TOML cache {_toml_cache_file}, "
                     f"skipping combinator build.\n"
                 )
@@ -1260,7 +1271,7 @@ def encode_frames(
         return result
 
     # ── Multi-chunk path ──────────────────────────────────────────────
-    sys.stderr.write(
+    _log(
         f"Display {total_w}×{total_h} ({total_pixels} px) exceeds pool "
         f"({available} signals). Splitting into {num_chunks} vertical "
         f"chunks of {total_w}×{chunk_height}.\n"
@@ -1307,7 +1318,7 @@ def encode_frames(
 
     if pending:
         workers = min(len(pending), (os.cpu_count() or 4))
-        sys.stderr.write(
+        _log(
             f"Building {len(pending)}/{num_chunks} vertical chunk(s) "
             f"with {workers} worker(s)…\n"
         )
@@ -1346,7 +1357,7 @@ def encode_frames(
                     if cm["cpath"] is not None:
                         _write_toml_cache_async(lb, cm["cpath"])
     else:
-        sys.stderr.write(f"All {num_chunks} vertical chunk(s) cached, skipping build.\n")
+        _log(f"All {num_chunks} vertical chunk(s) cached, skipping build.\n")
 
     # ── Merge chunk LogicalBlueprints (no spatial knowledge) ──────────
     merged = LogicalBlueprint(
@@ -1381,7 +1392,7 @@ def encode_frames(
             merged.output_ports[f"{prefix}data"] = prefix + old_data
 
     total_ticks = current_tick - 1
-    sys.stderr.write(
+    _log(
         f"\nEncoded {len(kept_frames)} frames over {total_ticks} ticks "
         f"across {num_chunks} vertical chunk(s).\n"
     )
@@ -1450,7 +1461,7 @@ def encode_frames_chunked(
     total_h = total_height if total_height is not None else DISPLAY_HEIGHT
 
     if total_w > 28 and total_h > 28:
-        sys.stderr.write(
+        _log(
             f"Warning: Display is {total_w}×{total_h} — large lamp grids "
             f"may need multiple substations. Plan your power layout in-game.\n"
         )
@@ -1466,7 +1477,7 @@ def encode_frames_chunked(
     current_tick = 0
 
     if use_cache and frame_cache_file.exists():
-        sys.stderr.write(f"Found cache {frame_cache_file}, loading intermediate results...\n")
+        _log(f"Found cache {frame_cache_file}, loading intermediate results...\n")
         try:
             with open(frame_cache_file, "rb") as f:
                 cache_data = pickle.load(f)
@@ -1474,11 +1485,11 @@ def encode_frames_chunked(
                 tick_ranges = cache_data["ticks"]
                 current_tick = cache_data.get("current_tick", 0)
         except Exception as e:
-            sys.stderr.write(f"Failed to load cache: {e}\n")
+            _log(f"Failed to load cache: {e}\n")
             kept_frames, tick_ranges, current_tick = [], [], 0
 
     if not kept_frames:
-        sys.stderr.write("Decoding, resizing, and processing frames...\n")
+        _log("Decoding, resizing, and processing frames...\n")
 
         def _resize_task(rgb):
             resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
@@ -1525,11 +1536,11 @@ def encode_frames_chunked(
                         "current_tick": current_tick,
                     }, f)
             except Exception as e:
-                sys.stderr.write(f"Failed to write cache: {e}\n")
+                _log(f"Failed to write cache: {e}\n")
 
     total_input = len(kept_frames)
     if total_input == 0:
-        sys.stderr.write("No frames to encode.\n")
+        _log("No frames to encode.\n")
         bp = Blueprint()
         bp.label = f"Video Memory: {output_name}"
         from ..logical_blueprint import _set_blueprint_icon  # pylint: disable=import-outside-toplevel
@@ -1567,10 +1578,10 @@ def encode_frames_chunked(
     # tick ranges (list[list[tuple[int,int]]]) so that when split into
     # chunks, identical frames never straddle chunk boundaries.
     if deduplicate_cross:
-        seen: dict[int, tuple[np.ndarray, list[tuple[int, int]]]] = {}
-        order: list[int] = []
+        seen: dict[bytes, tuple[np.ndarray, list[tuple[int, int]]]] = {}
+        order: list[bytes] = []
         for frame, (start, end) in zip(kept_frames, tick_ranges):
-            h = hash(frame.tobytes())
+            h = hashlib.md5(frame.tobytes()).digest()
             if h not in seen:
                 seen[h] = (frame, [])
                 order.append(h)
@@ -1579,7 +1590,7 @@ def encode_frames_chunked(
         kept_frames = [f for f, _ in deduped]
         tick_ranges = [ranges for _, ranges in deduped]
         total_input = len(kept_frames)
-        sys.stderr.write(
+        _log(
             f"Cross-chunk dedup: {total_input} unique frames "
             f"({sum(len(r) for r in tick_ranges) - total_input} duplicates removed).\n"
         )
@@ -1610,7 +1621,7 @@ def encode_frames_chunked(
         base_tick = ranges[0][0]
         return [(start - base_tick, end - base_tick) for start, end in ranges]
 
-    sys.stderr.write(
+    _log(
         f"Splitting {total_input} frames over {total_ticks} ticks "
         f"→ {time_chunks} time chunk(s) (~{chunk_size} frames each).\n"
     )
@@ -1640,7 +1651,7 @@ def encode_frames_chunked(
         if use_cache and cache_dir is not None:
             cpath = cache_dir / f"chunk_{ci:04d}.toml"
             if cpath.exists():
-                sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached, skipping.\n")
+                _log(f"Chunk {ci + 1}/{time_chunks}: cached, skipping.\n")
                 chunk_results[ci] = from_toml(cpath.read_text(encoding="utf-8"))
                 continue
         pending_indices.append(ci)
@@ -1657,7 +1668,7 @@ def encode_frames_chunked(
             (chunk_workers or min(os.cpu_count() or 1, _MAX_DEFAULT_WORKERS))
             if use_pool else 1
         )
-        sys.stderr.write(
+        _log(
             f"Building {len(pending_indices)} chunk(s) "
             f"{'with ' + str(workers) + ' worker(s)' if use_pool else 'in-process'} "
             f"(est {est_s:.2f}s)…\n"
@@ -1700,7 +1711,7 @@ def encode_frames_chunked(
             if use_cache and cache_dir is not None:
                 cpath = cache_dir / f"chunk_{ci:04d}.toml"
                 _write_toml_cache_async(lb, cpath)
-                sys.stderr.write(f"Chunk {ci + 1}/{time_chunks}: cached.\n")
+                _log(f"Chunk {ci + 1}/{time_chunks}: cached.\n")
 
         if use_pool:
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
@@ -1727,7 +1738,7 @@ def encode_frames_chunked(
         for ci, lb in enumerate(chunk_lbs):
             cpath = out_dir / f"chunk_{ci:04d}.toml"
             cpath.write_text(_to_toml(lb), encoding="utf-8")
-        sys.stderr.write(
+        _log(
             f"Wrote {len(chunk_lbs)} individual chunk TOML(s) "
             f"to {out_dir}/\n"
         )
@@ -1881,7 +1892,7 @@ def encode_frames_split(
     kept_frames: list[np.ndarray] = []
     tick_ranges: list[tuple[int, int]] = []
     current_tick = 0
-    sys.stderr.write("Decoding, resizing, and processing frames...\n")
+    _log("Decoding, resizing, and processing frames...\n")
 
     def _resize_task(rgb):
         resized = cv2.resize(rgb, (total_w, total_h), interpolation=cv2.INTER_AREA)
@@ -1996,7 +2007,7 @@ def encode_frames_split(
         workers = min(workers, len(payloads)) if payloads else 1
     else:
         workers = 1
-    sys.stderr.write(
+    _log(
         f"Splitting into {num_chunks} vertical chunk(s) × {effective_time_chunks} time "
         f"fragment(s) = {len(payloads)} memory piece(s), built "
         f"{'with ' + str(workers) + ' worker(s)' if use_pool else 'in-process'} "
@@ -2065,7 +2076,7 @@ def encode_video(
         detected = cap.get(cv2.CAP_PROP_FPS)
         fps = float(detected) if detected and detected > 0 else 30.0
         fps = max(1.0, min(fps, 60.0))
-        sys.stderr.write(f"Detected source FPS: {fps}\n")
+        _log(f"Detected source FPS: {fps}\n")
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     expected_frames = max(1, total_frames // fps_skip) if total_frames > 0 else None
@@ -2077,10 +2088,7 @@ def encode_video(
         source_w, source_h,
         width=total_width, height=total_height,
     )
-    sys.stderr.write(
-        f"Source: {source_w}×{source_h} -> output: {resolved_w}×{resolved_h}"
-    )
-    sys.stderr.write("\n")
+    _log(f"Source: {source_w}×{source_h} -> output: {resolved_w}×{resolved_h}\n")
 
     # Scale the FPS so skipped frames still preserve identical playback duration
     effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
@@ -2110,7 +2118,7 @@ def encode_video(
             and expected_frames is not None
             and expected_frames >= _PARALLEL_DECODE_MIN_FRAMES
         ):
-            sys.stderr.write(
+            _log(
                 f"Decoding {expected_frames} frame(s) in "
                 f"{min(_PARALLEL_DECODE_MAX_SEGMENTS, expected_frames)} "
                 f"parallel segment(s)...\n"
@@ -2178,10 +2186,7 @@ def encode_gif(
         source_w, source_h,
         width=total_width, height=total_height,
     )
-    sys.stderr.write(
-        f"Source GIF: {source_w}×{source_h} -> output: {resolved_w}×{resolved_h}"
-    )
-    sys.stderr.write("\n")
+    _log(f"Source GIF: {source_w}×{source_h} -> output: {resolved_w}×{resolved_h}\n")
 
     if fps <= 0:
         duration = gif.info.get("duration", 0)
@@ -2192,7 +2197,7 @@ def encode_gif(
             except Exception:
                 duration = 100
         fps = max(1.0, min(60.0, 1000.0 / duration)) if duration else 10.0
-        sys.stderr.write(f"Detected source FPS: {fps:.1f} (from GIF)\n")
+        _log(f"Detected source FPS: {fps:.1f} (from GIF)\n")
 
     try:
         expected_frames = max(1, getattr(gif, "n_frames", 1) // fps_skip)
@@ -2264,10 +2269,7 @@ def encode_png_series(
         source_w, source_h,
         width=total_width, height=total_height,
     )
-    sys.stderr.write(
-        f"Source image: {source_w}×{source_h} -> output: {resolved_w}×{resolved_h}"
-    )
-    sys.stderr.write("\n")
+    _log(f"Source image: {source_w}×{source_h} -> output: {resolved_w}×{resolved_h}\n")
 
     expected_frames = math.ceil(len(paths) / fps_skip)
     effective_fps = fps / float(fps_skip) if fps_skip > 0 else fps
@@ -2379,7 +2381,7 @@ def encode_auto(
         pngs = sorted(path.glob("*.png"))
         if not pngs:
             raise FileNotFoundError(f"No .png files found in directory: {input_path}")
-        sys.stderr.write(f"Found {len(pngs)} PNG(s) in {input_path}\n")
+        _log(f"Found {len(pngs)} PNG(s) in {input_path}\n")
         return encode_png_series(pngs, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                                   total_width=total_width, total_height=total_height,
                                   **chunk_kwargs)
@@ -2388,7 +2390,7 @@ def encode_auto(
         matches = sorted(Path().glob(input_path))
         if not matches:
             raise FileNotFoundError(f"No files match pattern: {input_path}")
-        sys.stderr.write(f"Matched {len(matches)} file(s) for pattern: {input_path}\n")
+        _log(f"Matched {len(matches)} file(s) for pattern: {input_path}\n")
         return encode_png_series(matches, output_name, fps_skip, fps, adaptive, threshold, deduplicate,
                                   total_width=total_width, total_height=total_height,
                                   **chunk_kwargs)

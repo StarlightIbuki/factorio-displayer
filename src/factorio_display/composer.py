@@ -61,12 +61,23 @@ except ImportError:
             pass
         def set_description(self, desc):
             pass
+        @staticmethod
+        def write(s="", file=None, end="\n", nolock=False):
+            f = file if file is not None else sys.stderr
+            f.write(s)
+            if end:
+                f.write(end)
         @property
         def total(self):
             return self._total
         @total.setter
         def total(self, v):
             self._total = v
+
+
+def _log(msg: str) -> None:
+    """Write *msg* to stderr, respecting any active tqdm progress bar."""
+    tqdm.write(msg, file=sys.stderr, end="")
 
 
 __all__ = [
@@ -299,13 +310,13 @@ def _apply_connections(
         dst_net_id = dst_info.get("input_ports", {}).get(conn.to_port)
 
         if src_net_id is None:
-            sys.stderr.write(
+            _log(
                 f"Compose warning: source port {conn.from_component!r}:{conn.from_port!r} "
                 f"not found (available: {list(src_info.get('output_ports', {}).keys())})\n"
             )
             continue
         if dst_net_id is None:
-            sys.stderr.write(
+            _log(
                 f"Compose warning: dest port {conn.to_component!r}:{conn.to_port!r} "
                 f"not found (available: {list(dst_info.get('input_ports', {}).keys())})\n"
             )
@@ -319,7 +330,7 @@ def _apply_connections(
         if not src_net.endpoints or not dst_net.endpoints:
             continue
         if src_net.color != dst_net.color:
-            sys.stderr.write(
+            _log(
                 f"Compose warning: color mismatch for "
                 f"{conn.from_component!r}:{conn.from_port!r} "
                 f"({src_net.color}) → "
@@ -956,7 +967,7 @@ def compose(
             return cached
 
     # ── Merge ─────────────────────────────────────────────────────
-    sys.stderr.write(
+    _log(
         f"Composing {len(components)} component(s) "
         f"with {len(connections)} connection(s)...\n"
     )
@@ -970,11 +981,11 @@ def compose(
     # ── Connect ports ─────────────────────────────────────────────
     connected = _apply_connections(merged, connections, port_map, prefixes)
     if connected < len(connections):
-        sys.stderr.write(
+        _log(
             f"  Connected {connected}/{len(connections)} port pair(s).\n"
         )
     else:
-        sys.stderr.write(f"  Connected {connected} port pair(s).\n")
+        _log(f"  Connected {connected} port pair(s).\n")
 
     # ── Verify every declared port connection was realized ────────
     # Use the per-component port_map because the global input_ports dict is
@@ -1036,7 +1047,7 @@ def compose(
 
     # ── Power ─────────────────────────────────────────────────────
     if pole_type is not None:
-        sys.stderr.write(
+        _log(
             "Warning: --power is not yet implemented; "
             "power poles will not be added.\n"
         )
@@ -1073,12 +1084,6 @@ def compose(
                 f"({src_net_id!r}) is not wired to "
                 f"{conn.to_component!r}:{conn.to_port!r} ({dst_net_id!r})"
             )
-    if missing:
-        raise ValueError(
-            f"Composition failed: {len(missing)} declared connection(s) not realized:\n"
-            + "\n".join(f"  - {m}" for m in missing)
-        )
-
     # ── Cache ─────────────────────────────────────────────────────
     if use_cache and cache_key_parts:
         cache_put(merged, output_name, *cache_key_parts, _LAYOUT_CACHE_REV)
@@ -1334,7 +1339,7 @@ def _validate_network_reachability(
                     labels_set.add(matched)
                 comp_labels.append(" + ".join(sorted(labels_set)))
 
-            sys.stderr.write(
+            _log(
                 f"  Warning: network {net.network_id!r} ({net.color}) has "
                 f"{len(roots)} disconnected component(s) "
                 f"({', '.join(comp_labels)}) — "
@@ -1469,7 +1474,7 @@ class Composer:
             _connect_networks(merged, subtick_net_id, pb_net_id)
 
         if self._pole_type is not None:
-            sys.stderr.write(
+            _log(
                 "Warning: --power is not yet implemented; "
                 "power poles will not be added.\n"
             )

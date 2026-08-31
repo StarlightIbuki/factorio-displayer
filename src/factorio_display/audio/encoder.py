@@ -863,13 +863,13 @@ def _midi_rails(
                 if kept_instruments:
                     instruments = kept_instruments
                     multi_data = kept_data
-                # If everything got filtered, keep the most active one
-                if not instruments:
+                else:
+                    # Everything got filtered — keep the single most active rail.
                     best = max(range(len(multi_data)), key=lambda i: sum(
                         1 for t in multi_data[i] if any(v > 0 for v in t)
                     ))
-                    instruments = [instruments[best]]  # type: ignore[index]
-                    instruments = [instruments[0]]
+                    instruments = [instruments[best]]
+                    multi_data = [multi_data[best]]
         else:
             # Comma-separated instrument names: "piano,bass,drum"
             instruments = [s.strip() for s in rail_mode.split(",") if s.strip()]
